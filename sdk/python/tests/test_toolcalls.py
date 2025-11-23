@@ -1,13 +1,13 @@
 import pytest
-import aiosqlite
 import time
+from agentfs.turso_async import connect
 from agentfs.toolcalls import ToolCalls, ToolCall, ToolCallStats
 
 
 @pytest.fixture
 async def toolcalls():
     """Create temporary ToolCalls for testing."""
-    db = await aiosqlite.connect(':memory:')
+    db = await connect(':memory:')
     tc = ToolCalls(db)
     await tc.ready()
     yield tc

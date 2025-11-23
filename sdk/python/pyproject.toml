@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "AgentFS Python SDK - Key-value store, filesystem, and tool tracking"
 requires-python = ">=3.11"
 dependencies = [
-    "aiosqlite>=0.20.0",
+    "libsql",
 ]
 
 [project.optional-dependencies]

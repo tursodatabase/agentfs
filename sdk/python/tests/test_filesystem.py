@@ -1,12 +1,12 @@
 import pytest
-import aiosqlite
+from agentfs.turso_async import connect
 from agentfs.filesystem import Filesystem, Stats
 
 
 @pytest.fixture
 async def filesystem():
     """Create temporary filesystem for testing."""
-    db = await aiosqlite.connect(':memory:')
+    db = await connect(':memory:')
     fs = Filesystem(db)
     await fs.ready()
     yield fs

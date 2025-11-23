@@ -1,5 +1,4 @@
 import pytest
-import aiosqlite
 import tempfile
 from pathlib import Path
 from agentfs import AgentFS

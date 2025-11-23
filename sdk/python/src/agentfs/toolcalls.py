@@ -1,8 +1,10 @@
 """Tool call tracking and statistics."""
 import json
 from dataclasses import dataclass
-from typing import Any, Optional, List, Literal
-import aiosqlite
+from typing import Any, Optional, List, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .turso_async import AsyncTursoConnection
 
 
 @dataclass
@@ -32,7 +34,7 @@ class ToolCallStats:
 class ToolCalls:
     """Async tool call tracking."""
 
-    def __init__(self, db: aiosqlite.Connection):
+    def __init__(self, db: "AsyncTursoConnection"):
         self._db = db
         self._ready = False
 
@@ -69,12 +71,12 @@ class ToolCalls:
         """Start tracking a tool call."""
         import time
         params_json = json.dumps(parameters) if parameters is not None else None
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             INSERT INTO tool_calls (name, parameters, started_at, status)
             VALUES (?, ?, ?, 'pending')
-        """, (name, params_json, int(time.time()))) as cursor:
-            await self._db.commit()
-            return cursor.lastrowid
+        """, (name, params_json, int(time.time())))
+        await self._db.commit()
+        return cursor.lastrowid
 
     async def success(self, call_id: int, result: Optional[Any] = None) -> None:
         """Mark tool call as successful."""
@@ -83,14 +85,14 @@ class ToolCalls:
         completed_at = int(time.time())
 
         # Get started_at to calculate duration
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT started_at FROM tool_calls WHERE id = ?
-        """, (call_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                duration_ms = (completed_at - row[0]) * 1000
-            else:
-                duration_ms = None
+        """, (call_id,))
+        row = await cursor.fetchone()
+        if row:
+            duration_ms = (completed_at - row[0]) * 1000
+        else:
+            duration_ms = None
 
         await self._db.execute("""
             UPDATE tool_calls
@@ -105,14 +107,14 @@ class ToolCalls:
         completed_at = int(time.time())
 
         # Get started_at to calculate duration
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT started_at FROM tool_calls WHERE id = ?
-        """, (call_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                duration_ms = (completed_at - row[0]) * 1000
-            else:
-                duration_ms = None
+        """, (call_id,))
+        row = await cursor.fetchone()
+        if row:
+            duration_ms = (completed_at - row[0]) * 1000
+        else:
+            duration_ms = None
 
         await self._db.execute("""
             UPDATE tool_calls
@@ -136,55 +138,55 @@ class ToolCalls:
         status = 'error' if error else 'success'
         duration_ms = (completed_at - started_at) * 1000
 
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             INSERT INTO tool_calls
             (name, parameters, result, error, status, started_at, completed_at, duration_ms)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (name, params_json, result_json, error, status, started_at, completed_at, duration_ms)) as cursor:
-            await self._db.commit()
-            return cursor.lastrowid
+        """, (name, params_json, result_json, error, status, started_at, completed_at, duration_ms))
+        await self._db.commit()
+        return cursor.lastrowid
 
     async def get(self, call_id: int) -> Optional[ToolCall]:
         """Get a specific tool call."""
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT id, name, parameters, result, error, status,
                    started_at, completed_at, duration_ms
             FROM tool_calls WHERE id = ?
-        """, (call_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row is None:
-                return None
-            return self._row_to_toolcall(row)
+        """, (call_id,))
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_toolcall(row)
 
     async def get_by_name(self, name: str, limit: int = 100) -> List[ToolCall]:
         """Get tool calls by name."""
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT id, name, parameters, result, error, status,
                    started_at, completed_at, duration_ms
             FROM tool_calls
             WHERE name = ?
             ORDER BY started_at DESC
             LIMIT ?
-        """, (name, limit)) as cursor:
-            rows = await cursor.fetchall()
-            return [self._row_to_toolcall(row) for row in rows]
+        """, (name, limit))
+        rows = await cursor.fetchall()
+        return [self._row_to_toolcall(row) for row in rows]
 
     async def get_recent(self, since: int, limit: int = 100) -> List[ToolCall]:
         """Get recent tool calls."""
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT id, name, parameters, result, error, status,
                    started_at, completed_at, duration_ms
             FROM tool_calls
             WHERE started_at >= ?
             ORDER BY started_at DESC
             LIMIT ?
-        """, (since, limit)) as cursor:
-            rows = await cursor.fetchall()
-            return [self._row_to_toolcall(row) for row in rows]
+        """, (since, limit))
+        rows = await cursor.fetchall()
+        return [self._row_to_toolcall(row) for row in rows]
 
     async def get_stats(self) -> List[ToolCallStats]:
         """Get aggregated statistics."""
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT
                 name,
                 COUNT(*) as total_calls,
@@ -193,18 +195,18 @@ class ToolCalls:
                 AVG(CASE WHEN status != 'pending' THEN duration_ms ELSE NULL END) as avg_duration_ms
             FROM tool_calls
             GROUP BY name
-        """) as cursor:
-            rows = await cursor.fetchall()
-            return [
-                ToolCallStats(
-                    name=row[0],
-                    total_calls=row[1],
-                    successful=row[2],
-                    failed=row[3],
-                    avg_duration_ms=row[4] or 0.0
-                )
-                for row in rows
-            ]
+        """)
+        rows = await cursor.fetchall()
+        return [
+            ToolCallStats(
+                name=row[0],
+                total_calls=row[1],
+                successful=row[2],
+                failed=row[3],
+                avg_duration_ms=row[4] or 0.0
+            )
+            for row in rows
+        ]
 
     def _row_to_toolcall(self, row) -> ToolCall:
         """Convert database row to ToolCall."""

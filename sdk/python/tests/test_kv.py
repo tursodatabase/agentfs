@@ -1,14 +1,12 @@
 import pytest
-import aiosqlite
-from pathlib import Path
-import tempfile
+from agentfs.turso_async import connect
 from agentfs.kv import KvStore
 
 
 @pytest.fixture
 async def kv_store():
     """Create temporary KvStore for testing."""
-    db = await aiosqlite.connect(':memory:')
+    db = await connect(':memory:')
     store = KvStore(db)
     await store.ready()
     yield store

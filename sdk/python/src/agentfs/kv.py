@@ -1,13 +1,15 @@
 """Key-value store with JSON serialization."""
 import json
-from typing import Any, Optional
-import aiosqlite
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .turso_async import AsyncTursoConnection
 
 
 class KvStore:
     """Async key-value store backed by SQLite."""
 
-    def __init__(self, db: aiosqlite.Connection):
+    def __init__(self, db: "AsyncTursoConnection"):
         self._db = db
         self._ready = False
 
@@ -45,14 +47,14 @@ class KvStore:
 
     async def get(self, key: str) -> Optional[Any]:
         """Retrieve a value with JSON deserialization."""
-        async with self._db.execute(
+        cursor = await self._db.execute(
             "SELECT value FROM kv_store WHERE key = ?",
             (key,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row is None:
-                return None
-            return json.loads(row[0])
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
 
     async def delete(self, key: str) -> None:
         """Delete a key."""

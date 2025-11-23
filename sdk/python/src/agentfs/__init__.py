@@ -1,6 +1,6 @@
 """AgentFS Python SDK - Key-value store, filesystem, and tool tracking."""
 from typing import Optional
-import aiosqlite
+from .turso_async import AsyncTursoConnection, connect as turso_connect
 from .kv import KvStore
 from .filesystem import Filesystem
 from .toolcalls import ToolCalls
@@ -12,7 +12,7 @@ class AgentFS:
     def __init__(self, db_path: str = ':memory:'):
         """Initialize AgentFS with database path."""
         self._db_path = db_path
-        self._db: Optional[aiosqlite.Connection] = None
+        self._db: Optional[AsyncTursoConnection] = None
         self._kv: Optional[KvStore] = None
         self._fs: Optional[Filesystem] = None
         self._tools: Optional[ToolCalls] = None
@@ -23,7 +23,7 @@ class AgentFS:
         if self._ready:
             return
 
-        self._db = await aiosqlite.connect(self._db_path)
+        self._db = await turso_connect(self._db_path)
         self._db.row_factory = None
 
         self._kv = KvStore(self._db)
@@ -64,7 +64,7 @@ class AgentFS:
             raise RuntimeError("AgentFS not initialized. Call await agentfs.ready() first.")
         return self._tools
 
-    def get_database(self) -> aiosqlite.Connection:
+    def get_database(self) -> AsyncTursoConnection:
         """Get underlying database connection."""
         if not self._db:
             raise RuntimeError("AgentFS not initialized.")

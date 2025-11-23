@@ -1,7 +1,9 @@
 """Unix-like filesystem with inodes and directory entries."""
 from dataclasses import dataclass
-from typing import List
-import aiosqlite
+from typing import List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .turso_async import AsyncTursoConnection
 
 
 # File type constants
@@ -37,7 +39,7 @@ class Stats:
 class Filesystem:
     """Async filesystem backed by SQLite."""
 
-    def __init__(self, db: aiosqlite.Connection):
+    def __init__(self, db: "AsyncTursoConnection"):
         self._db = db
         self._ready = False
 
@@ -69,7 +71,7 @@ class Filesystem:
                 name TEXT NOT NULL,
                 parent_ino INTEGER NOT NULL,
                 ino INTEGER NOT NULL,
-                FOREIGN KEY (ino) REFERENCES fs_inode(ino) ON DELETE CASCADE,
+                FOREIGN KEY (ino) REFERENCES fs_inode(ino),
                 UNIQUE(parent_ino, name)
             )
         """)
@@ -81,7 +83,7 @@ class Filesystem:
                 offset INTEGER NOT NULL,
                 size INTEGER NOT NULL,
                 data BLOB NOT NULL,
-                FOREIGN KEY (ino) REFERENCES fs_inode(ino) ON DELETE CASCADE
+                FOREIGN KEY (ino) REFERENCES fs_inode(ino)
             )
         """)
 
@@ -89,24 +91,24 @@ class Filesystem:
             CREATE TABLE IF NOT EXISTS fs_symlink (
                 ino INTEGER PRIMARY KEY,
                 target TEXT NOT NULL,
-                FOREIGN KEY (ino) REFERENCES fs_inode(ino) ON DELETE CASCADE
+                FOREIGN KEY (ino) REFERENCES fs_inode(ino)
             )
         """)
 
         await self._db.commit()
 
         # Create root directory if it doesn't exist
-        async with self._db.execute(
+        cursor = await self._db.execute(
             "SELECT ino FROM fs_inode WHERE ino = 1"
-        ) as cursor:
-            if await cursor.fetchone() is None:
-                import time
-                now = int(time.time())
-                await self._db.execute("""
-                    INSERT INTO fs_inode (ino, mode, uid, gid, size, atime, mtime, ctime)
-                    VALUES (1, ?, 0, 0, 0, ?, ?, ?)
-                """, (S_IFDIR | 0o755, now, now, now))
-                await self._db.commit()
+        )
+        if await cursor.fetchone() is None:
+            import time
+            now = int(time.time())
+            await self._db.execute("""
+                INSERT INTO fs_inode (ino, mode, uid, gid, size, atime, mtime, ctime)
+                VALUES (1, ?, 0, 0, 0, ?, ?, ?)
+            """, (S_IFDIR | 0o755, now, now, now))
+            await self._db.commit()
 
         self._ready = True
 
@@ -123,14 +125,14 @@ class Filesystem:
         current_ino = 1
 
         for part in parts:
-            async with self._db.execute("""
+            cursor = await self._db.execute("""
                 SELECT ino FROM fs_dentry
                 WHERE parent_ino = ? AND name = ?
-            """, (current_ino, part)) as cursor:
-                row = await cursor.fetchone()
-                if row is None:
-                    raise FileNotFoundError(f"No such file or directory: {path}")
-                current_ino = row[0]
+            """, (current_ino, part))
+            row = await cursor.fetchone()
+            if row is None:
+                raise FileNotFoundError(f"No such file or directory: {path}")
+            current_ino = row[0]
 
         return current_ino
 
@@ -138,12 +140,12 @@ class Filesystem:
         """Create new inode."""
         import time
         now = int(time.time())
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
             VALUES (?, 0, 0, 0, ?, ?, ?)
-        """, (mode, now, now, now)) as cursor:
-            await self._db.commit()
-            return cursor.lastrowid
+        """, (mode, now, now, now))
+        await self._db.commit()
+        return cursor.lastrowid
 
     async def _ensure_directory(self, path: str) -> int:
         """Ensure directory exists, creating if needed."""
@@ -200,54 +202,58 @@ class Filesystem:
     async def read_file(self, path: str) -> str:
         """Read file content."""
         ino = await self._resolve_path(path)
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT data FROM fs_data WHERE ino = ? ORDER BY offset
-        """, (ino,)) as cursor:
-            rows = await cursor.fetchall()
-            if not rows:
-                return ''
-            return b''.join(row[0] for row in rows).decode('utf-8')
+        """, (ino,))
+        rows = await cursor.fetchall()
+        if not rows:
+            return ''
+        return b''.join(row[0] for row in rows).decode('utf-8')
 
     async def readdir(self, path: str) -> List[str]:
         """List directory contents."""
         ino = await self._resolve_path(path)
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT name FROM fs_dentry WHERE parent_ino = ?
-        """, (ino,)) as cursor:
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+        """, (ino,))
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
 
     async def delete_file(self, path: str) -> None:
         """Delete file or directory."""
         ino = await self._resolve_path(path)
+        # Manual cascade since Turso doesnt support ON DELETE CASCADE
+        await self._db.execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
+        await self._db.execute("DELETE FROM fs_symlink WHERE ino = ?", (ino,))
+        await self._db.execute("DELETE FROM fs_dentry WHERE ino = ?", (ino,))
         await self._db.execute("DELETE FROM fs_inode WHERE ino = ?", (ino,))
         await self._db.commit()
 
     async def stat(self, path: str) -> Stats:
         """Get file statistics."""
         ino = await self._resolve_path(path)
-        async with self._db.execute("""
+        cursor = await self._db.execute("""
             SELECT ino, mode, uid, gid, size, atime, mtime, ctime
             FROM fs_inode WHERE ino = ?
-        """, (ino,)) as cursor:
-            row = await cursor.fetchone()
-            if row is None:
-                raise FileNotFoundError(path)
+        """, (ino,))
+        row = await cursor.fetchone()
+        if row is None:
+            raise FileNotFoundError(path)
 
-            # Count links
-            async with self._db.execute("""
-                SELECT COUNT(*) FROM fs_dentry WHERE ino = ?
-            """, (ino,)) as link_cursor:
-                nlink = (await link_cursor.fetchone())[0]
+        # Count links
+        link_cursor = await self._db.execute("""
+            SELECT COUNT(*) FROM fs_dentry WHERE ino = ?
+        """, (ino,))
+        nlink = (await link_cursor.fetchone())[0]
 
-            return Stats(
-                ino=row[0],
-                mode=row[1],
-                nlink=nlink,
-                uid=row[2],
-                gid=row[3],
-                size=row[4],
-                atime=row[5],
-                mtime=row[6],
-                ctime=row[7]
-            )
+        return Stats(
+            ino=row[0],
+            mode=row[1],
+            nlink=nlink,
+            uid=row[2],
+            gid=row[3],
+            size=row[4],
+            atime=row[5],
+            mtime=row[6],
+            ctime=row[7]
+        )
