@@ -2,7 +2,56 @@ use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 use turso::{Builder, Connection, Value};
+
+/// Filesystem-specific errors with errno semantics
+#[derive(Debug, Error)]
+pub enum FsError {
+    #[error("Path does not exist")]
+    NotFound,
+
+    #[error("Path already exists")]
+    AlreadyExists,
+
+    #[error("Directory not empty")]
+    NotEmpty,
+
+    #[error("Not a directory")]
+    NotADirectory,
+
+    #[error("Is a directory")]
+    IsADirectory,
+
+    #[error("Not a symbolic link")]
+    NotASymlink,
+
+    #[error("Invalid path")]
+    InvalidPath,
+
+    #[error("Cannot modify root directory")]
+    RootOperation,
+
+    #[error("Too many levels of symbolic links")]
+    SymlinkLoop,
+}
+
+impl FsError {
+    /// Convert to libc errno code
+    pub fn to_errno(&self) -> i32 {
+        match self {
+            FsError::NotFound => libc::ENOENT,
+            FsError::AlreadyExists => libc::EEXIST,
+            FsError::NotEmpty => libc::ENOTEMPTY,
+            FsError::NotADirectory => libc::ENOTDIR,
+            FsError::IsADirectory => libc::EISDIR,
+            FsError::NotASymlink => libc::EINVAL,
+            FsError::InvalidPath => libc::EINVAL,
+            FsError::RootOperation => libc::EPERM,
+            FsError::SymlinkLoop => libc::ELOOP,
+        }
+    }
+}
 
 // File types for mode field
 const S_IFMT: u32 = 0o170000; // File type mask
@@ -832,6 +881,145 @@ impl Filesystem {
                 .execute("DELETE FROM fs_inode WHERE ino = ?", (ino,))
                 .await?;
         }
+
+        Ok(())
+    }
+
+    /// Rename/move a file or directory
+    pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let from_path = self.normalize_path(from);
+        let to_path = self.normalize_path(to);
+
+        // Cannot rename root
+        if from_path == "/" {
+            return Err(FsError::RootOperation.into());
+        }
+
+        // Get source inode
+        let src_ino = self
+            .resolve_path(&from_path)
+            .await?
+            .ok_or(FsError::NotFound)?;
+
+        // Get source stats to check if it's a directory
+        let src_stats = self.stat(&from_path).await?.ok_or(FsError::NotFound)?;
+
+        // Parse source path to get parent and name
+        let from_components = self.split_path(&from_path);
+        let src_name = from_components.last().ok_or(FsError::InvalidPath)?;
+        let src_parent_path = if from_components.len() == 1 {
+            "/".to_string()
+        } else {
+            format!(
+                "/{}",
+                from_components[..from_components.len() - 1].join("/")
+            )
+        };
+        let src_parent_ino = self
+            .resolve_path(&src_parent_path)
+            .await?
+            .ok_or(FsError::NotFound)?;
+
+        // Parse destination path to get parent and name
+        let to_components = self.split_path(&to_path);
+        if to_components.is_empty() {
+            return Err(FsError::RootOperation.into());
+        }
+        let dst_name = to_components.last().unwrap();
+        let dst_parent_path = if to_components.len() == 1 {
+            "/".to_string()
+        } else {
+            format!("/{}", to_components[..to_components.len() - 1].join("/"))
+        };
+        let dst_parent_ino = self
+            .resolve_path(&dst_parent_path)
+            .await?
+            .ok_or(FsError::NotFound)?;
+
+        // Check if destination exists
+        if let Some(dst_ino) = self.resolve_path(&to_path).await? {
+            let dst_stats = self.stat(&to_path).await?.ok_or(FsError::NotFound)?;
+
+            // Can't replace directory with non-directory
+            if dst_stats.is_directory() && !src_stats.is_directory() {
+                return Err(FsError::IsADirectory.into());
+            }
+
+            // Can't replace non-directory with directory
+            if !dst_stats.is_directory() && src_stats.is_directory() {
+                return Err(FsError::NotADirectory.into());
+            }
+
+            // If destination is directory, it must be empty
+            if dst_stats.is_directory() {
+                let mut rows = self
+                    .conn
+                    .query(
+                        "SELECT COUNT(*) FROM fs_dentry WHERE parent_ino = ?",
+                        (dst_ino,),
+                    )
+                    .await?;
+
+                if let Some(row) = rows.next().await? {
+                    let count = row
+                        .get_value(0)
+                        .ok()
+                        .and_then(|v| v.as_integer().copied())
+                        .unwrap_or(0);
+                    if count > 0 {
+                        return Err(FsError::NotEmpty.into());
+                    }
+                }
+            }
+
+            // Remove destination entry
+            self.conn
+                .execute(
+                    "DELETE FROM fs_dentry WHERE parent_ino = ? AND name = ?",
+                    (dst_parent_ino, dst_name.as_str()),
+                )
+                .await?;
+
+            // Clean up destination inode if no more links
+            let link_count = self.get_link_count(dst_ino).await?;
+            if link_count == 0 {
+                self.conn
+                    .execute("DELETE FROM fs_data WHERE ino = ?", (dst_ino,))
+                    .await?;
+                self.conn
+                    .execute("DELETE FROM fs_symlink WHERE ino = ?", (dst_ino,))
+                    .await?;
+                self.conn
+                    .execute("DELETE FROM fs_inode WHERE ino = ?", (dst_ino,))
+                    .await?;
+            }
+        }
+
+        // Update the dentry: change parent and/or name
+        self.conn
+            .execute(
+                "UPDATE fs_dentry SET parent_ino = ?, name = ? WHERE parent_ino = ? AND name = ?",
+                (
+                    dst_parent_ino,
+                    dst_name.as_str(),
+                    src_parent_ino,
+                    src_name.as_str(),
+                ),
+            )
+            .await?;
+
+        // Update ctime of the inode
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn
+            .execute(
+                "UPDATE fs_inode SET ctime = ? WHERE ino = ?",
+                (now, src_ino),
+            )
+            .await?;
 
         Ok(())
     }

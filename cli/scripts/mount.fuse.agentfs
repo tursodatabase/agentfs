@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# Determine the path to agentfs
+if [ -n "$AGENTFS_BIN" ]; then
+    AGENTFS_PATH="$AGENTFS_BIN"
+else
+    AGENTFS_PATH="$(which agentfs 2>/dev/null)"
+    if [ -z "$AGENTFS_PATH" ]; then
+        echo "Error: agentfs binary not found. Please install agentfs or set AGENTFS_BIN." >&2
+        exit 1
+    fi
+fi
+
+"$AGENTFS_PATH" mount "$1" "$2"

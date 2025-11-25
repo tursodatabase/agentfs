@@ -41,7 +41,23 @@ Created agent filesystem: .agentfs/my-agent.db
 Agent ID: my-agent
 ```
 
-### 2. Run Programs in the Sandbox (experimental)
+### 2. Mount the AgentFS filesystem with FUSE (experimental)
+
+Mount an AgentFS filesystem on the host:
+
+```bash
+$ agentfs mount my-agent ./my-agent-mount
+```
+
+You can then use the mounted agentfs filesystem:
+
+```bash
+$ echo "hello, agentfs!" > ./my-agent-mount/hello.txt
+$ cat ./my-agent-mount/hello.txt
+hello, agentfs!
+```
+
+### 3. Run Programs in the Sandbox (experimental)
 
 Start any program with the agent filesystem mounted at `/agent`:
 

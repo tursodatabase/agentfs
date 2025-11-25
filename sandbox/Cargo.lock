@@ -88,13 +88,14 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sdk"
-version = "0.1.2"
+version = "0.2.0-pre.1"
 dependencies = [
  "anyhow",
  "async-trait",
  "libc",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "turso",
 ]

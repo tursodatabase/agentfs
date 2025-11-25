@@ -1,5 +1,11 @@
 mod cmd;
 
+#[cfg(target_os = "linux")]
+mod daemon;
+
+#[cfg(target_os = "linux")]
+mod fuse;
+
 // Non-Linux placeholder types for MountConfig (needed for CLI parsing)
 #[cfg(not(target_os = "linux"))]
 mod non_linux {
@@ -28,7 +34,7 @@ mod non_linux {
     }
 }
 
-use agentfs_sdk::AgentFS;
+use agentfs_sdk::{AgentFS, AgentFSOptions};
 use anyhow::{Context, Result as AnyhowResult};
 use clap::{Parser, Subcommand};
 use cmd::MountConfig;
@@ -76,6 +82,28 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Mount an agent filesystem using FUSE
+    Mount {
+        /// Agent ID or database path
+        #[arg(value_name = "ID_OR_PATH")]
+        id_or_path: String,
+
+        /// Mount point directory
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: PathBuf,
+
+        /// Automatically unmount on exit
+        #[arg(short = 'a', long)]
+        auto_unmount: bool,
+
+        /// Allow root user to access filesystem
+        #[arg(long)]
+        allow_root: bool,
+
+        /// Run in foreground (don't daemonize)
+        #[arg(short = 'f', long)]
+        foreground: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -99,13 +127,12 @@ enum FsCommands {
     },
 }
 
-async fn ls_filesystem(id: String, path: &str) -> AnyhowResult<()> {
-    let (agent_id, db_path) = resolve_agent_database(id)?;
-    eprintln!("Using agent: {}", agent_id);
+async fn ls_filesystem(id_or_path: String, path: &str) -> AnyhowResult<()> {
+    let options = AgentFSOptions::resolve(&id_or_path)?;
+    let db_path = options.path.context("No database path resolved")?;
+    eprintln!("Using agent: {}", id_or_path);
 
-    let db_path_str = db_path.to_str().context("Invalid filesystem path")?;
-
-    let db = Builder::new_local(db_path_str)
+    let db = Builder::new_local(&db_path)
         .build()
         .await
         .context("Failed to open filesystem")?;
@@ -186,12 +213,11 @@ async fn ls_filesystem(id: String, path: &str) -> AnyhowResult<()> {
     Ok(())
 }
 
-async fn cat_filesystem(id: String, path: &str) -> AnyhowResult<()> {
-    let (_agent_id, db_path) = resolve_agent_database(id)?;
+async fn cat_filesystem(id_or_path: String, path: &str) -> AnyhowResult<()> {
+    let options = AgentFSOptions::resolve(&id_or_path)?;
+    let db_path = options.path.context("No database path resolved")?;
 
-    let db_path_str = db_path.to_str().context("Invalid filesystem path")?;
-
-    let db = Builder::new_local(db_path_str)
+    let db = Builder::new_local(&db_path)
         .build()
         .await
         .context("Failed to open filesystem")?;
@@ -293,51 +319,7 @@ async fn cat_filesystem(id: String, path: &str) -> AnyhowResult<()> {
     Ok(())
 }
 
-/// Validates an agent ID to prevent path traversal and ensure safe filesystem operations.
-/// Returns true if the ID contains only alphanumeric characters, hyphens, and underscores.
-fn validate_agent_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
-fn resolve_agent_database(id_or_path: String) -> AnyhowResult<(String, PathBuf)> {
-    let agentfs_dir = Path::new(".agentfs");
-    let path = PathBuf::from(&id_or_path);
-
-    // First check if it's an existing file
-    if path.exists() {
-        let id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        Ok((id, path))
-    } else {
-        // Treat as an agent ID - validate for safety
-        if !validate_agent_id(&id_or_path) {
-            anyhow::bail!(
-                "Invalid agent ID '{}'. Agent IDs must contain only alphanumeric characters, hyphens, and underscores.",
-                id_or_path
-            );
-        }
-
-        // Look in .agentfs/
-        let db_path = agentfs_dir.join(format!("{}.db", id_or_path));
-        if !db_path.exists() {
-            anyhow::bail!(
-                "Agent '{}' not found at '{}'",
-                id_or_path,
-                db_path.display()
-            );
-        }
-        Ok((id_or_path, db_path))
-    }
-}
-
 async fn init_database(id: Option<String>, force: bool) -> AnyhowResult<()> {
-    use agentfs_sdk::AgentFSOptions;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Generate ID if not provided
@@ -350,7 +332,7 @@ async fn init_database(id: Option<String>, force: bool) -> AnyhowResult<()> {
     });
 
     // Validate agent ID for safety
-    if !validate_agent_id(&id) {
+    if !AgentFS::validate_agent_id(&id) {
         anyhow::bail!(
             "Invalid agent ID '{}'. Agent IDs must contain only alphanumeric characters, hyphens, and underscores.",
             id
@@ -379,47 +361,66 @@ async fn init_database(id: Option<String>, force: bool) -> AnyhowResult<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let args = Args::parse();
 
     match args.command {
         Commands::Init { id, force } => {
-            if let Err(e) = init_database(id, force).await {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            if let Err(e) = rt.block_on(init_database(id, force)) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            std::process::exit(0);
         }
-        Commands::Fs { command } => match command {
-            FsCommands::Ls {
-                id_or_path,
-                fs_path,
-            } => {
-                if let Err(e) = ls_filesystem(id_or_path, &fs_path).await {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
+        Commands::Fs { command } => {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            match command {
+                FsCommands::Ls {
+                    id_or_path,
+                    fs_path,
+                } => {
+                    if let Err(e) = rt.block_on(ls_filesystem(id_or_path, &fs_path)) {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
                 }
-                std::process::exit(0);
-            }
-            FsCommands::Cat {
-                id_or_path,
-                file_path,
-            } => {
-                if let Err(e) = cat_filesystem(id_or_path, &file_path).await {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
+                FsCommands::Cat {
+                    id_or_path,
+                    file_path,
+                } => {
+                    if let Err(e) = rt.block_on(cat_filesystem(id_or_path, &file_path)) {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
                 }
-                std::process::exit(0);
             }
-        },
+        }
         Commands::Run {
             mounts,
             strace,
             command,
             args,
         } => {
-            cmd::handle_run_command(mounts, strace, command, args).await;
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            rt.block_on(cmd::handle_run_command(mounts, strace, command, args));
+        }
+        Commands::Mount {
+            id_or_path,
+            mountpoint,
+            auto_unmount,
+            allow_root,
+            foreground,
+        } => {
+            if let Err(e) = cmd::mount(cmd::MountArgs {
+                id_or_path,
+                mountpoint,
+                auto_unmount,
+                allow_root,
+                foreground,
+            }) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 }
