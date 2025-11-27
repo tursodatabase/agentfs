@@ -548,17 +548,6 @@ impl Filesystem for AgentFSFuse {
             (result, from_path)
         });
 
-        // Prevent renaming a directory into its own subtree (would create a cycle)
-        if let Ok(Some(ref stats)) = src_stat {
-            if stats.is_directory() {
-                let from_prefix = format!("{}/", from_path);
-                if to_path.starts_with(&from_prefix) || to_path == from_path {
-                    reply.error(libc::EINVAL);
-                    return;
-                }
-            }
-        }
-
         let src_ino = src_stat.ok().flatten().map(|s| s.ino as u64);
 
         // Check if destination exists and get its inode for cache cleanup

@@ -34,6 +34,9 @@ pub enum FsError {
 
     #[error("Too many levels of symbolic links")]
     SymlinkLoop,
+
+    #[error("Cannot rename directory into its own subdirectory")]
+    InvalidRename,
 }
 
 impl FsError {
@@ -49,6 +52,7 @@ impl FsError {
             FsError::InvalidPath => libc::EINVAL,
             FsError::RootOperation => libc::EPERM,
             FsError::SymlinkLoop => libc::ELOOP,
+            FsError::InvalidRename => libc::EINVAL,
         }
     }
 }
@@ -903,6 +907,14 @@ impl Filesystem {
 
         // Get source stats to check if it's a directory
         let src_stats = self.stat(&from_path).await?.ok_or(FsError::NotFound)?;
+
+        // Prevent renaming a directory into its own subtree (would create a cycle)
+        if src_stats.is_directory() {
+            let from_prefix = format!("{}/", from_path);
+            if to_path.starts_with(&from_prefix) || to_path == from_path {
+                return Err(FsError::InvalidRename.into());
+            }
+        }
 
         // Parse source path to get parent and name
         let from_components = self.split_path(&from_path);
