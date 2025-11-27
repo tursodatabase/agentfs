@@ -334,11 +334,8 @@ impl Filesystem for AgentFSFuse {
                 reply.entry(&TTL, &attr, 0);
             }
             _ => {
-                // Fallback
-                let ino = self.next_fh.fetch_add(1000, Ordering::SeqCst) + 1000000;
-                self.add_path(ino, path);
-                let attr = make_attr(ino, 0, FileType::Directory, 0o755);
-                reply.entry(&TTL, &attr, 0);
+                // Fail the operation if we cannot stat the new directory
+                reply.error(libc::EIO);
             }
         }
     }
