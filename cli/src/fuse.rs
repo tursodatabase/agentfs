@@ -778,7 +778,7 @@ impl Filesystem for AgentFSFuse {
 
         let (used_blocks, used_inodes) = match result {
             Ok(stats) => {
-                let used_blocks = (stats.bytes_used + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                let used_blocks = stats.bytes_used.div_ceil(BLOCK_SIZE);
                 (used_blocks, stats.inodes)
             }
             Err(_) => (0, 1), // Fallback: just root inode
