@@ -12,7 +12,7 @@ cleanup() {
     # Remove mountpoint
     rmdir "$MOUNTPOINT" 2>/dev/null || true
     # Remove test database
-    rm -rf .agentfs
+    rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
 }
 
 # Ensure cleanup on exit
