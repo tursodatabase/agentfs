@@ -462,10 +462,9 @@ impl Filesystem for AgentFSFuse {
                 attr
             }
             _ => {
-                // Fallback: create a synthetic attr
-                let ino = self.next_fh.fetch_add(1000, Ordering::SeqCst) + 1000000;
-                self.add_path(ino, path.clone());
-                make_attr(ino, 0, FileType::RegularFile, 0o644)
+                // Fail the operation if we cannot stat the new file
+                reply.error(libc::EIO);
+                return;
             }
         };
 
@@ -891,33 +890,6 @@ fn fillattr(stats: &Stats) -> FileAttr {
         nlink: stats.nlink,
         uid: stats.uid,
         gid: stats.gid,
-        rdev: 0,
-        flags: 0,
-        blksize: 512,
-    }
-}
-
-/// Create a synthetic `FileAttr` with the given parameters.
-///
-/// Used as a fallback when we need to return attributes but don't have
-/// full stat information from the backend.
-fn make_attr(ino: u64, size: u64, kind: FileType, perm: u16) -> FileAttr {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    FileAttr {
-        ino,
-        size,
-        blocks: size.div_ceil(512),
-        atime: UNIX_EPOCH + now,
-        mtime: UNIX_EPOCH + now,
-        ctime: UNIX_EPOCH + now,
-        crtime: UNIX_EPOCH + now,
-        kind,
-        perm,
-        nlink: 1,
-        uid: unsafe { libc::getuid() },
-        gid: unsafe { libc::getgid() },
         rdev: 0,
         flags: 0,
         blksize: 512,
