@@ -83,6 +83,15 @@ pub struct Stats {
     pub ctime: i64,
 }
 
+/// Filesystem statistics for statfs
+#[derive(Debug, Clone)]
+pub struct FilesystemStats {
+    /// Total number of inodes (files, directories, symlinks)
+    pub inodes: u64,
+    /// Total bytes used by file contents
+    pub bytes_used: u64,
+}
+
 impl Stats {
     pub fn is_file(&self) -> bool {
         (self.mode & S_IFMT) == S_IFREG
@@ -1034,5 +1043,39 @@ impl Filesystem {
             .await?;
 
         Ok(())
+    }
+
+    /// Get filesystem statistics
+    ///
+    /// Returns the total number of inodes and bytes used by file contents.
+    pub async fn statfs(&self) -> Result<FilesystemStats> {
+        // Count total inodes
+        let mut rows = self.conn.query("SELECT COUNT(*) FROM fs_inode", ()).await?;
+
+        let inodes = if let Some(row) = rows.next().await? {
+            row.get_value(0)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u64
+        } else {
+            0
+        };
+
+        // Sum total bytes used (from file sizes in inodes)
+        let mut rows = self
+            .conn
+            .query("SELECT COALESCE(SUM(size), 0) FROM fs_inode", ())
+            .await?;
+
+        let bytes_used = if let Some(row) = rows.next().await? {
+            row.get_value(0)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u64
+        } else {
+            0
+        };
+
+        Ok(FilesystemStats { inodes, bytes_used })
     }
 }

@@ -765,22 +765,36 @@ impl Filesystem for AgentFSFuse {
 
     /// Returns filesystem statistics.
     ///
-    /// Reports virtual capacity limits to satisfy tools like `df`.
+    /// Queries actual usage from the SDK and reports it to tools like `df`.
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
-        // FIXME: We need a proper implementation here!
         const BLOCK_SIZE: u64 = 4096;
-        const TOTAL_BLOCKS: u64 = 1024 * 1024; // ~4GB virtual size
-        const FREE_BLOCKS: u64 = 1024 * 1024 - 1024;
-        const TOTAL_INODES: u64 = 1_000_000;
-        const FREE_INODES: u64 = 999_000;
+        const TOTAL_INODES: u64 = 1_000_000; // Virtual limit
         const MAX_NAMELEN: u32 = 255;
+
+        let agentfs = self.agentfs.clone();
+        let result = self
+            .runtime
+            .block_on(async move { agentfs.fs.statfs().await });
+
+        let (used_blocks, used_inodes) = match result {
+            Ok(stats) => {
+                let used_blocks = (stats.bytes_used + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                (used_blocks, stats.inodes)
+            }
+            Err(_) => (0, 1), // Fallback: just root inode
+        };
+
+        // Report a large virtual capacity so tools don't think we're out of space
+        const TOTAL_BLOCKS: u64 = 1024 * 1024 * 1024; // ~4TB virtual size
+        let free_blocks = TOTAL_BLOCKS.saturating_sub(used_blocks);
+        let free_inodes = TOTAL_INODES.saturating_sub(used_inodes);
 
         reply.statfs(
             TOTAL_BLOCKS,
-            FREE_BLOCKS,
-            FREE_BLOCKS,
+            free_blocks,
+            free_blocks,
             TOTAL_INODES,
-            FREE_INODES,
+            free_inodes,
             BLOCK_SIZE as u32,
             MAX_NAMELEN,       // namelen: maximum filename length
             BLOCK_SIZE as u32, // frsize: fragment size

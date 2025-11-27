@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use turso::{Builder, Connection};
 
-pub use filesystem::{Filesystem, FsError, Stats};
+pub use filesystem::{Filesystem, FilesystemStats, FsError, Stats};
 pub use kvstore::KvStore;
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
 
