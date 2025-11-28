@@ -1,4 +1,10 @@
 #[cfg(target_os = "linux")]
+mod mount;
+#[cfg(not(target_os = "linux"))]
+#[path = "mount_stub.rs"]
+mod mount;
+
+#[cfg(target_os = "linux")]
 mod run_linux;
 
 use std::path::PathBuf;
@@ -38,3 +44,5 @@ pub async fn handle_run_command(
         std::process::exit(1);
     }
 }
+
+pub use mount::{mount, MountArgs};

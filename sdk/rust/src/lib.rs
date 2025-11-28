@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use turso::{Builder, Connection};
 
-pub use filesystem::{Filesystem, Stats};
+pub use filesystem::{Filesystem, FilesystemStats, FsError, Stats};
 pub use kvstore::KvStore;
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
 
@@ -18,6 +18,9 @@ pub struct AgentFSOptions {
     /// - If Some(id): Creates persistent storage at `.agentfs/{id}.db`
     /// - If None: Uses ephemeral in-memory database
     pub id: Option<String>,
+    /// Optional custom path to the database file.
+    /// Takes precedence over `id` if both are set.
+    pub path: Option<String>,
 }
 
 impl AgentFSOptions {
@@ -25,12 +28,65 @@ impl AgentFSOptions {
     pub fn with_id(id: impl Into<String>) -> Self {
         Self {
             id: Some(id.into()),
+            path: None,
         }
     }
 
     /// Create options for an ephemeral in-memory agent
     pub fn ephemeral() -> Self {
-        Self { id: None }
+        Self {
+            id: None,
+            path: None,
+        }
+    }
+
+    /// Create options with a custom database path
+    pub fn with_path(path: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            path: Some(path.into()),
+        }
+    }
+
+    /// Resolve an id-or-path string to AgentFSOptions
+    ///
+    /// - `:memory:` -> ephemeral in-memory database
+    /// - Existing file path -> uses that path directly
+    /// - Otherwise -> treats as agent ID, looks for `.agentfs/{id}.db`
+    ///
+    /// Returns an error if the agent ID is invalid or the database doesn't exist.
+    pub fn resolve(id_or_path: impl Into<String>) -> Result<Self> {
+        let id_or_path = id_or_path.into();
+
+        if id_or_path == ":memory:" {
+            return Ok(Self::ephemeral());
+        }
+
+        let path = Path::new(&id_or_path);
+
+        if path.exists() {
+            Ok(Self::with_path(id_or_path))
+        } else {
+            // Treat as an agent ID - validate for safety
+            if !AgentFS::validate_agent_id(&id_or_path) {
+                anyhow::bail!(
+                    "Invalid agent ID '{}'. Agent IDs must contain only alphanumeric characters, hyphens, and underscores.",
+                    id_or_path
+                );
+            }
+
+            let db_path = Path::new(".agentfs").join(format!("{}.db", id_or_path));
+            if !db_path.exists() {
+                anyhow::bail!(
+                    "Agent '{}' not found at '{}'",
+                    id_or_path,
+                    db_path.display()
+                );
+            }
+            Ok(Self::with_path(db_path.to_str().ok_or_else(|| {
+                anyhow::anyhow!("Database path '{}' is not valid UTF-8", db_path.display())
+            })?))
+        }
     }
 }
 
@@ -65,8 +121,11 @@ impl AgentFS {
     /// # }
     /// ```
     pub async fn open(options: AgentFSOptions) -> Result<Self> {
-        // Determine database path based on id
-        let db_path = if let Some(id) = options.id {
+        // Determine database path: path takes precedence over id
+        let db_path = if let Some(path) = options.path {
+            // Custom path provided directly
+            path
+        } else if let Some(id) = options.id {
             // Validate agent ID to prevent path traversal attacks
             if !Self::validate_agent_id(&id) {
                 anyhow::bail!(
@@ -82,7 +141,7 @@ impl AgentFS {
             }
             format!(".agentfs/{}.db", id)
         } else {
-            // No id = ephemeral in-memory database
+            // No id or path = ephemeral in-memory database
             ":memory:".to_string()
         };
 
@@ -134,7 +193,7 @@ impl AgentFS {
 
     /// Validates an agent ID to prevent path traversal and ensure safe filesystem operations.
     /// Returns true if the ID contains only alphanumeric characters, hyphens, and underscores.
-    fn validate_agent_id(id: &str) -> bool {
+    pub fn validate_agent_id(id: &str) -> bool {
         !id.is_empty()
             && id
                 .chars()
@@ -247,5 +306,86 @@ mod tests {
         let stats = agentfs.tools.stats_for("test_tool").await.unwrap().unwrap();
         assert_eq!(stats.total_calls, 1);
         assert_eq!(stats.successful, 1);
+    }
+
+    #[test]
+    fn test_resolve_memory() {
+        let opts = AgentFSOptions::resolve(":memory:").unwrap();
+        assert!(opts.id.is_none());
+        assert!(opts.path.is_none());
+    }
+
+    #[test]
+    fn test_resolve_existing_file_path() {
+        // Create a temporary file to test with
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_resolve_existing.db");
+        std::fs::write(&temp_file, b"test").unwrap();
+
+        let opts = AgentFSOptions::resolve(temp_file.to_str().unwrap()).unwrap();
+        assert!(opts.id.is_none());
+        assert_eq!(opts.path, Some(temp_file.to_str().unwrap().to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_resolve_valid_agent_id_with_existing_db() {
+        // Setup: create .agentfs directory and a test database
+        let _ = std::fs::create_dir_all(".agentfs");
+        let db_path = std::path::Path::new(".agentfs").join("test-resolve-agent.db");
+        std::fs::write(&db_path, b"test").unwrap();
+
+        let opts = AgentFSOptions::resolve("test-resolve-agent").unwrap();
+        assert!(opts.id.is_none());
+        assert_eq!(opts.path, Some(db_path.to_string_lossy().to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_resolve_invalid_agent_id() {
+        // Agent IDs with path traversal should be rejected
+        let result = AgentFSOptions::resolve("../evil");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid agent ID"));
+
+        // Agent IDs with spaces should be rejected
+        let result = AgentFSOptions::resolve("invalid agent");
+        assert!(result.is_err());
+
+        // Agent IDs with special characters should be rejected
+        let result = AgentFSOptions::resolve("agent@test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_nonexistent_agent() {
+        let result = AgentFSOptions::resolve("nonexistent-agent-12345");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_valid_agent_id_formats() {
+        // Setup: create .agentfs directory and test databases
+        let _ = std::fs::create_dir_all(".agentfs");
+
+        // Test various valid ID formats
+        let valid_ids = ["my-agent", "my_agent", "MyAgent123", "agent-123_test"];
+
+        for id in valid_ids {
+            let db_path = std::path::Path::new(".agentfs").join(format!("{}.db", id));
+            std::fs::write(&db_path, b"test").unwrap();
+
+            let opts = AgentFSOptions::resolve(id).unwrap();
+            assert!(opts.id.is_none());
+            assert_eq!(opts.path, Some(db_path.to_string_lossy().to_string()));
+
+            // Cleanup
+            let _ = std::fs::remove_file(&db_path);
+        }
     }
 }

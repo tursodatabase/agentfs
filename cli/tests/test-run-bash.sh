@@ -6,7 +6,7 @@ echo -n "TEST interactive bash session... "
 TEST_AGENT_ID="test-bash-agent"
 
 # Clean up any existing test database
-rm -rf .agentfs
+rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
 
 # Initialize the database using agentfs init
 cargo run -- init "$TEST_AGENT_ID" > /dev/null 2>&1
@@ -21,11 +21,11 @@ cat /agent/hello.txt
 echo "$output" | grep -q "hello from agent" || {
     echo "FAILED"
     echo "$output"
-    rm -rf .agentfs
+    rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
     exit 1
 }
 
-# Cleanup
-rm -rf .agentfs
+# Cleanup test database only
+rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
 
 echo "OK"

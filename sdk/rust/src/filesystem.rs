@@ -2,7 +2,60 @@ use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 use turso::{Builder, Connection, Value};
+
+/// Filesystem-specific errors with errno semantics
+#[derive(Debug, Error)]
+pub enum FsError {
+    #[error("Path does not exist")]
+    NotFound,
+
+    #[error("Path already exists")]
+    AlreadyExists,
+
+    #[error("Directory not empty")]
+    NotEmpty,
+
+    #[error("Not a directory")]
+    NotADirectory,
+
+    #[error("Is a directory")]
+    IsADirectory,
+
+    #[error("Not a symbolic link")]
+    NotASymlink,
+
+    #[error("Invalid path")]
+    InvalidPath,
+
+    #[error("Cannot modify root directory")]
+    RootOperation,
+
+    #[error("Too many levels of symbolic links")]
+    SymlinkLoop,
+
+    #[error("Cannot rename directory into its own subdirectory")]
+    InvalidRename,
+}
+
+impl FsError {
+    /// Convert to libc errno code
+    pub fn to_errno(&self) -> i32 {
+        match self {
+            FsError::NotFound => libc::ENOENT,
+            FsError::AlreadyExists => libc::EEXIST,
+            FsError::NotEmpty => libc::ENOTEMPTY,
+            FsError::NotADirectory => libc::ENOTDIR,
+            FsError::IsADirectory => libc::EISDIR,
+            FsError::NotASymlink => libc::EINVAL,
+            FsError::InvalidPath => libc::EINVAL,
+            FsError::RootOperation => libc::EPERM,
+            FsError::SymlinkLoop => libc::ELOOP,
+            FsError::InvalidRename => libc::EINVAL,
+        }
+    }
+}
 
 // File types for mode field
 const S_IFMT: u32 = 0o170000; // File type mask
@@ -28,6 +81,15 @@ pub struct Stats {
     pub atime: i64,
     pub mtime: i64,
     pub ctime: i64,
+}
+
+/// Filesystem statistics for statfs
+#[derive(Debug, Clone)]
+pub struct FilesystemStats {
+    /// Total number of inodes (files, directories, symlinks)
+    pub inodes: u64,
+    /// Total bytes used by file contents
+    pub bytes_used: u64,
 }
 
 impl Stats {
@@ -590,6 +652,205 @@ impl Filesystem {
         Ok(Some(data))
     }
 
+    /// Read a portion of a file at a specific offset
+    pub async fn read_file_at(
+        &self,
+        path: &str,
+        offset: u64,
+        size: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let ino = match self.resolve_path(path).await? {
+            Some(ino) => ino,
+            None => return Ok(None),
+        };
+
+        // Use SQLite substr() to only read the requested portion
+        // Note: SQLite substr() is 1-indexed, so we add 1 to offset
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT substr(data, ?, ?) FROM fs_data WHERE ino = ? AND offset = 0",
+                (offset as i64 + 1, size as i64, ino),
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            match row.get_value(0) {
+                Ok(Value::Blob(data)) => Ok(Some(data.clone())),
+                Ok(Value::Null) => Ok(Some(Vec::new())),
+                _ => Ok(Some(Vec::new())),
+            }
+        } else {
+            Ok(Some(Vec::new()))
+        }
+    }
+
+    /// Write data to a file at a specific offset
+    ///
+    /// If the offset is beyond the current file size, the file is extended with zeros.
+    /// If the file doesn't exist, it will be created.
+    pub async fn write_file_at(&self, path: &str, offset: u64, new_data: &[u8]) -> Result<()> {
+        let path = self.normalize_path(path);
+        let components = self.split_path(&path);
+
+        if components.is_empty() {
+            anyhow::bail!("Cannot write to root directory");
+        }
+
+        let parent_path = if components.len() == 1 {
+            "/".to_string()
+        } else {
+            format!("/{}", components[..components.len() - 1].join("/"))
+        };
+
+        let parent_ino = self
+            .resolve_path(&parent_path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+
+        let name = components.last().unwrap();
+
+        // Get or create the inode
+        let ino = if let Some(ino) = self.resolve_path(&path).await? {
+            ino
+        } else {
+            // Create new inode
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+            self.conn
+                .execute(
+                    "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
+                    VALUES (?, 0, 0, 0, ?, ?, ?)",
+                    (DEFAULT_FILE_MODE as i64, now, now, now),
+                )
+                .await?;
+
+            let mut rows = self.conn.query("SELECT last_insert_rowid()", ()).await?;
+            let ino = if let Some(row) = rows.next().await? {
+                row.get_value(0)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .ok_or_else(|| anyhow::anyhow!("Failed to get inode"))?
+            } else {
+                anyhow::bail!("Failed to get inode");
+            };
+
+            // Create directory entry
+            self.conn
+                .execute(
+                    "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
+                    (name.as_str(), parent_ino, ino),
+                )
+                .await?;
+
+            ino
+        };
+
+        // Read existing data
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT data FROM fs_data WHERE ino = ? ORDER BY offset",
+                (ino,),
+            )
+            .await?;
+
+        let mut data = Vec::new();
+        while let Some(row) = rows.next().await? {
+            if let Ok(Value::Blob(chunk)) = row.get_value(0) {
+                data.extend_from_slice(&chunk);
+            }
+        }
+
+        // Extend with zeros if writing beyond current size
+        let offset = offset as usize;
+        let end = offset + new_data.len();
+        if end > data.len() {
+            data.resize(end, 0);
+        }
+
+        // Write the new data at the specified offset
+        data[offset..end].copy_from_slice(new_data);
+
+        // Delete old data and write new data
+        self.conn
+            .execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
+            .await?;
+
+        if !data.is_empty() {
+            self.conn
+                .execute(
+                    "INSERT INTO fs_data (ino, offset, size, data) VALUES (?, 0, ?, ?)",
+                    (ino, data.len() as i64, &data[..]),
+                )
+                .await?;
+        }
+
+        // Update size and mtime
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        self.conn
+            .execute(
+                "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
+                (data.len() as i64, now, ino),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Truncate a file to a specific size
+    pub async fn truncate(&self, path: &str, size: u64) -> Result<()> {
+        let path = self.normalize_path(path);
+        let ino = self
+            .resolve_path(&path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("File not found"))?;
+
+        // Read existing data
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT data FROM fs_data WHERE ino = ? ORDER BY offset",
+                (ino,),
+            )
+            .await?;
+
+        let mut data = Vec::new();
+        while let Some(row) = rows.next().await? {
+            if let Ok(Value::Blob(chunk)) = row.get_value(0) {
+                data.extend_from_slice(&chunk);
+            }
+        }
+
+        // Resize
+        let size = size as usize;
+        data.resize(size, 0);
+
+        // Delete old data and write new data
+        self.conn
+            .execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
+            .await?;
+
+        if !data.is_empty() {
+            self.conn
+                .execute(
+                    "INSERT INTO fs_data (ino, offset, size, data) VALUES (?, 0, ?, ?)",
+                    (ino, data.len() as i64, &data[..]),
+                )
+                .await?;
+        }
+
+        // Update size and mtime
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        self.conn
+            .execute(
+                "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
+                (data.len() as i64, now, ino),
+            )
+            .await?;
+
+        Ok(())
+    }
+
     /// List directory contents
     pub async fn readdir(&self, path: &str) -> Result<Option<Vec<String>>> {
         let ino = match self.resolve_path(path).await? {
@@ -834,5 +1095,186 @@ impl Filesystem {
         }
 
         Ok(())
+    }
+
+    /// Rename/move a file or directory
+    pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let from_path = self.normalize_path(from);
+        let to_path = self.normalize_path(to);
+
+        // Cannot rename root
+        if from_path == "/" {
+            return Err(FsError::RootOperation.into());
+        }
+
+        // Get source inode
+        let src_ino = self
+            .resolve_path(&from_path)
+            .await?
+            .ok_or(FsError::NotFound)?;
+
+        // Get source stats to check if it's a directory
+        let src_stats = self.stat(&from_path).await?.ok_or(FsError::NotFound)?;
+
+        // Prevent renaming a directory into its own subtree (would create a cycle)
+        if src_stats.is_directory() {
+            let from_prefix = format!("{}/", from_path);
+            if to_path.starts_with(&from_prefix) || to_path == from_path {
+                return Err(FsError::InvalidRename.into());
+            }
+        }
+
+        // Parse source path to get parent and name
+        let from_components = self.split_path(&from_path);
+        let src_name = from_components.last().ok_or(FsError::InvalidPath)?;
+        let src_parent_path = if from_components.len() == 1 {
+            "/".to_string()
+        } else {
+            format!(
+                "/{}",
+                from_components[..from_components.len() - 1].join("/")
+            )
+        };
+        let src_parent_ino = self
+            .resolve_path(&src_parent_path)
+            .await?
+            .ok_or(FsError::NotFound)?;
+
+        // Parse destination path to get parent and name
+        let to_components = self.split_path(&to_path);
+        if to_components.is_empty() {
+            return Err(FsError::RootOperation.into());
+        }
+        let dst_name = to_components.last().unwrap();
+        let dst_parent_path = if to_components.len() == 1 {
+            "/".to_string()
+        } else {
+            format!("/{}", to_components[..to_components.len() - 1].join("/"))
+        };
+        let dst_parent_ino = self
+            .resolve_path(&dst_parent_path)
+            .await?
+            .ok_or(FsError::NotFound)?;
+
+        // Check if destination exists
+        if let Some(dst_ino) = self.resolve_path(&to_path).await? {
+            let dst_stats = self.stat(&to_path).await?.ok_or(FsError::NotFound)?;
+
+            // Can't replace directory with non-directory
+            if dst_stats.is_directory() && !src_stats.is_directory() {
+                return Err(FsError::IsADirectory.into());
+            }
+
+            // Can't replace non-directory with directory
+            if !dst_stats.is_directory() && src_stats.is_directory() {
+                return Err(FsError::NotADirectory.into());
+            }
+
+            // If destination is directory, it must be empty
+            if dst_stats.is_directory() {
+                let mut rows = self
+                    .conn
+                    .query(
+                        "SELECT COUNT(*) FROM fs_dentry WHERE parent_ino = ?",
+                        (dst_ino,),
+                    )
+                    .await?;
+
+                if let Some(row) = rows.next().await? {
+                    let count = row
+                        .get_value(0)
+                        .ok()
+                        .and_then(|v| v.as_integer().copied())
+                        .unwrap_or(0);
+                    if count > 0 {
+                        return Err(FsError::NotEmpty.into());
+                    }
+                }
+            }
+
+            // Remove destination entry
+            self.conn
+                .execute(
+                    "DELETE FROM fs_dentry WHERE parent_ino = ? AND name = ?",
+                    (dst_parent_ino, dst_name.as_str()),
+                )
+                .await?;
+
+            // Clean up destination inode if no more links
+            let link_count = self.get_link_count(dst_ino).await?;
+            if link_count == 0 {
+                self.conn
+                    .execute("DELETE FROM fs_data WHERE ino = ?", (dst_ino,))
+                    .await?;
+                self.conn
+                    .execute("DELETE FROM fs_symlink WHERE ino = ?", (dst_ino,))
+                    .await?;
+                self.conn
+                    .execute("DELETE FROM fs_inode WHERE ino = ?", (dst_ino,))
+                    .await?;
+            }
+        }
+
+        // Update the dentry: change parent and/or name
+        self.conn
+            .execute(
+                "UPDATE fs_dentry SET parent_ino = ?, name = ? WHERE parent_ino = ? AND name = ?",
+                (
+                    dst_parent_ino,
+                    dst_name.as_str(),
+                    src_parent_ino,
+                    src_name.as_str(),
+                ),
+            )
+            .await?;
+
+        // Update ctime of the inode
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn
+            .execute(
+                "UPDATE fs_inode SET ctime = ? WHERE ino = ?",
+                (now, src_ino),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get filesystem statistics
+    ///
+    /// Returns the total number of inodes and bytes used by file contents.
+    pub async fn statfs(&self) -> Result<FilesystemStats> {
+        // Count total inodes
+        let mut rows = self.conn.query("SELECT COUNT(*) FROM fs_inode", ()).await?;
+
+        let inodes = if let Some(row) = rows.next().await? {
+            row.get_value(0)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u64
+        } else {
+            0
+        };
+
+        // Sum total bytes used (from file sizes in inodes)
+        let mut rows = self
+            .conn
+            .query("SELECT COALESCE(SUM(size), 0) FROM fs_inode", ())
+            .await?;
+
+        let bytes_used = if let Some(row) = rows.next().await? {
+            row.get_value(0)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u64
+        } else {
+            0
+        };
+
+        Ok(FilesystemStats { inodes, bytes_used })
     }
 }

@@ -3,10 +3,10 @@ set -e
 
 echo -n "TEST init... "
 
-# Cleanup any existing .agentfs directory
-rm -rf .agentfs
-
 TEST_AGENT_ID="test-agent"
+
+# Cleanup any existing test database (not the entire .agentfs directory!)
+rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
 
 # Test: Run init command with specific ID
 if ! output=$(cargo run -- init "$TEST_AGENT_ID" 2>&1); then
@@ -33,7 +33,7 @@ fi
 echo "$output" | grep -q "Created agent filesystem: .agentfs/$TEST_AGENT_ID.db" || {
     echo "FAILED: Expected success message not found in output"
     echo "Output was: $output"
-    rm -rf .agentfs
+    rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
     exit 1
 }
 
@@ -42,7 +42,7 @@ if cargo run -- init "$TEST_AGENT_ID" 2>&1 | grep -q "already exists"; then
     : # Expected behavior
 else
     echo "FAILED: init should fail when agent database already exists"
-    rm -rf .agentfs
+    rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
     exit 1
 fi
 
@@ -50,7 +50,7 @@ fi
 if ! output=$(cargo run -- init "$TEST_AGENT_ID" --force 2>&1); then
     echo "FAILED: init --force command failed"
     echo "Output was: $output"
-    rm -rf .agentfs
+    rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
     exit 1
 fi
 
@@ -58,11 +58,11 @@ fi
 echo "$output" | grep -q "Created agent filesystem: .agentfs/$TEST_AGENT_ID.db" || {
     echo "FAILED: Expected success message not found in init --force output"
     echo "Output was: $output"
-    rm -rf .agentfs
+    rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
     exit 1
 }
 
-# Cleanup
-rm -rf .agentfs
+# Cleanup test database only
+rm -f ".agentfs/${TEST_AGENT_ID}.db" ".agentfs/${TEST_AGENT_ID}.db-shm" ".agentfs/${TEST_AGENT_ID}.db-wal"
 
 echo "OK"

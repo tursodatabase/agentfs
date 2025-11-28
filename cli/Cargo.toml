@@ -15,13 +15,16 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 turso = "0.3.2"
 serde = { version = "1.0", features = ["derive"] }
+parking_lot = "0.12.5"
 
-# Linux-only dependencies for sandbox functionality
+# Linux-only dependencies for sandbox and FUSE functionality
 [target.'cfg(target_os = "linux")'.dependencies]
 agentfs-sandbox = { path = "../sandbox" }
 reverie = { git = "https://github.com/facebookexperimental/reverie" }
 reverie-ptrace = { git = "https://github.com/facebookexperimental/reverie" }
 reverie-process = { git = "https://github.com/facebookexperimental/reverie" }
+fuser = "0.15"
+libc = "0.2"
 
 # The profile that 'dist' will build with
 [profile.dist]

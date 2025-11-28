@@ -19,11 +19,11 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         ubuntu|debian)
             echo "Detected Debian/Ubuntu"
             sudo apt-get update
-            sudo apt-get install -y libunwind-dev liblzma-dev
+            sudo apt-get install -y libunwind-dev liblzma-dev libfuse3-dev
             ;;
         fedora|rhel|centos)
             echo "Detected Fedora/RHEL/CentOS"
-            sudo dnf install -y libunwind-devel xz-devel
+            sudo dnf install -y libunwind-devel xz-devel fuse3-devel
             ;;
         *)
             echo "Unsupported Linux distribution: $DISTRO"

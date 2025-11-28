@@ -77,6 +77,9 @@ dependencies = [
  "agentfs-sdk",
  "anyhow",
  "clap 4.5.53",
+ "fuser",
+ "libc",
+ "parking_lot",
  "reverie",
  "reverie-process",
  "reverie-ptrace",
@@ -110,6 +113,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "turso",
 ]
@@ -691,6 +695,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fuser"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53274f494609e77794b627b1a3cddfe45d675a6b2e9ba9c0fdc8d8eee2184369"
+dependencies = [
+ "libc",
+ "log",
+ "memchr",
+ "nix 0.29.0",
+ "page_size",
+ "pkg-config",
+ "smallvec",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1366,6 +1386,18 @@ checksum = "cf5a574dadd7941adeaa71823ecba5e28331b8313fb2e1c6a5c7e5981ea53ad6"
 
 [[package]]
 name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.10.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
+name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
@@ -1455,6 +1487,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6e7cd9bd638dc2c831519a0caa1c006cab771a92b1303403a8322773c5b72d6"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "page_size"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30d5b2194ed13191c1999ae0704b7839fb18384fa22e49b57eeaa97d79ce40da"
+dependencies = [
+ "libc",
+ "winapi 0.3.9",
 ]
 
 [[package]]
@@ -1738,7 +1780,7 @@ dependencies = [
  "linked-hash-map",
  "memmap2",
  "never-say-never",
- "nix",
+ "nix 0.30.1",
  "object",
  "procfs",
  "raw-cpuid",
@@ -1768,7 +1810,7 @@ dependencies = [
  "colored",
  "futures 0.3.31",
  "libc",
- "nix",
+ "nix 0.30.1",
  "serde",
  "syscalls",
  "thiserror",
@@ -1790,7 +1832,7 @@ dependencies = [
  "iced-x86",
  "lazy_static",
  "libc",
- "nix",
+ "nix 0.30.1",
  "num-traits",
  "paste",
  "perf-event-open-sys",
@@ -1815,7 +1857,7 @@ dependencies = [
  "bitflags 2.10.0",
  "derive_more",
  "libc",
- "nix",
+ "nix 0.30.1",
  "paste",
  "reverie-memory",
  "serde",
@@ -1929,7 +1971,7 @@ dependencies = [
  "futures 0.3.31",
  "lazy_static",
  "libc",
- "nix",
+ "nix 0.30.1",
  "parking_lot",
  "reverie-memory",
  "reverie-process",
