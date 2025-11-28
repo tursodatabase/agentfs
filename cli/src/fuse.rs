@@ -29,11 +29,9 @@ pub struct FuseMountOptions {
     pub fsname: String,
 }
 
-/// Tracks an open file's write buffer
+/// Tracks an open file handle
 struct OpenFile {
     path: String,
-    data: Vec<u8>,
-    dirty: bool,
 }
 
 struct AgentFSFuse {
@@ -122,45 +120,28 @@ impl Filesystem for AgentFSFuse {
     ) {
         // Handle truncate
         if let Some(new_size) = size {
-            if let Some(fh) = fh {
-                let mut open_files = self.open_files.lock();
-                if let Some(file) = open_files.get_mut(&fh) {
-                    file.data.resize(new_size as usize, 0);
-                    file.dirty = true;
-                }
+            let path = if let Some(fh) = fh {
+                // Get path from file handle
+                let open_files = self.open_files.lock();
+                open_files.get(&fh).map(|f| f.path.clone())
             } else {
-                // Truncate without open file handle - need to read, truncate, write
-                let Some(path) = self.path_cache.lock().get(&ino).cloned() else {
-                    reply.error(libc::ENOENT);
-                    return;
-                };
+                // Get path from inode cache
+                self.path_cache.lock().get(&ino).cloned()
+            };
 
-                let agentfs = self.agentfs.clone();
-                let (read_result, path) = self.runtime.block_on(async move {
-                    let result = agentfs.fs.read_file(&path).await;
-                    (result, path)
-                });
+            let Some(path) = path else {
+                reply.error(libc::ENOENT);
+                return;
+            };
 
-                let mut data = match read_result {
-                    Ok(Some(d)) => d,
-                    Ok(None) => Vec::new(),
-                    Err(_) => {
-                        reply.error(libc::EIO);
-                        return;
-                    }
-                };
+            let agentfs = self.agentfs.clone();
+            let result = self
+                .runtime
+                .block_on(async move { agentfs.fs.truncate(&path, new_size).await });
 
-                data.resize(new_size as usize, 0);
-
-                let agentfs = self.agentfs.clone();
-                let write_result = self
-                    .runtime
-                    .block_on(async move { agentfs.fs.write_file(&path, &data).await });
-
-                if write_result.is_err() {
-                    reply.error(libc::EIO);
-                    return;
-                }
+            if result.is_err() {
+                reply.error(libc::EIO);
+                return;
             }
         }
 
@@ -469,15 +450,7 @@ impl Filesystem for AgentFSFuse {
         };
 
         let fh = self.alloc_fh();
-        let mut open_files = self.open_files.lock();
-        open_files.insert(
-            fh,
-            OpenFile {
-                path,
-                data: Vec::new(),
-                dirty: false,
-            },
-        );
+        self.open_files.lock().insert(fh, OpenFile { path });
 
         reply.created(&TTL, &attr, 0, fh, 0);
     }
@@ -592,46 +565,22 @@ impl Filesystem for AgentFSFuse {
     // File I/O Lifecycle
     // ─────────────────────────────────────────────────────────────
 
-    /// Opens a file and loads its contents into memory.
+    /// Opens a file for reading or writing.
     ///
-    /// Allocates a file handle and reads the file data into an in-memory buffer.
-    /// Subsequent reads/writes operate on this buffer until flush or release.
+    /// Allocates a file handle. Reads and writes go directly to the database.
     fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
         let Some(path) = self.get_path(ino) else {
             reply.error(libc::ENOENT);
             return;
         };
 
-        // Read current file contents into buffer
-        let agentfs = self.agentfs.clone();
-        let (result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.read_file(&path).await;
-            (result, path)
-        });
-
-        let data = match result {
-            Ok(Some(data)) => data,
-            Ok(None) => Vec::new(),
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
-        };
-
         let fh = self.alloc_fh();
-        self.open_files.lock().insert(
-            fh,
-            OpenFile {
-                path,
-                data,
-                dirty: false,
-            },
-        );
+        self.open_files.lock().insert(fh, OpenFile { path });
 
         reply.opened(fh, 0);
     }
 
-    /// Reads data from an open file's in-memory buffer.
+    /// Reads data directly from the database.
     fn read(
         &mut self,
         _req: &Request,
@@ -643,25 +592,31 @@ impl Filesystem for AgentFSFuse {
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        let open_files = self.open_files.lock();
-        let Some(file) = open_files.get(&fh) else {
-            reply.error(libc::EBADF);
-            return;
+        let path = {
+            let open_files = self.open_files.lock();
+            let Some(file) = open_files.get(&fh) else {
+                reply.error(libc::EBADF);
+                return;
+            };
+            file.path.clone()
         };
 
-        let offset = offset as usize;
-        let size = size as usize;
-        if offset < file.data.len() {
-            let end = std::cmp::min(offset + size, file.data.len());
-            reply.data(&file.data[offset..end]);
-        } else {
-            reply.data(&[]);
+        let agentfs = self.agentfs.clone();
+        let result = self.runtime.block_on(async move {
+            agentfs
+                .fs
+                .read_file_at(&path, offset as u64, size as u64)
+                .await
+        });
+
+        match result {
+            Ok(Some(data)) => reply.data(&data),
+            Ok(None) => reply.data(&[]),
+            Err(_) => reply.error(libc::EIO),
         }
     }
 
-    /// Writes data to an open file's in-memory buffer.
-    ///
-    /// Marks the file as dirty for later flushing to the backend.
+    /// Writes data directly to the database.
     fn write(
         &mut self,
         _req: &Request,
@@ -674,65 +629,47 @@ impl Filesystem for AgentFSFuse {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let mut open_files = self.open_files.lock();
-        let Some(file) = open_files.get_mut(&fh) else {
-            reply.error(libc::EBADF);
-            return;
+        let path = {
+            let open_files = self.open_files.lock();
+            let Some(file) = open_files.get(&fh) else {
+                reply.error(libc::EBADF);
+                return;
+            };
+            file.path.clone()
         };
 
-        let offset = offset as usize;
-        let end = offset + data.len();
+        let agentfs = self.agentfs.clone();
+        let data_len = data.len();
+        let data_vec = data.to_vec();
+        let result = self.runtime.block_on(async move {
+            agentfs
+                .fs
+                .write_file_at(&path, offset as u64, &data_vec)
+                .await
+        });
 
-        // Extend buffer if needed
-        if end > file.data.len() {
-            file.data.resize(end, 0);
+        match result {
+            Ok(()) => reply.written(data_len as u32),
+            Err(_) => reply.error(libc::EIO),
         }
-
-        file.data[offset..end].copy_from_slice(data);
-        file.dirty = true;
-
-        reply.written(data.len() as u32);
     }
 
-    /// Flushes dirty data to the backend storage.
+    /// Flushes data to the backend storage.
     ///
-    /// Called when a file descriptor is closed (but file may still be open
-    /// via other descriptors). Writes the in-memory buffer if modified.
+    /// Since writes go directly to the database, this is a no-op.
     fn flush(&mut self, _req: &Request, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        let mut open_files = self.open_files.lock();
-        let Some(file) = open_files.get_mut(&fh) else {
-            reply.error(libc::EBADF);
-            return;
-        };
-
-        if file.dirty {
-            let agentfs = self.agentfs.clone();
-            let path = file.path.clone();
-            let data = file.data.clone();
-            drop(open_files);
-
-            let result = self
-                .runtime
-                .block_on(async move { agentfs.fs.write_file(&path, &data).await });
-
-            match result {
-                Ok(()) => {
-                    if let Some(f) = self.open_files.lock().get_mut(&fh) {
-                        f.dirty = false;
-                    }
-                    reply.ok();
-                }
-                Err(_) => reply.error(libc::EIO),
-            }
-        } else {
+        let open_files = self.open_files.lock();
+        if open_files.contains_key(&fh) {
             reply.ok();
+        } else {
+            reply.error(libc::EBADF);
         }
     }
 
     /// Releases (closes) an open file handle.
     ///
-    /// Flushes any remaining dirty data and removes the file handle from
-    /// the open files table.
+    /// Removes the file handle from the open files table.
+    /// Since writes go directly to the database, no flushing is needed.
     fn release(
         &mut self,
         _req: &Request,
@@ -743,24 +680,8 @@ impl Filesystem for AgentFSFuse {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        let Some(file) = self.open_files.lock().remove(&fh) else {
-            reply.ok();
-            return;
-        };
-
-        if file.dirty {
-            let agentfs = self.agentfs.clone();
-            let result = self
-                .runtime
-                .block_on(async move { agentfs.fs.write_file(&file.path, &file.data).await });
-
-            match result {
-                Ok(()) => reply.ok(),
-                Err(_) => reply.error(libc::EIO),
-            }
-        } else {
-            reply.ok();
-        }
+        self.open_files.lock().remove(&fh);
+        reply.ok();
     }
 
     /// Returns filesystem statistics.

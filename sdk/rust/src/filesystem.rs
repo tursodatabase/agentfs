@@ -652,6 +652,212 @@ impl Filesystem {
         Ok(Some(data))
     }
 
+    /// Read a portion of a file at a specific offset
+    pub async fn read_file_at(
+        &self,
+        path: &str,
+        offset: u64,
+        size: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let ino = match self.resolve_path(path).await? {
+            Some(ino) => ino,
+            None => return Ok(None),
+        };
+
+        // Read all data and return the requested portion
+        // TODO: optimize with SQLite substr() for large files
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT data FROM fs_data WHERE ino = ? ORDER BY offset",
+                (ino,),
+            )
+            .await?;
+
+        let mut data = Vec::new();
+        while let Some(row) = rows.next().await? {
+            if let Ok(Value::Blob(chunk)) = row.get_value(0) {
+                data.extend_from_slice(&chunk);
+            }
+        }
+
+        let offset = offset as usize;
+        let size = size as usize;
+
+        if offset >= data.len() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let end = std::cmp::min(offset + size, data.len());
+        Ok(Some(data[offset..end].to_vec()))
+    }
+
+    /// Write data to a file at a specific offset
+    ///
+    /// If the offset is beyond the current file size, the file is extended with zeros.
+    /// If the file doesn't exist, it will be created.
+    pub async fn write_file_at(&self, path: &str, offset: u64, new_data: &[u8]) -> Result<()> {
+        let path = self.normalize_path(path);
+        let components = self.split_path(&path);
+
+        if components.is_empty() {
+            anyhow::bail!("Cannot write to root directory");
+        }
+
+        let parent_path = if components.len() == 1 {
+            "/".to_string()
+        } else {
+            format!("/{}", components[..components.len() - 1].join("/"))
+        };
+
+        let parent_ino = self
+            .resolve_path(&parent_path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+
+        let name = components.last().unwrap();
+
+        // Get or create the inode
+        let ino = if let Some(ino) = self.resolve_path(&path).await? {
+            ino
+        } else {
+            // Create new inode
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+            self.conn
+                .execute(
+                    "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
+                    VALUES (?, 0, 0, 0, ?, ?, ?)",
+                    (DEFAULT_FILE_MODE as i64, now, now, now),
+                )
+                .await?;
+
+            let mut rows = self.conn.query("SELECT last_insert_rowid()", ()).await?;
+            let ino = if let Some(row) = rows.next().await? {
+                row.get_value(0)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .ok_or_else(|| anyhow::anyhow!("Failed to get inode"))?
+            } else {
+                anyhow::bail!("Failed to get inode");
+            };
+
+            // Create directory entry
+            self.conn
+                .execute(
+                    "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
+                    (name.as_str(), parent_ino, ino),
+                )
+                .await?;
+
+            ino
+        };
+
+        // Read existing data
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT data FROM fs_data WHERE ino = ? ORDER BY offset",
+                (ino,),
+            )
+            .await?;
+
+        let mut data = Vec::new();
+        while let Some(row) = rows.next().await? {
+            if let Ok(Value::Blob(chunk)) = row.get_value(0) {
+                data.extend_from_slice(&chunk);
+            }
+        }
+
+        // Extend with zeros if writing beyond current size
+        let offset = offset as usize;
+        let end = offset + new_data.len();
+        if end > data.len() {
+            data.resize(end, 0);
+        }
+
+        // Write the new data at the specified offset
+        data[offset..end].copy_from_slice(new_data);
+
+        // Delete old data and write new data
+        self.conn
+            .execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
+            .await?;
+
+        if !data.is_empty() {
+            self.conn
+                .execute(
+                    "INSERT INTO fs_data (ino, offset, size, data) VALUES (?, 0, ?, ?)",
+                    (ino, data.len() as i64, &data[..]),
+                )
+                .await?;
+        }
+
+        // Update size and mtime
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        self.conn
+            .execute(
+                "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
+                (data.len() as i64, now, ino),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Truncate a file to a specific size
+    pub async fn truncate(&self, path: &str, size: u64) -> Result<()> {
+        let path = self.normalize_path(path);
+        let ino = self
+            .resolve_path(&path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("File not found"))?;
+
+        // Read existing data
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT data FROM fs_data WHERE ino = ? ORDER BY offset",
+                (ino,),
+            )
+            .await?;
+
+        let mut data = Vec::new();
+        while let Some(row) = rows.next().await? {
+            if let Ok(Value::Blob(chunk)) = row.get_value(0) {
+                data.extend_from_slice(&chunk);
+            }
+        }
+
+        // Resize
+        let size = size as usize;
+        data.resize(size, 0);
+
+        // Delete old data and write new data
+        self.conn
+            .execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
+            .await?;
+
+        if !data.is_empty() {
+            self.conn
+                .execute(
+                    "INSERT INTO fs_data (ino, offset, size, data) VALUES (?, 0, ?, ?)",
+                    (ino, data.len() as i64, &data[..]),
+                )
+                .await?;
+        }
+
+        // Update size and mtime
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        self.conn
+            .execute(
+                "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
+                (data.len() as i64, now, ino),
+            )
+            .await?;
+
+        Ok(())
+    }
+
     /// List directory contents
     pub async fn readdir(&self, path: &str) -> Result<Option<Vec<String>>> {
         let ino = match self.resolve_path(path).await? {
