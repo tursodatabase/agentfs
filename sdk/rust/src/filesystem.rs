@@ -664,32 +664,25 @@ impl Filesystem {
             None => return Ok(None),
         };
 
-        // Read all data and return the requested portion
-        // TODO: optimize with SQLite substr() for large files
+        // Use SQLite substr() to only read the requested portion
+        // Note: SQLite substr() is 1-indexed, so we add 1 to offset
         let mut rows = self
             .conn
             .query(
-                "SELECT data FROM fs_data WHERE ino = ? ORDER BY offset",
-                (ino,),
+                "SELECT substr(data, ?, ?) FROM fs_data WHERE ino = ? AND offset = 0",
+                (offset as i64 + 1, size as i64, ino),
             )
             .await?;
 
-        let mut data = Vec::new();
-        while let Some(row) = rows.next().await? {
-            if let Ok(Value::Blob(chunk)) = row.get_value(0) {
-                data.extend_from_slice(&chunk);
+        if let Some(row) = rows.next().await? {
+            match row.get_value(0) {
+                Ok(Value::Blob(data)) => Ok(Some(data.clone())),
+                Ok(Value::Null) => Ok(Some(Vec::new())),
+                _ => Ok(Some(Vec::new())),
             }
+        } else {
+            Ok(Some(Vec::new()))
         }
-
-        let offset = offset as usize;
-        let size = size as usize;
-
-        if offset >= data.len() {
-            return Ok(Some(Vec::new()));
-        }
-
-        let end = std::cmp::min(offset + size, data.len());
-        Ok(Some(data[offset..end].to_vec()))
     }
 
     /// Write data to a file at a specific offset
