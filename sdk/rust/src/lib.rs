@@ -7,7 +7,12 @@ use std::path::Path;
 use std::sync::Arc;
 use turso::{Builder, Connection};
 
-pub use filesystem::{Filesystem, FilesystemStats, FsError, Stats};
+// Re-export filesystem types
+pub use filesystem::{
+    AgentFS as Filesystem, // Backward compatibility alias
+    FileSystem, FilesystemStats, FsError, HostFS, OverlayFS, Stats,
+    DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG,
+};
 pub use kvstore::KvStore;
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
 
