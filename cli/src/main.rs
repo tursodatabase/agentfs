@@ -60,6 +60,10 @@ enum Commands {
         /// Overwrite existing file if it exists
         #[arg(long)]
         force: bool,
+
+        /// Base directory for overlay filesystem (copy-on-write)
+        #[arg(long)]
+        base: Option<PathBuf>,
     },
     /// Filesystem operations
     Fs {
@@ -327,7 +331,11 @@ async fn cat_filesystem(id_or_path: String, path: &str) -> AnyhowResult<()> {
     Ok(())
 }
 
-async fn init_database(id: Option<String>, force: bool) -> AnyhowResult<()> {
+async fn init_database(
+    id: Option<String>,
+    force: bool,
+    base: Option<PathBuf>,
+) -> AnyhowResult<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Generate ID if not provided
@@ -347,6 +355,16 @@ async fn init_database(id: Option<String>, force: bool) -> AnyhowResult<()> {
         );
     }
 
+    // Validate base directory if provided
+    if let Some(ref base_path) = base {
+        if !base_path.exists() {
+            anyhow::bail!("Base directory does not exist: {}", base_path.display());
+        }
+        if !base_path.is_dir() {
+            anyhow::bail!("Base path is not a directory: {}", base_path.display());
+        }
+    }
+
     // Check if agent already exists
     let db_path = Path::new(".agentfs").join(format!("{}.db", id));
     if db_path.exists() && !force {
@@ -359,12 +377,64 @@ async fn init_database(id: Option<String>, force: bool) -> AnyhowResult<()> {
 
     // Use the SDK to initialize the database - this ensures consistency
     // The SDK will create .agentfs directory and database file
-    AgentFS::open(AgentFSOptions::with_id(&id))
+    let agent = AgentFS::open(AgentFSOptions::with_id(&id))
         .await
         .context("Failed to initialize database")?;
 
-    eprintln!("Created agent filesystem: {}", db_path.display());
-    eprintln!("Agent ID: {}", id);
+    // If base is provided, store the overlay configuration
+    if let Some(base_path) = base {
+        let conn = agent.get_connection();
+
+        // Create whiteout table for overlay support
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fs_whiteout (
+                path TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL
+            )",
+            (),
+        )
+        .await
+        .context("Failed to create whiteout table")?;
+
+        // Create overlay config table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fs_overlay_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            (),
+        )
+        .await
+        .context("Failed to create overlay config table")?;
+
+        // Store base path configuration
+        let base_path_str = base_path
+            .canonicalize()
+            .context("Failed to canonicalize base path")?
+            .to_string_lossy()
+            .to_string();
+
+        conn.execute(
+            "INSERT INTO fs_overlay_config (key, value) VALUES ('base_type', 'hostfs')",
+            (),
+        )
+        .await
+        .context("Failed to store base type")?;
+
+        conn.execute(
+            "INSERT INTO fs_overlay_config (key, value) VALUES ('base_path', ?)",
+            (base_path_str.as_str(),),
+        )
+        .await
+        .context("Failed to store base path")?;
+
+        eprintln!("Created overlay filesystem: {}", db_path.display());
+        eprintln!("Agent ID: {}", id);
+        eprintln!("Base: {}", base_path_str);
+    } else {
+        eprintln!("Created agent filesystem: {}", db_path.display());
+        eprintln!("Agent ID: {}", id);
+    }
 
     Ok(())
 }
@@ -373,9 +443,9 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
-        Commands::Init { id, force } => {
+        Commands::Init { id, force, base } => {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            if let Err(e) = rt.block_on(init_database(id, force)) {
+            if let Err(e) = rt.block_on(init_database(id, force, base)) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
