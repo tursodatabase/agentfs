@@ -1,9 +1,9 @@
 fn main() {
-    // On Linux, libunwind-ptrace.so may depend on liblzma.
-    #[cfg(target_os = "linux")]
+    // Sandbox uses libunwind-ptrace which depends on liblzma and gcc_s.
+    // Only available on Linux x86_64.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         println!("cargo:rustc-link-lib=lzma");
-        // libgcc_s provides _Unwind_RaiseException and other exception handling symbols
         println!("cargo:rustc-link-lib=dylib=gcc_s");
     }
 }

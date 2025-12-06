@@ -17,14 +17,17 @@ turso = "0.3.2"
 serde = { version = "1.0", features = ["derive"] }
 parking_lot = "0.12.5"
 
-# Linux-only dependencies for sandbox and FUSE functionality
+# Linux-only dependencies for FUSE functionality
 [target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.15", default-features = false, features = ["abi-7-23"] }
+libc = "0.2"
+
+# Sandbox dependencies - Linux x86_64 only (requires libunwind-ptrace)
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 agentfs-sandbox = { path = "../sandbox" }
 reverie = { git = "https://github.com/facebookexperimental/reverie" }
 reverie-ptrace = { git = "https://github.com/facebookexperimental/reverie" }
 reverie-process = { git = "https://github.com/facebookexperimental/reverie" }
-fuser = { version = "0.15", default-features = false, features = ["abi-7-23"] }
-libc = "0.2"
 
 # The profile that 'dist' will build with
 [profile.dist]
