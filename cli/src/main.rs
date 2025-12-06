@@ -6,34 +6,6 @@ mod daemon;
 #[cfg(target_os = "linux")]
 mod fuse;
 
-// Non-Linux placeholder types for MountConfig (needed for CLI parsing)
-#[cfg(not(target_os = "linux"))]
-mod non_linux {
-    use serde::{Deserialize, Serialize};
-    use std::path::PathBuf;
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum MountType {
-        Bind { src: PathBuf },
-        Sqlite { src: PathBuf },
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct MountConfig {
-        pub mount_type: MountType,
-        pub dst: PathBuf,
-    }
-
-    impl std::str::FromStr for MountConfig {
-        type Err = String;
-
-        fn from_str(_s: &str) -> Result<Self, Self::Err> {
-            // This will never be called on non-Linux platforms
-            Err("Mount configuration is only supported on Linux".to_string())
-        }
-    }
-}
-
 use agentfs_sdk::{AgentFS, AgentFSOptions};
 use anyhow::{Context, Result as AnyhowResult};
 use clap::{Parser, Subcommand};
