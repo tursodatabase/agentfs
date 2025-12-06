@@ -11,7 +11,7 @@ env:
 
 jobs:
   test:
-    name: Test
+    name: Test (${{ matrix.os }}, ${{ matrix.project }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -70,7 +70,7 @@ jobs:
       run: tests/all.sh
 
   check:
-    name: Check
+    name: Check (${{ matrix.os }}, ${{ matrix.project }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -93,3 +93,45 @@ jobs:
 
     - name: Check
       run: cargo check --all-features
+
+  build-linux-arm64:
+    name: Build (Linux arm64)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: nightly
+        targets: aarch64-unknown-linux-gnu
+
+    - name: Install cross-compilation dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        cli/scripts/install-deps.sh
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: linux-arm64-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: linux-arm64-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: cli/target
+        key: linux-arm64-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build CLI for Linux arm64
+      working-directory: cli
+      env:
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      run: cargo build --target aarch64-unknown-linux-gnu --verbose
