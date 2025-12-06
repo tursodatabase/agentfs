@@ -4,19 +4,19 @@ mod mount;
 #[path = "mount_stub.rs"]
 mod mount;
 
-#[cfg(feature = "sandbox")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod run;
-#[cfg(not(feature = "sandbox"))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[path = "run_stub.rs"]
 mod run;
 
 use std::path::PathBuf;
 
 // Import MountConfig from the appropriate source
-#[cfg(feature = "sandbox")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use agentfs_sandbox::MountConfig;
 
-#[cfg(not(feature = "sandbox"))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub use run::MountConfig;
 
 pub async fn handle_run_command(

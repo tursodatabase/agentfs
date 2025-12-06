@@ -27,13 +27,13 @@ pub async fn run_sandbox(
     command: PathBuf,
     args: Vec<String>,
 ) {
-    // Suppress unused variable warnings on non-Linux platforms
+    // Suppress unused variable warnings when sandbox feature is disabled
     let _ = (mounts, strace, command, args);
 
-    eprintln!("Error: Sandbox is available only on Linux.");
+    eprintln!("Error: Sandbox is not available on this platform.");
     eprintln!();
     eprintln!("The 'run' command uses ptrace-based system call interception,");
-    eprintln!("which is only supported on Linux.");
+    eprintln!("which is only supported on Linux x86_64.");
     eprintln!();
     eprintln!("However, you can still use the other AgentFS commands:");
     eprintln!("  - 'agentfs init' to create a new agent filesystem");

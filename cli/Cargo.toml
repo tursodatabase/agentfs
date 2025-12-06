@@ -8,16 +8,6 @@ repository = "https://github.com/tursodatabase/agentfs"
 name = "agentfs"
 path = "src/main.rs"
 
-[features]
-default = ["sandbox"]
-# Sandbox feature: ptrace-based syscall interception (Linux x86_64 only)
-sandbox = [
-    "dep:agentfs-sandbox",
-    "dep:reverie",
-    "dep:reverie-ptrace",
-    "dep:reverie-process",
-]
-
 [dependencies]
 agentfs-sdk = { path = "../sdk/rust" }
 tokio = { version = "1", features = ["full"] }
@@ -32,23 +22,12 @@ parking_lot = "0.12.5"
 fuser = { version = "0.15", default-features = false, features = ["abi-7-23"] }
 libc = "0.2"
 
-# Sandbox dependencies (optional, enabled by 'sandbox' feature)
-# Only works on Linux x86_64 due to libunwind-ptrace requirement
-[target.'cfg(target_os = "linux")'.dependencies.agentfs-sandbox]
-path = "../sandbox"
-optional = true
-
-[target.'cfg(target_os = "linux")'.dependencies.reverie]
-git = "https://github.com/facebookexperimental/reverie"
-optional = true
-
-[target.'cfg(target_os = "linux")'.dependencies.reverie-ptrace]
-git = "https://github.com/facebookexperimental/reverie"
-optional = true
-
-[target.'cfg(target_os = "linux")'.dependencies.reverie-process]
-git = "https://github.com/facebookexperimental/reverie"
-optional = true
+# Sandbox dependencies - Linux x86_64 only (requires libunwind-ptrace)
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+agentfs-sandbox = { path = "../sandbox" }
+reverie = { git = "https://github.com/facebookexperimental/reverie" }
+reverie-ptrace = { git = "https://github.com/facebookexperimental/reverie" }
+reverie-process = { git = "https://github.com/facebookexperimental/reverie" }
 
 # The profile that 'dist' will build with
 [profile.dist]
