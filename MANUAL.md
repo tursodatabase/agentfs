@@ -4,14 +4,13 @@ AgentFS is a filesystem explicitly designed for AI agents. Just as traditional f
 
 ## Overview
 
-AgentFS consists of three main components:
-
-AgentFS provides four components:
+AgentFS provides the following components:
 
 1. SDK - TypeScript and Rust libraries for programmatic filesystem access
 2. CLI - Command-line interface for managing agent filesystems
 3. Specification - SQLite-based agent filesystem specification
-4. Sandbox - Linux-compatible execution environment with agent filesystem support (experimental)
+4. FUSE Mount - Mount agent filesystems on the host using FUSE
+5. Sandbox - Linux-compatible execution environment with agent filesystem support (experimental)
 
 ## Quick Start
 
@@ -41,7 +40,7 @@ Created agent filesystem: .agentfs/my-agent.db
 Agent ID: my-agent
 ```
 
-### 2. Mount the AgentFS filesystem with FUSE (experimental)
+### 2. Mount the AgentFS filesystem with FUSE (Linux only)
 
 Mount an AgentFS filesystem on the host:
 
@@ -138,6 +137,53 @@ Creates a new SQLite database in the `.agentfs/` directory with the [Agent Files
 - Tool call tracking table (`tool_calls`)
 
 The `.agentfs/` directory is automatically created if it doesn't exist.
+
+### `agentfs mount`
+
+Mount an agent filesystem using FUSE (Linux only).
+
+**Usage:**
+```bash
+agentfs mount <ID_OR_PATH> <MOUNT_POINT>
+```
+
+**Arguments:**
+- `<ID_OR_PATH>` - Agent ID or database path
+- `<MOUNT_POINT>` - Directory where the filesystem will be mounted
+
+**Options:**
+- `-h, --help` - Print help
+
+**Examples:**
+```bash
+# Mount using agent ID
+agentfs mount my-agent ./my-agent-mount
+
+# Mount using database path
+agentfs mount .agentfs/my-agent.db ./my-agent-mount
+```
+
+**What it does:**
+Mounts the agent filesystem as a FUSE filesystem on the host, allowing you to interact with the agent's files using standard filesystem tools (ls, cat, cp, etc.).
+
+**Requirements:**
+- Linux operating system (macOS is not currently supported)
+- FUSE must be installed on your system
+- The CLI must be built with the `fuse` feature enabled
+
+**Usage after mounting:**
+```bash
+# Write files
+echo "hello, agentfs!" > ./my-agent-mount/hello.txt
+
+# Read files
+cat ./my-agent-mount/hello.txt
+
+# List files
+ls ./my-agent-mount/
+```
+
+To unmount, use `fusermount -u ./my-agent-mount`.
 
 ### `agentfs run`
 

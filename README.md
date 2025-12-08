@@ -24,11 +24,12 @@
 
 AgentFS is a filesystem explicitly designed for AI agents. Just as traditional filesystems provide file and directory abstractions for applications, AgentFS provides the storage abstractions that AI agents need.
 
-AgentFS provides four components:
+AgentFS provides the following components:
 
 * **SDK** - [TypeScript](sdk/typescript) and [Rust](sdk/rust) libraries for programmatic filesystem access
 * **[CLI](MANUAL.md)** - Command-line interface for managing agent filesystems
 * **[Specification](SPEC.md)** - SQLite-based agent filesystem specification
+* **FUSE Mount** - Mount agent filesystems on the host using FUSE
 * **Sandbox** - Linux-compatible execution environment with agent filesystem support (_experimental_)
 
 Read more about the motivation for AgentFS in the announcement [blog post](https://turso.tech/blog/agentfs).
@@ -60,6 +61,15 @@ You can also use a database path directly:
 ```bash
 $ agentfs fs cat .agentfs/my-agent.db hello.txt
 hello from agent
+```
+
+You can mount an agent filesystem using FUSE:
+
+```bash
+$ agentfs mount my-agent ./mnt
+$ echo "hello" > ./mnt/hello.txt
+$ cat ./mnt/hello.txt
+hello
 ```
 
 You can also run a program in an experimental sandbox with the agent filesystem mounted at `/agent`:
