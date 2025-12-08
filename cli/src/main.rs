@@ -6,11 +6,9 @@ mod daemon;
 #[cfg(target_os = "linux")]
 mod fuse;
 
-use agentfs_sdk::{AgentFS, AgentFSOptions};
-use anyhow::{Context, Result as AnyhowResult};
 use clap::{Parser, Subcommand};
 use cmd::MountConfig;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "agentfs")]
@@ -106,48 +104,6 @@ enum FsCommand {
     },
 }
 
-async fn init_database(id: Option<String>, force: bool) -> AnyhowResult<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Generate ID if not provided
-    let id = id.unwrap_or_else(|| {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        format!("agent-{}", timestamp)
-    });
-
-    // Validate agent ID for safety
-    if !AgentFS::validate_agent_id(&id) {
-        anyhow::bail!(
-            "Invalid agent ID '{}'. Agent IDs must contain only alphanumeric characters, hyphens, and underscores.",
-            id
-        );
-    }
-
-    // Check if agent already exists
-    let db_path = Path::new(".agentfs").join(format!("{}.db", id));
-    if db_path.exists() && !force {
-        anyhow::bail!(
-            "Agent '{}' already exists at '{}'. Use --force to overwrite.",
-            id,
-            db_path.display()
-        );
-    }
-
-    // Use the SDK to initialize the database - this ensures consistency
-    // The SDK will create .agentfs directory and database file
-    AgentFS::open(AgentFSOptions::with_id(&id))
-        .await
-        .context("Failed to initialize database")?;
-
-    eprintln!("Created agent filesystem: {}", db_path.display());
-    eprintln!("Agent ID: {}", id);
-
-    Ok(())
-}
-
 fn main() {
     reset_sigpipe();
 
@@ -156,7 +112,7 @@ fn main() {
     match args.command {
         Command::Init { id, force } => {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            if let Err(e) = rt.block_on(init_database(id, force)) {
+            if let Err(e) = rt.block_on(cmd::init::init_database(id, force)) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
