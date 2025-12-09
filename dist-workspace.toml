@@ -25,4 +25,4 @@ liblzma-dev = "*"
 libfuse3-dev = "*"
 
 [dist.dependencies.homebrew]
-macfuse = "*"
+"homebrew/cask/macfuse" = "*"
