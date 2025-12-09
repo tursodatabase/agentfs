@@ -40,7 +40,7 @@ Created agent filesystem: .agentfs/my-agent.db
 Agent ID: my-agent
 ```
 
-### 2. Mount the AgentFS filesystem with FUSE (Linux only)
+### 2. Mount the AgentFS filesystem with FUSE (Linux and macOS)
 
 Mount an AgentFS filesystem on the host:
 
@@ -140,7 +140,7 @@ The `.agentfs/` directory is automatically created if it doesn't exist.
 
 ### `agentfs mount`
 
-Mount an agent filesystem using FUSE (Linux only).
+Mount an agent filesystem using FUSE (Linux and macOS).
 
 **Usage:**
 ```bash
@@ -167,8 +167,8 @@ agentfs mount .agentfs/my-agent.db ./my-agent-mount
 Mounts the agent filesystem as a FUSE filesystem on the host, allowing you to interact with the agent's files using standard filesystem tools (ls, cat, cp, etc.).
 
 **Requirements:**
-- Linux operating system (macOS is not currently supported)
-- FUSE must be installed on your system
+- Linux or macOS operating system
+- FUSE must be installed on your system (on macOS, install [macFUSE](https://osxfuse.github.io/))
 - The CLI must be built with the `fuse` feature enabled
 
 **Usage after mounting:**

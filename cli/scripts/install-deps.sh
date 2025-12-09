@@ -33,6 +33,11 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
 
     echo "Linux dependencies installed successfully"
 
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+    echo "Installing dependencies for macOS..."
+    brew install macfuse
+    echo "macOS dependencies installed successfully"
+
 else
     echo "Unsupported OS: $OSTYPE"
     exit 1

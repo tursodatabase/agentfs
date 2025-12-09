@@ -25,6 +25,10 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.15", default-features = false, features = ["abi-7-23"] }
 
+# macOS dependencies for FUSE functionality (requires macFUSE)
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { version = "0.15", default-features = false, features = ["abi-7-23", "libfuse"] }
+
 # Sandbox dependencies - Linux x86_64 only (requires libunwind-ptrace)
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 agentfs-sandbox = { path = "../sandbox" }

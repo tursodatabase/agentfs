@@ -708,6 +708,7 @@ dependencies = [
  "memchr",
  "nix 0.29.0",
  "page_size",
+ "pkg-config",
  "smallvec",
  "zerocopy",
 ]
