@@ -1,6 +1,6 @@
-use agentfs_sdk::{AgentFS, AgentFSOptions};
+use agentfs_sdk::{AgentFS, AgentFSOptions, FileSystem};
 use anyhow::Result;
-use std::{os::unix::fs::MetadataExt, path::PathBuf};
+use std::{os::unix::fs::MetadataExt, path::PathBuf, sync::Arc};
 
 use crate::fuse::FuseMountOptions;
 
@@ -63,7 +63,8 @@ pub fn mount(args: MountArgs) -> Result<()> {
     let mount = move || {
         let rt = tokio::runtime::Runtime::new()?;
         let agentfs = rt.block_on(AgentFS::open(opts))?;
-        crate::fuse::mount(agentfs, fuse_opts, rt)
+        let fs: Arc<dyn FileSystem> = Arc::new(agentfs.fs);
+        crate::fuse::mount(fs, fuse_opts, rt)
     };
 
     if args.foreground {
