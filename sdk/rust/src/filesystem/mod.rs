@@ -1,4 +1,6 @@
 pub mod agentfs;
+#[cfg(unix)]
+pub mod hostfs;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,6 +8,8 @@ use thiserror::Error;
 
 // Re-export implementations
 pub use agentfs::AgentFS;
+#[cfg(unix)]
+pub use hostfs::HostFS;
 
 /// Filesystem-specific errors with errno semantics
 #[derive(Debug, Error)]

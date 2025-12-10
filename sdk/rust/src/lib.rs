@@ -7,6 +7,8 @@ use std::{path::Path, sync::Arc};
 use turso::{Builder, Connection};
 
 // Re-export filesystem types
+#[cfg(unix)]
+pub use filesystem::HostFS;
 pub use filesystem::{
     FileSystem, FilesystemStats, FsError, Stats, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFDIR,
     S_IFLNK, S_IFMT, S_IFREG,
