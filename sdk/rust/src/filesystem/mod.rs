@@ -1,6 +1,7 @@
 pub mod agentfs;
 #[cfg(unix)]
 pub mod hostfs;
+pub mod overlayfs;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -10,6 +11,7 @@ use thiserror::Error;
 pub use agentfs::AgentFS;
 #[cfg(unix)]
 pub use hostfs::HostFS;
+pub use overlayfs::OverlayFS;
 
 /// Filesystem-specific errors with errno semantics
 #[derive(Debug, Error)]

@@ -1,6 +1,7 @@
-use agentfs_sdk::{AgentFS, AgentFSOptions, FileSystem};
+use agentfs_sdk::{AgentFS, AgentFSOptions, FileSystem, HostFS, OverlayFS};
 use anyhow::Result;
 use std::{os::unix::fs::MetadataExt, path::PathBuf, sync::Arc};
+use turso::Value;
 
 use crate::fuse::FuseMountOptions;
 
@@ -63,7 +64,42 @@ pub fn mount(args: MountArgs) -> Result<()> {
     let mount = move || {
         let rt = tokio::runtime::Runtime::new()?;
         let agentfs = rt.block_on(AgentFS::open(opts))?;
-        let fs: Arc<dyn FileSystem> = Arc::new(agentfs.fs);
+
+        // Check for overlay configuration
+        let fs: Arc<dyn FileSystem> = rt.block_on(async {
+            let conn = agentfs.get_connection();
+
+            // Check if fs_overlay_config table exists and has base_path
+            let query = "SELECT value FROM fs_overlay_config WHERE key = 'base_path'";
+            let base_path: Option<String> = match conn.query(query, ()).await {
+                Ok(mut rows) => {
+                    if let Ok(Some(row)) = rows.next().await {
+                        row.get_value(0).ok().and_then(|v| {
+                            if let Value::Text(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None, // Table doesn't exist or query failed
+            };
+
+            if let Some(base_path) = base_path {
+                // Create OverlayFS with HostFS base
+                eprintln!("Using overlay filesystem with base: {}", base_path);
+                let hostfs = HostFS::new(&base_path)?;
+                let overlay = OverlayFS::new(Arc::new(hostfs), agentfs.fs);
+                Ok::<Arc<dyn FileSystem>, anyhow::Error>(Arc::new(overlay))
+            } else {
+                // Plain AgentFS
+                Ok(Arc::new(agentfs.fs) as Arc<dyn FileSystem>)
+            }
+        })?;
+
         crate::fuse::mount(fs, fuse_opts, rt)
     };
 

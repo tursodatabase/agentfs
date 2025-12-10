@@ -28,6 +28,10 @@ enum Command {
         /// Overwrite existing file if it exists
         #[arg(long)]
         force: bool,
+
+        /// Base directory for overlay filesystem (copy-on-write)
+        #[arg(long)]
+        base: Option<PathBuf>,
     },
     /// Filesystem operations
     Fs {
@@ -110,9 +114,9 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
-        Command::Init { id, force } => {
+        Command::Init { id, force, base } => {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            if let Err(e) = rt.block_on(cmd::init::init_database(id, force)) {
+            if let Err(e) = rt.block_on(cmd::init::init_database(id, force, base)) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

@@ -10,8 +10,8 @@ use turso::{Builder, Connection};
 #[cfg(unix)]
 pub use filesystem::HostFS;
 pub use filesystem::{
-    FileSystem, FilesystemStats, FsError, Stats, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFDIR,
-    S_IFLNK, S_IFMT, S_IFREG,
+    FileSystem, FilesystemStats, FsError, OverlayFS, Stats, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE,
+    S_IFDIR, S_IFLNK, S_IFMT, S_IFREG,
 };
 pub use kvstore::KvStore;
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
