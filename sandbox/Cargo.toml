@@ -1,6 +1,6 @@
 [package]
 name = "agentfs-sandbox"
-version = "0.2.3"
+version = "0.3.0-pre.1"
 edition = "2021"
 
 [dependencies]

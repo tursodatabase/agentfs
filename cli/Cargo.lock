@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs"
-version = "0.2.3"
+version = "0.3.0-pre.1"
 dependencies = [
  "agentfs-sandbox",
  "agentfs-sdk",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sandbox"
-version = "0.2.3"
+version = "0.3.0-pre.1"
 dependencies = [
  "agentfs-sdk",
  "anyhow",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sdk"
-version = "0.2.3"
+version = "0.3.0-pre.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1768,7 +1768,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "reverie"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#e1b8f449ca5dc16261c934c33e3bcc2d9210e9b3"
+source = "git+https://github.com/facebookexperimental/reverie#3b6622b7963aaa849c371452464996f53868d8be"
 dependencies = [
  "addr2line",
  "anyhow",
@@ -1795,7 +1795,7 @@ dependencies = [
 [[package]]
 name = "reverie-memory"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#e1b8f449ca5dc16261c934c33e3bcc2d9210e9b3"
+source = "git+https://github.com/facebookexperimental/reverie#3b6622b7963aaa849c371452464996f53868d8be"
 dependencies = [
  "syscalls",
 ]
@@ -1803,7 +1803,7 @@ dependencies = [
 [[package]]
 name = "reverie-process"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#e1b8f449ca5dc16261c934c33e3bcc2d9210e9b3"
+source = "git+https://github.com/facebookexperimental/reverie#3b6622b7963aaa849c371452464996f53868d8be"
 dependencies = [
  "bincode",
  "bitflags 2.10.0",
@@ -1820,7 +1820,7 @@ dependencies = [
 [[package]]
 name = "reverie-ptrace"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#e1b8f449ca5dc16261c934c33e3bcc2d9210e9b3"
+source = "git+https://github.com/facebookexperimental/reverie#3b6622b7963aaa849c371452464996f53868d8be"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1852,7 +1852,7 @@ dependencies = [
 [[package]]
 name = "reverie-syscalls"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#e1b8f449ca5dc16261c934c33e3bcc2d9210e9b3"
+source = "git+https://github.com/facebookexperimental/reverie#3b6622b7963aaa849c371452464996f53868d8be"
 dependencies = [
  "bitflags 2.10.0",
  "derive_more",
@@ -1867,7 +1867,7 @@ dependencies = [
 [[package]]
 name = "reverie-util"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#e1b8f449ca5dc16261c934c33e3bcc2d9210e9b3"
+source = "git+https://github.com/facebookexperimental/reverie#3b6622b7963aaa849c371452464996f53868d8be"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1965,7 +1965,7 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 [[package]]
 name = "safeptrace"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#e1b8f449ca5dc16261c934c33e3bcc2d9210e9b3"
+source = "git+https://github.com/facebookexperimental/reverie#3b6622b7963aaa849c371452464996f53868d8be"
 dependencies = [
  "bitflags 2.10.0",
  "futures 0.3.31",

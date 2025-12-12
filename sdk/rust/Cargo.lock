@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sdk"
-version = "0.2.3"
+version = "0.3.0-pre.1"
 dependencies = [
  "anyhow",
  "async-trait",
