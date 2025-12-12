@@ -230,7 +230,9 @@ pub async fn diff_filesystem(id_or_path: String) -> AnyhowResult<()> {
     let options = AgentFSOptions::resolve(&id_or_path)?;
     eprintln!("Using agent: {}", id_or_path);
 
-    let agent = AgentFS::open(options).await.context("Failed to open agent")?;
+    let agent = AgentFS::open(options)
+        .await
+        .context("Failed to open agent")?;
 
     // Check if overlay is enabled
     let base_path = match agent.is_overlay_enabled().await? {
