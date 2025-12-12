@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
-use agentfs_sdk::AgentFSOptions;
+use agentfs_sdk::{AgentFS, AgentFSOptions};
 use anyhow::{Context, Result as AnyhowResult};
 use turso::{Builder, Connection, Value};
 
@@ -210,39 +210,6 @@ impl std::fmt::Display for ChangeType {
     }
 }
 
-/// Check if overlay is enabled for this filesystem
-async fn is_overlay_enabled(conn: &Connection) -> AnyhowResult<Option<String>> {
-    // Check if fs_overlay_config table exists and has base_path
-    let result = conn
-        .query(
-            "SELECT value FROM fs_overlay_config WHERE key = 'base_path'",
-            (),
-        )
-        .await;
-
-    match result {
-        Ok(mut rows) => {
-            if let Some(row) = rows.next().await? {
-                let base_path: String = row
-                    .get_value(0)
-                    .ok()
-                    .and_then(|v| {
-                        if let Value::Text(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                Ok(Some(base_path))
-            } else {
-                Ok(None)
-            }
-        }
-        Err(_) => Ok(None), // Table doesn't exist
-    }
-}
-
 /// Get all paths in the delta layer (files in fs_dentry)
 async fn get_delta_paths(conn: &Connection) -> AnyhowResult<HashSet<String>> {
     let mut paths = HashSet::new();
@@ -403,18 +370,13 @@ fn path_exists_in_base(base_path: &str, rel_path: &str) -> bool {
 
 pub async fn diff_filesystem(id_or_path: String) -> AnyhowResult<()> {
     let options = AgentFSOptions::resolve(&id_or_path)?;
-    let db_path = options.path.context("No database path resolved")?;
     eprintln!("Using agent: {}", id_or_path);
 
-    let db = Builder::new_local(&db_path)
-        .build()
-        .await
-        .context("Failed to open filesystem")?;
-
-    let conn = db.connect().context("Failed to connect to filesystem")?;
+    let agent = AgentFS::open(options).await.context("Failed to open agent")?;
+    let conn = agent.get_connection();
 
     // Check if overlay is enabled
-    let base_path = match is_overlay_enabled(&conn).await? {
+    let base_path = match agent.is_overlay_enabled().await? {
         Some(path) => path,
         None => {
             println!("No diff (non-overlay filesystem)");

@@ -4,7 +4,7 @@ pub mod toolcalls;
 
 use anyhow::Result;
 use std::{path::Path, sync::Arc};
-use turso::{Builder, Connection};
+use turso::{Builder, Connection, Value};
 
 // Re-export filesystem types
 #[cfg(unix)]
@@ -194,6 +194,42 @@ impl AgentFS {
     /// Get the underlying database connection
     pub fn get_connection(&self) -> Arc<Connection> {
         self.conn.clone()
+    }
+
+    /// Check if overlay is enabled for this filesystem
+    ///
+    /// Returns the base path if overlay is enabled, None otherwise.
+    pub async fn is_overlay_enabled(&self) -> Result<Option<String>> {
+        // Check if fs_overlay_config table exists and has base_path
+        let result = self
+            .conn
+            .query(
+                "SELECT value FROM fs_overlay_config WHERE key = 'base_path'",
+                (),
+            )
+            .await;
+
+        match result {
+            Ok(mut rows) => {
+                if let Some(row) = rows.next().await? {
+                    let base_path: String = row
+                        .get_value(0)
+                        .ok()
+                        .and_then(|v| {
+                            if let Value::Text(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    Ok(Some(base_path))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None), // Table doesn't exist
+        }
     }
 
     /// Validates an agent ID to prevent path traversal and ensure safe filesystem operations.
