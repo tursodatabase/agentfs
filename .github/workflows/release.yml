@@ -307,7 +307,9 @@ jobs:
         run: npm run build
       - name: Publish to npm
         working-directory: sdk/typescript
-        run: npm publish --provenance --access public
+        env:
+          TAG_FLAG: "${{ fromJson(needs.host.outputs.val).announcement_is_prerelease && '--tag next' || '' }}"
+        run: npm publish --provenance --access public $TAG_FLAG
 
   # Publish Rust SDK to crates.io
   publish-cargo:
