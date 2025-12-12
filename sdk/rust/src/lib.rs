@@ -265,6 +265,75 @@ impl AgentFS {
         Ok(paths)
     }
 
+    /// Get the file mode for a path in the delta layer
+    ///
+    /// Returns the mode (file type and permissions) for a path, or None if
+    /// the path doesn't exist in the delta layer.
+    pub async fn get_file_mode(&self, path: &str) -> Result<Option<u32>> {
+        const ROOT_INO: i64 = 1;
+
+        // Resolve path to inode
+        let components: Vec<&str> = path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            // Root directory
+            let mut rows = self
+                .conn
+                .query("SELECT mode FROM fs_inode WHERE ino = ?", (ROOT_INO,))
+                .await?;
+
+            if let Some(row) = rows.next().await? {
+                let mode = row
+                    .get_value(0)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32;
+                return Ok(Some(mode));
+            }
+            return Ok(None);
+        }
+
+        let mut current_ino = ROOT_INO;
+        for component in &components {
+            let query = format!(
+                "SELECT ino FROM fs_dentry WHERE parent_ino = {} AND name = '{}'",
+                current_ino, component
+            );
+
+            let mut rows = self.conn.query(&query, ()).await?;
+
+            if let Some(row) = rows.next().await? {
+                current_ino = row
+                    .get_value(0)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0);
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let mut rows = self
+            .conn
+            .query("SELECT mode FROM fs_inode WHERE ino = ?", (current_ino,))
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            let mode = row
+                .get_value(0)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u32;
+            return Ok(Some(mode));
+        }
+
+        Ok(None)
+    }
+
     /// Get all whiteouts (deleted paths from base layer)
     ///
     /// Whiteouts mark paths that existed in the base layer but have been

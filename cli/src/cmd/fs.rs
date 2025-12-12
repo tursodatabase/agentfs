@@ -220,68 +220,6 @@ fn file_type_char(mode: u32) -> char {
     }
 }
 
-/// Get file mode from delta layer
-async fn get_file_mode(conn: &Connection, path: &str) -> AnyhowResult<Option<u32>> {
-    // Resolve path to inode
-    let components: Vec<&str> = path
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if components.is_empty() {
-        // Root directory
-        let mut rows = conn
-            .query("SELECT mode FROM fs_inode WHERE ino = ?", (ROOT_INO,))
-            .await?;
-
-        if let Some(row) = rows.next().await? {
-            let mode = row
-                .get_value(0)
-                .ok()
-                .and_then(|v| v.as_integer().copied())
-                .unwrap_or(0) as u32;
-            return Ok(Some(mode));
-        }
-        return Ok(None);
-    }
-
-    let mut current_ino = ROOT_INO;
-    for component in &components {
-        let query = format!(
-            "SELECT ino FROM fs_dentry WHERE parent_ino = {} AND name = '{}'",
-            current_ino, component
-        );
-
-        let mut rows = conn.query(&query, ()).await?;
-
-        if let Some(row) = rows.next().await? {
-            current_ino = row
-                .get_value(0)
-                .ok()
-                .and_then(|v| v.as_integer().copied())
-                .unwrap_or(0);
-        } else {
-            return Ok(None);
-        }
-    }
-
-    let mut rows = conn
-        .query("SELECT mode FROM fs_inode WHERE ino = ?", (current_ino,))
-        .await?;
-
-    if let Some(row) = rows.next().await? {
-        let mode = row
-            .get_value(0)
-            .ok()
-            .and_then(|v| v.as_integer().copied())
-            .unwrap_or(0) as u32;
-        return Ok(Some(mode));
-    }
-
-    Ok(None)
-}
-
 /// Check if a path exists in the host filesystem (base layer)
 fn path_exists_in_base(base_path: &str, rel_path: &str) -> bool {
     let full_path = format!("{}{}", base_path, rel_path);
@@ -317,7 +255,7 @@ pub async fn diff_filesystem(id_or_path: String) -> AnyhowResult<()> {
 
     // Process delta paths - determine if added or modified
     for path in &delta_paths {
-        let mode = get_file_mode(&conn, path).await?.unwrap_or(0);
+        let mode = agent.get_file_mode(path).await?.unwrap_or(0);
         let type_char = file_type_char(mode);
 
         if path_exists_in_base(&base_path, path) {
