@@ -1,6 +1,6 @@
 use super::file::{BoxedFileOps, FileOps};
 use super::{Vfs, VfsError, VfsResult};
-use agentfs_sdk::Filesystem;
+use agentfs_sdk::{filesystem::AgentFS, FileSystem};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct SqliteVfs {
     /// The filesystem from the SDK
-    fs: Arc<Filesystem>,
+    fs: Arc<dyn FileSystem>,
     /// The virtual path as seen by the sandboxed process
     mount_point: PathBuf,
 }
@@ -29,12 +29,12 @@ impl SqliteVfs {
             .to_str()
             .ok_or_else(|| VfsError::InvalidInput("Invalid database path".to_string()))?;
 
-        let fs = Filesystem::new(db_path_str)
+        let fs = AgentFS::new(db_path_str)
             .await
             .map_err(|e| VfsError::Other(format!("Failed to create filesystem: {}", e)))?;
 
         Ok(Self {
-            fs: Arc::new(fs),
+            fs: Arc::new(fs) as Arc<dyn FileSystem>,
             mount_point,
         })
     }
@@ -256,7 +256,7 @@ impl Vfs for SqliteVfs {
 
 /// File operations for SQLite VFS files
 struct SqliteFileOps {
-    fs: Arc<Filesystem>,
+    fs: Arc<dyn FileSystem>,
     path: String,
     data: Arc<Mutex<Vec<u8>>>,
     offset: Arc<Mutex<i64>>,
@@ -427,7 +427,7 @@ type DirEntryList = Vec<(u64, String, u8)>;
 
 /// Directory operations for SQLite VFS directories
 struct SqliteDirectoryOps {
-    fs: Arc<Filesystem>,
+    fs: Arc<dyn FileSystem>,
     path: String,
     flags: Mutex<i32>,
     /// Cached directory entries

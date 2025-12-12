@@ -1,4 +1,4 @@
-use agentfs_sdk::{AgentFS, FsError, Stats};
+use agentfs_sdk::{FileSystem, FsError, Stats};
 use fuser::{
     consts::FUSE_WRITEBACK_CACHE, FileAttr, FileType, Filesystem, KernelConfig, MountOption,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
@@ -42,7 +42,7 @@ struct OpenFile {
 }
 
 struct AgentFSFuse {
-    agentfs: Arc<AgentFS>,
+    fs: Arc<dyn FileSystem>,
     runtime: Runtime,
     path_cache: Arc<Mutex<HashMap<u64, String>>>,
     /// Maps file handle -> open file state
@@ -78,9 +78,9 @@ impl Filesystem for AgentFSFuse {
             reply.error(libc::ENOENT);
             return;
         };
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.stat(&path).await;
+            let result = fs.stat(&path).await;
             (result, path)
         });
         match result {
@@ -104,10 +104,8 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let agentfs = self.agentfs.clone();
-        let result = self
-            .runtime
-            .block_on(async move { agentfs.fs.stat(&path).await });
+        let fs = self.fs.clone();
+        let result = self.runtime.block_on(async move { fs.stat(&path).await });
 
         match result {
             Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
@@ -154,10 +152,10 @@ impl Filesystem for AgentFSFuse {
                 return;
             };
 
-            let agentfs = self.agentfs.clone();
+            let fs = self.fs.clone();
             let result = self
                 .runtime
-                .block_on(async move { agentfs.fs.truncate(&path, new_size).await });
+                .block_on(async move { fs.truncate(&path, new_size).await });
 
             if result.is_err() {
                 reply.error(libc::EIO);
@@ -171,10 +169,8 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let agentfs = self.agentfs.clone();
-        let result = self
-            .runtime
-            .block_on(async move { agentfs.fs.stat(&path).await });
+        let fs = self.fs.clone();
+        let result = self.runtime.block_on(async move { fs.stat(&path).await });
 
         match result {
             Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
@@ -204,9 +200,9 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (entries_result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.readdir(&path).await;
+            let result = fs.readdir(&path).await;
             (result, path)
         });
 
@@ -241,10 +237,10 @@ impl Filesystem for AgentFSFuse {
             if parent_path == "/" {
                 1
             } else {
-                let agentfs = self.agentfs.clone();
+                let fs = self.fs.clone();
                 match self
                     .runtime
-                    .block_on(async move { agentfs.fs.stat(&parent_path).await })
+                    .block_on(async move { fs.stat(&parent_path).await })
                 {
                     Ok(Some(stats)) => stats.ino as u64,
                     _ => 1, // Fallback to root if parent lookup fails
@@ -264,9 +260,9 @@ impl Filesystem for AgentFSFuse {
                 format!("{}/{}", path, entry_name)
             };
 
-            let agentfs = self.agentfs.clone();
+            let fs = self.fs.clone();
             let (stats_result, entry_path) = self.runtime.block_on(async move {
-                let result = agentfs.fs.stat(&entry_path).await;
+                let result = fs.stat(&entry_path).await;
                 (result, entry_path)
             });
 
@@ -310,9 +306,9 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.mkdir(&path).await;
+            let result = fs.mkdir(&path).await;
             (result, path)
         });
 
@@ -322,9 +318,9 @@ impl Filesystem for AgentFSFuse {
         }
 
         // Get the new directory's stats
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (stat_result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.stat(&path).await;
+            let result = fs.stat(&path).await;
             (result, path)
         });
 
@@ -352,9 +348,9 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Verify target is a directory
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (stat_result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.stat(&path).await;
+            let result = fs.stat(&path).await;
             (result, path)
         });
 
@@ -376,9 +372,9 @@ impl Filesystem for AgentFSFuse {
         }
 
         // Verify directory is empty
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (readdir_result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.readdir(&path).await;
+            let result = fs.readdir(&path).await;
             (result, path)
         });
 
@@ -400,10 +396,8 @@ impl Filesystem for AgentFSFuse {
 
         // Remove the directory
         let ino = stats.ino as u64;
-        let agentfs = self.agentfs.clone();
-        let result = self
-            .runtime
-            .block_on(async move { agentfs.fs.remove(&path).await });
+        let fs = self.fs.clone();
+        let result = self.runtime.block_on(async move { fs.remove(&path).await });
 
         match result {
             Ok(()) => {
@@ -438,9 +432,9 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Create empty file
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.write_file(&path, &[]).await;
+            let result = fs.write_file(&path, &[]).await;
             (result, path)
         });
 
@@ -450,9 +444,9 @@ impl Filesystem for AgentFSFuse {
         }
 
         // Get the new file's stats
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (stat_result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.stat(&path).await;
+            let result = fs.stat(&path).await;
             (result, path)
         });
 
@@ -485,18 +479,16 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Get inode before removing so we can uncache
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (stat_result, path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.stat(&path).await;
+            let result = fs.stat(&path).await;
             (result, path)
         });
 
         let ino = stat_result.ok().flatten().map(|s| s.ino as u64);
 
-        let agentfs = self.agentfs.clone();
-        let result = self
-            .runtime
-            .block_on(async move { agentfs.fs.remove(&path).await });
+        let fs = self.fs.clone();
+        let result = self.runtime.block_on(async move { fs.remove(&path).await });
 
         match result {
             Ok(()) => {
@@ -534,27 +526,27 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Get source inode before rename so we can update cache
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (src_stat, from_path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.stat(&from_path).await;
+            let result = fs.stat(&from_path).await;
             (result, from_path)
         });
 
         let src_ino = src_stat.ok().flatten().map(|s| s.ino as u64);
 
         // Check if destination exists and get its inode for cache cleanup
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (dst_stat, to_path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.stat(&to_path).await;
+            let result = fs.stat(&to_path).await;
             (result, to_path)
         });
 
         let dst_ino = dst_stat.ok().flatten().map(|s| s.ino as u64);
 
         // Perform the rename
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let (result, to_path) = self.runtime.block_on(async move {
-            let result = agentfs.fs.rename(&from_path, &to_path).await;
+            let result = fs.rename(&from_path, &to_path).await;
             (result, to_path)
         });
 
@@ -621,10 +613,10 @@ impl Filesystem for AgentFSFuse {
             file.path.clone()
         };
 
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let result = self
             .runtime
-            .block_on(async move { agentfs.fs.pread(&path, offset as u64, size as u64).await });
+            .block_on(async move { fs.pread(&path, offset as u64, size as u64).await });
 
         match result {
             Ok(Some(data)) => reply.data(&data),
@@ -655,12 +647,12 @@ impl Filesystem for AgentFSFuse {
             file.path.clone()
         };
 
-        let agentfs = self.agentfs.clone();
+        let fs = self.fs.clone();
         let data_len = data.len();
         let data_vec = data.to_vec();
         let result = self
             .runtime
-            .block_on(async move { agentfs.fs.pwrite(&path, offset as u64, &data_vec).await });
+            .block_on(async move { fs.pwrite(&path, offset as u64, &data_vec).await });
 
         match result {
             Ok(()) => reply.written(data_len as u32),
@@ -706,10 +698,8 @@ impl Filesystem for AgentFSFuse {
         const TOTAL_INODES: u64 = 1_000_000; // Virtual limit
         const MAX_NAMELEN: u32 = 255;
 
-        let agentfs = self.agentfs.clone();
-        let result = self
-            .runtime
-            .block_on(async move { agentfs.fs.statfs().await });
+        let fs = self.fs.clone();
+        let result = self.runtime.block_on(async move { fs.statfs().await });
 
         let (used_blocks, used_inodes) = match result {
             Ok(stats) => {
@@ -738,16 +728,16 @@ impl Filesystem for AgentFSFuse {
 }
 
 impl AgentFSFuse {
-    /// Create a new FUSE filesystem adapter wrapping an AgentFS instance.
+    /// Create a new FUSE filesystem adapter wrapping a FileSystem instance.
     ///
-    /// The provided Tokio runtime is used to execute async AgentFS operations
+    /// The provided Tokio runtime is used to execute async FileSystem operations
     /// from within synchronous FUSE callbacks via `block_on`.
     ///
     /// The uid and gid are used for all file ownership to avoid "dubious ownership"
     /// errors from tools like git that check file ownership.
-    fn new(agentfs: AgentFS, runtime: Runtime, uid: u32, gid: u32) -> Self {
+    fn new(fs: Arc<dyn FileSystem>, runtime: Runtime, uid: u32, gid: u32) -> Self {
         Self {
-            agentfs: Arc::new(agentfs),
+            fs,
             runtime,
             path_cache: Arc::new(Mutex::new(HashMap::new())),
             open_files: Arc::new(Mutex::new(HashMap::new())),
@@ -853,13 +843,17 @@ fn fillattr(stats: &Stats, uid: u32, gid: u32) -> FileAttr {
     }
 }
 
-pub fn mount(agentfs: AgentFS, opts: FuseMountOptions, runtime: Runtime) -> anyhow::Result<()> {
+pub fn mount(
+    fs: Arc<dyn FileSystem>,
+    opts: FuseMountOptions,
+    runtime: Runtime,
+) -> anyhow::Result<()> {
     // Use provided uid/gid or default to current user
     // This avoids "dubious ownership" errors from git and similar tools
     let uid = opts.uid.unwrap_or_else(|| unsafe { libc::getuid() });
     let gid = opts.gid.unwrap_or_else(|| unsafe { libc::getgid() });
 
-    let fs = AgentFSFuse::new(agentfs, runtime, uid, gid);
+    let fs = AgentFSFuse::new(fs, runtime, uid, gid);
 
     fs.add_path(1, "/".to_string());
 

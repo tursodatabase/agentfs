@@ -1,122 +1,26 @@
 use anyhow::Result;
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use thiserror::Error;
+use async_trait::async_trait;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use turso::{Builder, Connection, Value};
 
-/// Filesystem-specific errors with errno semantics
-#[derive(Debug, Error)]
-pub enum FsError {
-    #[error("Path does not exist")]
-    NotFound,
-
-    #[error("Path already exists")]
-    AlreadyExists,
-
-    #[error("Directory not empty")]
-    NotEmpty,
-
-    #[error("Not a directory")]
-    NotADirectory,
-
-    #[error("Is a directory")]
-    IsADirectory,
-
-    #[error("Not a symbolic link")]
-    NotASymlink,
-
-    #[error("Invalid path")]
-    InvalidPath,
-
-    #[error("Cannot modify root directory")]
-    RootOperation,
-
-    #[error("Too many levels of symbolic links")]
-    SymlinkLoop,
-
-    #[error("Cannot rename directory into its own subdirectory")]
-    InvalidRename,
-}
-
-impl FsError {
-    /// Convert to libc errno code
-    pub fn to_errno(&self) -> i32 {
-        match self {
-            FsError::NotFound => libc::ENOENT,
-            FsError::AlreadyExists => libc::EEXIST,
-            FsError::NotEmpty => libc::ENOTEMPTY,
-            FsError::NotADirectory => libc::ENOTDIR,
-            FsError::IsADirectory => libc::EISDIR,
-            FsError::NotASymlink => libc::EINVAL,
-            FsError::InvalidPath => libc::EINVAL,
-            FsError::RootOperation => libc::EPERM,
-            FsError::SymlinkLoop => libc::ELOOP,
-            FsError::InvalidRename => libc::EINVAL,
-        }
-    }
-}
-
-// File types for mode field
-const S_IFMT: u32 = 0o170000; // File type mask
-const S_IFREG: u32 = 0o100000; // Regular file
-const S_IFDIR: u32 = 0o040000; // Directory
-const S_IFLNK: u32 = 0o120000; // Symbolic link
-
-// Default permissions
-const DEFAULT_FILE_MODE: u32 = S_IFREG | 0o644; // Regular file, rw-r--r--
-const DEFAULT_DIR_MODE: u32 = S_IFDIR | 0o755; // Directory, rwxr-xr-x
+use super::{
+    FileSystem, FilesystemStats, FsError, Stats, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFLNK,
+    S_IFMT,
+};
 
 const ROOT_INO: i64 = 1;
 const DEFAULT_CHUNK_SIZE: usize = 4096;
 
-/// File statistics
-#[derive(Debug, Clone)]
-pub struct Stats {
-    pub ino: i64,
-    pub mode: u32,
-    pub nlink: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub size: i64,
-    pub atime: i64,
-    pub mtime: i64,
-    pub ctime: i64,
-}
-
-/// Filesystem statistics for statfs
-#[derive(Debug, Clone)]
-pub struct FilesystemStats {
-    /// Total number of inodes (files, directories, symlinks)
-    pub inodes: u64,
-    /// Total bytes used by file contents
-    pub bytes_used: u64,
-}
-
-impl Stats {
-    pub fn is_file(&self) -> bool {
-        (self.mode & S_IFMT) == S_IFREG
-    }
-
-    pub fn is_directory(&self) -> bool {
-        (self.mode & S_IFMT) == S_IFDIR
-    }
-
-    pub fn is_symlink(&self) -> bool {
-        (self.mode & S_IFMT) == S_IFLNK
-    }
-}
-
 /// A filesystem backed by SQLite
 #[derive(Clone)]
-pub struct Filesystem {
+pub struct AgentFS {
     conn: Arc<Connection>,
     chunk_size: usize,
 }
 
-impl Filesystem {
+impl AgentFS {
     /// Create a new filesystem
     pub async fn new(db_path: &str) -> Result<Self> {
         let db = Builder::new_local(db_path).build().await?;
@@ -139,6 +43,11 @@ impl Filesystem {
     /// Get the configured chunk size
     pub fn chunk_size(&self) -> usize {
         self.chunk_size
+    }
+
+    /// Get the underlying database connection
+    pub fn get_connection(&self) -> Arc<Connection> {
+        self.conn.clone()
     }
 
     /// Initialize the database schema
@@ -1577,15 +1486,74 @@ impl Filesystem {
     }
 }
 
+#[async_trait]
+impl FileSystem for AgentFS {
+    async fn stat(&self, path: &str) -> Result<Option<Stats>> {
+        AgentFS::stat(self, path).await
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Option<Stats>> {
+        AgentFS::lstat(self, path).await
+    }
+
+    async fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        AgentFS::read_file(self, path).await
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        AgentFS::write_file(self, path, data).await
+    }
+
+    async fn pread(&self, path: &str, offset: u64, size: u64) -> Result<Option<Vec<u8>>> {
+        AgentFS::pread(self, path, offset, size).await
+    }
+
+    async fn pwrite(&self, path: &str, offset: u64, data: &[u8]) -> Result<()> {
+        AgentFS::pwrite(self, path, offset, data).await
+    }
+
+    async fn truncate(&self, path: &str, size: u64) -> Result<()> {
+        AgentFS::truncate(self, path, size).await
+    }
+
+    async fn readdir(&self, path: &str) -> Result<Option<Vec<String>>> {
+        AgentFS::readdir(self, path).await
+    }
+
+    async fn mkdir(&self, path: &str) -> Result<()> {
+        AgentFS::mkdir(self, path).await
+    }
+
+    async fn remove(&self, path: &str) -> Result<()> {
+        AgentFS::remove(self, path).await
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        AgentFS::rename(self, from, to).await
+    }
+
+    async fn symlink(&self, target: &str, linkpath: &str) -> Result<()> {
+        AgentFS::symlink(self, target, linkpath).await
+    }
+
+    async fn readlink(&self, path: &str) -> Result<Option<String>> {
+        AgentFS::readlink(self, path).await
+    }
+
+    async fn statfs(&self) -> Result<FilesystemStats> {
+        AgentFS::statfs(self).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    async fn create_test_fs() -> Result<(Filesystem, tempfile::TempDir)> {
+    async fn create_test_fs() -> Result<(AgentFS, tempfile::TempDir)> {
         let dir = tempdir()?;
         let db_path = dir.path().join("test.db");
-        let fs = Filesystem::new(db_path.to_str().unwrap()).await?;
+        let fs = AgentFS::new(db_path.to_str().unwrap()).await?;
         Ok((fs, dir))
     }
 

@@ -3,10 +3,20 @@ pub mod kvstore;
 pub mod toolcalls;
 
 use anyhow::Result;
-use std::{path::Path, sync::Arc};
-use turso::{Builder, Connection};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::Path,
+    sync::Arc,
+};
+use turso::{Builder, Connection, Value};
 
-pub use filesystem::{Filesystem, FilesystemStats, FsError, Stats};
+// Re-export filesystem types
+#[cfg(unix)]
+pub use filesystem::HostFS;
+pub use filesystem::{
+    FileSystem, FilesystemStats, FsError, OverlayFS, Stats, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE,
+    S_IFDIR, S_IFLNK, S_IFMT, S_IFREG,
+};
 pub use kvstore::KvStore;
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
 
@@ -96,7 +106,7 @@ impl AgentFSOptions {
 pub struct AgentFS {
     conn: Arc<Connection>,
     pub kv: KvStore,
-    pub fs: Filesystem,
+    pub fs: filesystem::AgentFS,
     pub tools: ToolCalls,
 }
 
@@ -149,7 +159,7 @@ impl AgentFS {
         let conn = Arc::new(conn);
 
         let kv = KvStore::from_connection(conn.clone()).await?;
-        let fs = Filesystem::from_connection(conn.clone()).await?;
+        let fs = filesystem::AgentFS::from_connection(conn.clone()).await?;
         let tools = ToolCalls::from_connection(conn.clone()).await?;
 
         Ok(Self {
@@ -174,7 +184,7 @@ impl AgentFS {
         let conn = Arc::new(conn);
 
         let kv = KvStore::from_connection(conn.clone()).await?;
-        let fs = Filesystem::from_connection(conn.clone()).await?;
+        let fs = filesystem::AgentFS::from_connection(conn.clone()).await?;
         let tools = ToolCalls::from_connection(conn.clone()).await?;
 
         Ok(Self {
@@ -188,6 +198,196 @@ impl AgentFS {
     /// Get the underlying database connection
     pub fn get_connection(&self) -> Arc<Connection> {
         self.conn.clone()
+    }
+
+    /// Get all paths in the delta layer (files in fs_dentry)
+    ///
+    /// This returns all file and directory paths that exist in the overlay's
+    /// delta layer, which represents files that have been added or modified.
+    pub async fn get_delta_paths(&self) -> Result<HashSet<String>> {
+        const ROOT_INO: i64 = 1;
+
+        let mut paths = HashSet::new();
+        let mut queue: VecDeque<(i64, String)> = VecDeque::new();
+        queue.push_back((ROOT_INO, String::new()));
+
+        while let Some((parent_ino, prefix)) = queue.pop_front() {
+            let query = format!(
+                "SELECT d.name, d.ino, i.mode FROM fs_dentry d
+                 JOIN fs_inode i ON d.ino = i.ino
+                 WHERE d.parent_ino = {}
+                 ORDER BY d.name",
+                parent_ino
+            );
+
+            let mut rows = self.conn.query(&query, ()).await?;
+
+            while let Some(row) = rows.next().await? {
+                let name: String = row
+                    .get_value(0)
+                    .ok()
+                    .and_then(|v| {
+                        if let Value::Text(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+
+                let ino: i64 = row
+                    .get_value(1)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0);
+
+                let mode: u32 = row
+                    .get_value(2)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32;
+
+                let full_path = if prefix.is_empty() {
+                    format!("/{}", name)
+                } else {
+                    format!("{}/{}", prefix, name)
+                };
+
+                paths.insert(full_path.clone());
+
+                let is_dir = mode & S_IFMT == S_IFDIR;
+                if is_dir {
+                    queue.push_back((ino, full_path));
+                }
+            }
+        }
+
+        Ok(paths)
+    }
+
+    /// Get the file mode for a path in the delta layer
+    ///
+    /// Returns the mode (file type and permissions) for a path, or None if
+    /// the path doesn't exist in the delta layer.
+    pub async fn get_file_mode(&self, path: &str) -> Result<Option<u32>> {
+        const ROOT_INO: i64 = 1;
+
+        // Resolve path to inode
+        let components: Vec<&str> = path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            // Root directory
+            let mut rows = self
+                .conn
+                .query("SELECT mode FROM fs_inode WHERE ino = ?", (ROOT_INO,))
+                .await?;
+
+            if let Some(row) = rows.next().await? {
+                let mode = row
+                    .get_value(0)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32;
+                return Ok(Some(mode));
+            }
+            return Ok(None);
+        }
+
+        let mut current_ino = ROOT_INO;
+        for component in &components {
+            let query = format!(
+                "SELECT ino FROM fs_dentry WHERE parent_ino = {} AND name = '{}'",
+                current_ino, component
+            );
+
+            let mut rows = self.conn.query(&query, ()).await?;
+
+            if let Some(row) = rows.next().await? {
+                current_ino = row
+                    .get_value(0)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0);
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let mut rows = self
+            .conn
+            .query("SELECT mode FROM fs_inode WHERE ino = ?", (current_ino,))
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            let mode = row
+                .get_value(0)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u32;
+            return Ok(Some(mode));
+        }
+
+        Ok(None)
+    }
+
+    /// Get all whiteouts (deleted paths from base layer)
+    ///
+    /// Whiteouts mark paths that existed in the base layer but have been
+    /// deleted in the overlay.
+    pub async fn get_whiteouts(&self) -> Result<HashSet<String>> {
+        let mut whiteouts = HashSet::new();
+
+        let result = self.conn.query("SELECT path FROM fs_whiteout", ()).await;
+
+        if let Ok(mut rows) = result {
+            while let Some(row) = rows.next().await? {
+                if let Ok(Value::Text(path)) = row.get_value(0) {
+                    whiteouts.insert(path.clone());
+                }
+            }
+        } // Err case: Table doesn't exist, return empty set
+
+        Ok(whiteouts)
+    }
+
+    /// Check if overlay is enabled for this filesystem
+    ///
+    /// Returns the base path if overlay is enabled, None otherwise.
+    pub async fn is_overlay_enabled(&self) -> Result<Option<String>> {
+        // Check if fs_overlay_config table exists and has base_path
+        let result = self
+            .conn
+            .query(
+                "SELECT value FROM fs_overlay_config WHERE key = 'base_path'",
+                (),
+            )
+            .await;
+
+        match result {
+            Ok(mut rows) => {
+                if let Some(row) = rows.next().await? {
+                    let base_path: String = row
+                        .get_value(0)
+                        .ok()
+                        .and_then(|v| {
+                            if let Value::Text(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    Ok(Some(base_path))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None), // Table doesn't exist
+        }
     }
 
     /// Validates an agent ID to prevent path traversal and ensure safe filesystem operations.

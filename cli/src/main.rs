@@ -28,6 +28,10 @@ enum Command {
         /// Overwrite existing file if it exists
         #[arg(long)]
         force: bool,
+
+        /// Base directory for overlay filesystem (copy-on-write)
+        #[arg(long)]
+        base: Option<PathBuf>,
     },
     /// Filesystem operations
     Fs {
@@ -81,6 +85,12 @@ enum Command {
         #[arg(long)]
         gid: Option<u32>,
     },
+    /// Show differences between base filesystem and delta (overlay mode only)
+    Diff {
+        /// Agent ID or database path
+        #[arg(value_name = "ID_OR_PATH")]
+        id_or_path: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -110,9 +120,9 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
-        Command::Init { id, force } => {
+        Command::Init { id, force, base } => {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            if let Err(e) = rt.block_on(cmd::init::init_database(id, force)) {
+            if let Err(e) = rt.block_on(cmd::init::init_database(id, force, base)) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -167,6 +177,13 @@ fn main() {
                 uid,
                 gid,
             }) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Command::Diff { id_or_path } => {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            if let Err(e) = rt.block_on(cmd::fs::diff_filesystem(id_or_path)) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
