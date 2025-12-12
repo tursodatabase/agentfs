@@ -1,8 +1,8 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use agentfs_sdk::{AgentFS, AgentFSOptions};
 use anyhow::{Context, Result as AnyhowResult};
-use turso::{Builder, Connection, Value};
+use turso::{Builder, Value};
 
 const ROOT_INO: i64 = 1;
 const S_IFMT: u32 = 0o170000;
@@ -231,7 +231,6 @@ pub async fn diff_filesystem(id_or_path: String) -> AnyhowResult<()> {
     eprintln!("Using agent: {}", id_or_path);
 
     let agent = AgentFS::open(options).await.context("Failed to open agent")?;
-    let conn = agent.get_connection();
 
     // Check if overlay is enabled
     let base_path = match agent.is_overlay_enabled().await? {
