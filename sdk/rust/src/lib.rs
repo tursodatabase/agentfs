@@ -265,6 +265,26 @@ impl AgentFS {
         Ok(paths)
     }
 
+    /// Get all whiteouts (deleted paths from base layer)
+    ///
+    /// Whiteouts mark paths that existed in the base layer but have been
+    /// deleted in the overlay.
+    pub async fn get_whiteouts(&self) -> Result<HashSet<String>> {
+        let mut whiteouts = HashSet::new();
+
+        let result = self.conn.query("SELECT path FROM fs_whiteout", ()).await;
+
+        if let Ok(mut rows) = result {
+            while let Some(row) = rows.next().await? {
+                if let Ok(Value::Text(path)) = row.get_value(0) {
+                    whiteouts.insert(path.clone());
+                }
+            }
+        } // Err case: Table doesn't exist, return empty set
+
+        Ok(whiteouts)
+    }
+
     /// Check if overlay is enabled for this filesystem
     ///
     /// Returns the base path if overlay is enabled, None otherwise.

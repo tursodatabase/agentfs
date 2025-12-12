@@ -210,23 +210,6 @@ impl std::fmt::Display for ChangeType {
     }
 }
 
-/// Get all whiteouts (deleted paths from base)
-async fn get_whiteouts(conn: &Connection) -> AnyhowResult<HashSet<String>> {
-    let mut whiteouts = HashSet::new();
-
-    let result = conn.query("SELECT path FROM fs_whiteout", ()).await;
-
-    if let Ok(mut rows) = result {
-        while let Some(row) = rows.next().await? {
-            if let Ok(Value::Text(path)) = row.get_value(0) {
-                whiteouts.insert(path.clone());
-            }
-        }
-    } // Err case: Table doesn't exist, return empty set
-
-    Ok(whiteouts)
-}
-
 /// Get file type character
 fn file_type_char(mode: u32) -> char {
     match mode & S_IFMT {
@@ -330,7 +313,7 @@ pub async fn diff_filesystem(id_or_path: String) -> AnyhowResult<()> {
     let delta_paths = agent.get_delta_paths().await?;
 
     // Get all whiteouts (deleted paths)
-    let whiteouts = get_whiteouts(&conn).await?;
+    let whiteouts = agent.get_whiteouts().await?;
 
     // Process delta paths - determine if added or modified
     for path in &delta_paths {
