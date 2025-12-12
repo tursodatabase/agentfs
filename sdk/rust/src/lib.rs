@@ -3,7 +3,11 @@ pub mod kvstore;
 pub mod toolcalls;
 
 use anyhow::Result;
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::Path,
+    sync::Arc,
+};
 use turso::{Builder, Connection, Value};
 
 // Re-export filesystem types
@@ -194,6 +198,71 @@ impl AgentFS {
     /// Get the underlying database connection
     pub fn get_connection(&self) -> Arc<Connection> {
         self.conn.clone()
+    }
+
+    /// Get all paths in the delta layer (files in fs_dentry)
+    ///
+    /// This returns all file and directory paths that exist in the overlay's
+    /// delta layer, which represents files that have been added or modified.
+    pub async fn get_delta_paths(&self) -> Result<HashSet<String>> {
+        const ROOT_INO: i64 = 1;
+
+        let mut paths = HashSet::new();
+        let mut queue: VecDeque<(i64, String)> = VecDeque::new();
+        queue.push_back((ROOT_INO, String::new()));
+
+        while let Some((parent_ino, prefix)) = queue.pop_front() {
+            let query = format!(
+                "SELECT d.name, d.ino, i.mode FROM fs_dentry d
+                 JOIN fs_inode i ON d.ino = i.ino
+                 WHERE d.parent_ino = {}
+                 ORDER BY d.name",
+                parent_ino
+            );
+
+            let mut rows = self.conn.query(&query, ()).await?;
+
+            while let Some(row) = rows.next().await? {
+                let name: String = row
+                    .get_value(0)
+                    .ok()
+                    .and_then(|v| {
+                        if let Value::Text(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+
+                let ino: i64 = row
+                    .get_value(1)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0);
+
+                let mode: u32 = row
+                    .get_value(2)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32;
+
+                let full_path = if prefix.is_empty() {
+                    format!("/{}", name)
+                } else {
+                    format!("{}/{}", prefix, name)
+                };
+
+                paths.insert(full_path.clone());
+
+                let is_dir = mode & S_IFMT == S_IFDIR;
+                if is_dir {
+                    queue.push_back((ino, full_path));
+                }
+            }
+        }
+
+        Ok(paths)
     }
 
     /// Check if overlay is enabled for this filesystem

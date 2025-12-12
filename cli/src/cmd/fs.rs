@@ -210,69 +210,6 @@ impl std::fmt::Display for ChangeType {
     }
 }
 
-/// Get all paths in the delta layer (files in fs_dentry)
-async fn get_delta_paths(conn: &Connection) -> AnyhowResult<HashSet<String>> {
-    let mut paths = HashSet::new();
-    let mut queue: VecDeque<(i64, String)> = VecDeque::new();
-    queue.push_back((ROOT_INO, String::new()));
-
-    while let Some((parent_ino, prefix)) = queue.pop_front() {
-        let query = format!(
-            "SELECT d.name, d.ino, i.mode FROM fs_dentry d
-             JOIN fs_inode i ON d.ino = i.ino
-             WHERE d.parent_ino = {}
-             ORDER BY d.name",
-            parent_ino
-        );
-
-        let mut rows = conn
-            .query(&query, ())
-            .await
-            .context("Failed to query directory entries")?;
-
-        while let Some(row) = rows.next().await.context("Failed to fetch row")? {
-            let name: String = row
-                .get_value(0)
-                .ok()
-                .and_then(|v| {
-                    if let Value::Text(s) = v {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-
-            let ino: i64 = row
-                .get_value(1)
-                .ok()
-                .and_then(|v| v.as_integer().copied())
-                .unwrap_or(0);
-
-            let mode: u32 = row
-                .get_value(2)
-                .ok()
-                .and_then(|v| v.as_integer().copied())
-                .unwrap_or(0) as u32;
-
-            let full_path = if prefix.is_empty() {
-                format!("/{}", name)
-            } else {
-                format!("{}/{}", prefix, name)
-            };
-
-            paths.insert(full_path.clone());
-
-            let is_dir = mode & S_IFMT == S_IFDIR;
-            if is_dir {
-                queue.push_back((ino, full_path));
-            }
-        }
-    }
-
-    Ok(paths)
-}
-
 /// Get all whiteouts (deleted paths from base)
 async fn get_whiteouts(conn: &Connection) -> AnyhowResult<HashSet<String>> {
     let mut whiteouts = HashSet::new();
@@ -390,7 +327,7 @@ pub async fn diff_filesystem(id_or_path: String) -> AnyhowResult<()> {
     let mut changes: Vec<(ChangeType, char, String)> = Vec::new();
 
     // Get all paths in delta layer
-    let delta_paths = get_delta_paths(&conn).await?;
+    let delta_paths = agent.get_delta_paths().await?;
 
     // Get all whiteouts (deleted paths)
     let whiteouts = get_whiteouts(&conn).await?;
