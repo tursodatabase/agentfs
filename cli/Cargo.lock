@@ -238,6 +238,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-vec"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02b4ff8b16e6076c3e14220b39fbc1fabb6737522281a388998046859400895f"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -250,6 +256,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "bloom"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d00ac8e5056d6d65376a3c1aa5c7c34850d6949ace17f0266953a254eb3d6fe8"
+dependencies = [
+ "bit-vec",
 ]
 
 [[package]]
@@ -645,6 +660,12 @@ dependencies = [
  "quote",
  "syn 2.0.111",
 ]
+
+[[package]]
+name = "either"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "equivalent"
@@ -1779,6 +1800,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapidhash"
+version = "4.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8e65c75143ce5d47c55b510297eeb1182f3c739b6043c537670e9fc18612dae"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "raw-cpuid"
 version = "10.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2587,9 +2617,8 @@ dependencies = [
 
 [[package]]
 name = "turso"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c670345a51c5df2ebb0a582c9af67dea98192c8fd82ca2c50aca34b342bf0c10"
+version = "0.4.0-pre.14"
+source = "git+https://github.com/tursodatabase/turso.git?tag=v0.4.0-pre.14#b6d4e5ff692f5b5f452008716a974b600eceb59a"
 dependencies = [
  "mimalloc",
  "thiserror 2.0.17",
@@ -2600,20 +2629,21 @@ dependencies = [
 
 [[package]]
 name = "turso_core"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd5a3044961c822886d08cbc94f5519524213b877f65fb66ab70133ed3c0a36d"
+version = "0.4.0-pre.14"
+source = "git+https://github.com/tursodatabase/turso.git?tag=v0.4.0-pre.14#b6d4e5ff692f5b5f452008716a974b600eceb59a"
 dependencies = [
  "aegis",
  "aes",
  "aes-gcm",
  "arc-swap",
  "bitflags 2.10.0",
+ "bloom",
  "built",
  "bytemuck",
  "cfg_block",
  "chrono",
  "crossbeam-skiplist",
+ "either",
  "fallible-iterator",
  "hex",
  "intrusive-collections",
@@ -2627,6 +2657,7 @@ dependencies = [
  "paste",
  "polling",
  "rand",
+ "rapidhash",
  "regex",
  "regex-syntax",
  "roaring",
@@ -2639,6 +2670,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tracing",
+ "tracing-subscriber",
  "turso_ext",
  "turso_macros",
  "turso_parser",
@@ -2649,9 +2681,8 @@ dependencies = [
 
 [[package]]
 name = "turso_ext"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c744b2d657542911d6b1708f8aa2f047601cc0d452af8cd2d7f8fb1c05d40730"
+version = "0.4.0-pre.14"
+source = "git+https://github.com/tursodatabase/turso.git?tag=v0.4.0-pre.14#b6d4e5ff692f5b5f452008716a974b600eceb59a"
 dependencies = [
  "chrono",
  "getrandom 0.3.4",
@@ -2660,9 +2691,8 @@ dependencies = [
 
 [[package]]
 name = "turso_macros"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4631f270381e6153833ab491b42fca3a1dbaad0f657a12ea1d676dec8f71e7b1"
+version = "0.4.0-pre.14"
+source = "git+https://github.com/tursodatabase/turso.git?tag=v0.4.0-pre.14#b6d4e5ff692f5b5f452008716a974b600eceb59a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2671,9 +2701,8 @@ dependencies = [
 
 [[package]]
 name = "turso_parser"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b64ae3d49b989ed156abe143ae0244d0f239f67fc42da72806369a567f295750"
+version = "0.4.0-pre.14"
+source = "git+https://github.com/tursodatabase/turso.git?tag=v0.4.0-pre.14#b6d4e5ff692f5b5f452008716a974b600eceb59a"
 dependencies = [
  "bitflags 2.10.0",
  "miette",
