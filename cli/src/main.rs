@@ -36,7 +36,11 @@ fn main() {
                     id_or_path,
                     fs_path,
                 } => {
-                    if let Err(e) = rt.block_on(cmd::fs::ls_filesystem(id_or_path, &fs_path)) {
+                    if let Err(e) = rt.block_on(cmd::fs::ls_filesystem(
+                        &mut std::io::stdout(),
+                        id_or_path,
+                        &fs_path,
+                    )) {
                         eprintln!("Error: {}", e);
                         std::process::exit(1);
                     }
@@ -45,7 +49,11 @@ fn main() {
                     id_or_path,
                     file_path,
                 } => {
-                    if let Err(e) = rt.block_on(cmd::fs::cat_filesystem(id_or_path, &file_path)) {
+                    if let Err(e) = rt.block_on(cmd::fs::cat_filesystem(
+                        &mut std::io::stdout(),
+                        id_or_path,
+                        &file_path,
+                    )) {
                         eprintln!("Error: {}", e);
                         std::process::exit(1);
                     }

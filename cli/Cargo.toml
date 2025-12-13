@@ -42,3 +42,6 @@ reverie-process = { git = "https://github.com/facebookexperimental/reverie" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[dev-dependencies]
+tempfile = "3.23.0"

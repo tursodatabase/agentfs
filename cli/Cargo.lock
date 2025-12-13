@@ -86,6 +86,7 @@ dependencies = [
  "reverie-process",
  "reverie-ptrace",
  "serde",
+ "tempfile",
  "tokio",
  "turso",
 ]
