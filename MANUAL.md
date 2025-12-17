@@ -20,7 +20,7 @@ Create a new SQLite-based agent filesystem with an identifier:
 
 ```bash
 $ agentfs init my-agent
-Created agent filesystem: .agentfs/my-agent.db
+Created agent filesystem: ~/.agentfs/fs/my-agent.db
 Agent ID: my-agent
 ```
 
@@ -28,7 +28,7 @@ Or let AgentFS generate a unique identifier:
 
 ```bash
 $ agentfs init
-Created agent filesystem: .agentfs/agent-1234567890.db
+Created agent filesystem: ~/.agentfs/fs/agent-1234567890.db
 Agent ID: agent-1234567890
 ```
 
@@ -36,7 +36,7 @@ Use `--force` to overwrite an existing agent filesystem:
 
 ```bash
 $ agentfs init my-agent --force
-Created agent filesystem: .agentfs/my-agent.db
+Created agent filesystem: ~/.agentfs/fs/my-agent.db
 Agent ID: my-agent
 ```
 
@@ -93,7 +93,7 @@ hello, agent
 You can also use a database path directly:
 
 ```bash
-$ agentfs fs cat .agentfs/my-agent.db hello.txt
+$ agentfs fs cat ~/.agentfs/fs/my-agent.db hello.txt
 hello, agent
 ```
 
@@ -111,7 +111,7 @@ agentfs init [OPTIONS] [ID]
 **Arguments:**
 - `[ID]` - Optional agent identifier (if not provided, generates a unique one like `agent-{timestamp}`)
   - Must contain only alphanumeric characters, hyphens, and underscores
-  - Creates database at `.agentfs/{ID}.db`
+  - Creates database at `~/.agentfs/fs/{ID}.db`
 
 **Options:**
 - `--force` - Overwrite existing agent filesystem if it exists
@@ -130,13 +130,15 @@ agentfs init my-agent --force
 ```
 
 **What it does:**
-Creates a new SQLite database in the `.agentfs/` directory with the [Agent Filesystem schema](SPEC.md), including:
+Creates a new SQLite database in the `~/.agentfs/fs/` directory with the [Agent Filesystem schema](SPEC.md), including:
 - Root directory (inode 1)
 - File metadata tables (`fs_inode`, `fs_dentry`, `fs_data`, `fs_symlink`)
 - Key-value store table (`kv_store`)
 - Tool call tracking table (`tool_calls`)
 
-The `.agentfs/` directory is automatically created if it doesn't exist.
+The `~/.agentfs/fs/` directory is automatically created if it doesn't exist.
+
+**Note:** When resolving agent IDs, commands first check the local `.agentfs/` directory (in the current working directory) for backward compatibility, then fall back to the global `~/.agentfs/fs/` directory.
 
 ### `agentfs mount`
 
@@ -160,7 +162,7 @@ agentfs mount <ID_OR_PATH> <MOUNT_POINT>
 agentfs mount my-agent ./my-agent-mount
 
 # Mount using database path
-agentfs mount .agentfs/my-agent.db ./my-agent-mount
+agentfs mount ~/.agentfs/fs/my-agent.db ./my-agent-mount
 ```
 
 **What it does:**
@@ -260,7 +262,7 @@ agentfs fs ls my-agent
 agentfs fs ls my-agent /artifacts
 
 # List using database path directly
-agentfs fs ls .agentfs/my-agent.db /artifacts
+agentfs fs ls ~/.agentfs/fs/my-agent.db /artifacts
 ```
 
 **Output format:**
@@ -289,7 +291,7 @@ agentfs fs cat my-agent hello.txt
 agentfs fs cat my-agent /artifacts/report.txt
 
 # Use database path directly
-agentfs fs cat .agentfs/my-agent.db /artifacts/report.txt
+agentfs fs cat ~/.agentfs/fs/my-agent.db /artifacts/report.txt
 ```
 
 ### `agentfs completions`
@@ -412,7 +414,7 @@ npm install agentfs-sdk
 ```typescript
 import { AgentFS } from 'agentfs-sdk';
 
-// Using id (creates .agentfs/my-agent.db)
+// Using id (creates ~/.agentfs/fs/my-agent.db)
 const agent = await AgentFS.open({ id: 'my-agent' });
 
 // Using id with custom path
@@ -461,12 +463,12 @@ Opens or creates an agent filesystem.
 
 **Parameters:**
 - `options: AgentFSOptions` - Configuration (at least `id` or `path` required)
-  - `id?: string` - Agent identifier (if no `path`, creates `.agentfs/{id}.db`)
+  - `id?: string` - Agent identifier (if no `path`, creates `~/.agentfs/fs/{id}.db`)
   - `path?: string` - Explicit database path (takes precedence over id-based path)
 
 **Examples:**
 ```typescript
-// Using id (creates .agentfs/my-agent.db)
+// Using id (creates ~/.agentfs/fs/my-agent.db)
 const agent = await AgentFS.open({ id: 'my-agent' });
 
 // Using id with custom path
@@ -488,7 +490,7 @@ const agent3 = await AgentFS.open({ path: './data/mydb.db' });
 **AgentFSOptions Interface:**
 ```typescript
 interface AgentFSOptions {
-  id?: string;    // Agent identifier (if no path, creates .agentfs/{id}.db)
+  id?: string;    // Agent identifier (if no path, creates ~/.agentfs/fs/{id}.db)
   path?: string;  // Explicit database path (takes precedence over id-based path)
 }
 ```
@@ -820,10 +822,10 @@ Since the entire filesystem is a single SQLite file, snapshotting is trivial:
 
 ```bash
 # Create a snapshot of an agent
-cp .agentfs/my-agent.db .agentfs/my-agent-snapshot-$(date +%s).db
+cp ~/.agentfs/fs/my-agent.db ~/.agentfs/fs/my-agent-snapshot-$(date +%s).db
 
 # Restore from snapshot
-cp .agentfs/my-agent-snapshot-1234567890.db .agentfs/my-agent.db
+cp ~/.agentfs/fs/my-agent-snapshot-1234567890.db ~/.agentfs/fs/my-agent.db
 ```
 
 ### Querying Agent Data
@@ -831,7 +833,7 @@ cp .agentfs/my-agent-snapshot-1234567890.db .agentfs/my-agent.db
 You can query the agent database directly with SQLite:
 
 ```bash
-sqlite3 .agentfs/my-agent.db "SELECT * FROM fs_inode WHERE mode & 0170000 = 0100000"
+sqlite3 ~/.agentfs/fs/my-agent.db "SELECT * FROM fs_inode WHERE mode & 0170000 = 0100000"
 ```
 
 Or use the SQL interface from your application to analyze agent behavior, search files, track tool usage, etc.

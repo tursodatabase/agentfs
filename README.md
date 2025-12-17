@@ -42,7 +42,7 @@ Initialize an agent filesystem:
 
 ```bash
 $ agentfs init my-agent
-Created agent filesystem: .agentfs/my-agent.db
+Created agent filesystem: ~/.agentfs/fs/my-agent.db
 Agent ID: my-agent
 ```
 
@@ -60,7 +60,7 @@ hello from agent
 You can also use a database path directly:
 
 ```bash
-$ agentfs fs cat .agentfs/my-agent.db hello.txt
+$ agentfs fs cat ~/.agentfs/fs/my-agent.db hello.txt
 hello from agent
 ```
 
@@ -102,7 +102,7 @@ import { AgentFS } from 'agentfs-sdk';
 
 // Persistent storage with identifier
 const agent = await AgentFS.open({ id: 'my-agent' });
-// Creates: .agentfs/my-agent.db
+// Creates: ~/.agentfs/fs/my-agent.db
 
 // Or use ephemeral in-memory database
 const ephemeralAgent = await AgentFS.open();

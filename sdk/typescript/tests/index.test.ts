@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { AgentFS } from "../src/index";
+import { AgentFS, agentfsDir } from "../src/index";
 import { existsSync, rmSync } from "fs";
+import { join } from "path";
 
 describe("AgentFS Integration Tests", () => {
   let agent: AgentFS;
@@ -52,9 +53,9 @@ describe("AgentFS Integration Tests", () => {
   });
 
   describe("Database Persistence", () => {
-    it("should persist database file to .agentfs directory", async () => {
-      // Check that database file exists in .agentfs directory
-      const dbPath = `.agentfs/${testId}.db`;
+    it("should persist database file to global ~/.agentfs/fs directory", async () => {
+      // Check that database file exists in global ~/.agentfs/fs directory
+      const dbPath = join(agentfsDir(), `${testId}.db`);
       expect(existsSync(dbPath)).toBe(true);
     });
 
@@ -86,7 +87,7 @@ describe("AgentFS Integration Tests", () => {
  * @param id The agent ID to clean up
  */
 function cleanupAgentFiles(id: string): void {
-  const dbPath = `.agentfs/${id}.db`;
+  const dbPath = join(agentfsDir(), `${id}.db`);
   try {
     // Remove database file and SQLite WAL files
     [dbPath, `${dbPath}-shm`, `${dbPath}-wal`].forEach((file) => {

@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from agentfs_sdk import AgentFS, AgentFSOptions
+from agentfs_sdk import AgentFS, AgentFSOptions, agentfs_dir
 
 
 @pytest.mark.asyncio
@@ -61,20 +61,22 @@ class TestAgentFSIntegration:
                 os.chdir(old_cwd)
 
     async def test_database_persistence_to_agentfs_directory(self):
-        """Should persist database file to .agentfs directory"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            old_cwd = os.getcwd()
-            os.chdir(tmpdir)
+        """Should persist database file to global ~/.agentfs/fs directory"""
+        test_id = "test-persistence-dir"
+        db_path = agentfs_dir() / f"{test_id}.db"
 
-            try:
-                agent = await AgentFS.open(AgentFSOptions(id="test-agent"))
-                await agent.close()
+        try:
+            agent = await AgentFS.open(AgentFSOptions(id=test_id))
+            await agent.close()
 
-                # Check that database file exists in .agentfs directory
-                db_path = ".agentfs/test-agent.db"
-                assert os.path.exists(db_path)
-            finally:
-                os.chdir(old_cwd)
+            # Check that database file exists in global ~/.agentfs/fs directory
+            assert db_path.exists()
+        finally:
+            # Cleanup
+            for ext in ["", "-shm", "-wal"]:
+                path = agentfs_dir() / f"{test_id}.db{ext}"
+                if path.exists():
+                    path.unlink()
 
     async def test_reuse_existing_database(self):
         """Should reuse existing database file with same id"""

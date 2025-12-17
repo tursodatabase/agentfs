@@ -10,8 +10,20 @@ pub use filesystem::{Filesystem, FilesystemStats, FsError, Stats};
 pub use kvstore::KvStore;
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
 
-/// Directory containing agentfs databases
-pub fn agentfs_dir() -> &'static std::path::Path {
+/// Global directory containing agentfs databases (~/.agentfs/fs)
+///
+/// This is the default location for new agent databases.
+pub fn agentfs_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .expect("Could not determine home directory")
+        .join(".agentfs")
+        .join("fs")
+}
+
+/// Local directory containing agentfs databases (.agentfs in current directory)
+///
+/// This is checked first when resolving agent IDs for backward compatibility.
+pub fn local_agentfs_dir() -> &'static std::path::Path {
     std::path::Path::new(".agentfs")
 }
 
@@ -56,7 +68,9 @@ impl AgentFSOptions {
     ///
     /// - `:memory:` -> ephemeral in-memory database
     /// - Existing file path -> uses that path directly
-    /// - Otherwise -> treats as agent ID, looks for `.agentfs/{id}.db`
+    /// - Otherwise -> treats as agent ID, looks for database in this order:
+    ///   1. `.agentfs/{id}.db` (local directory)
+    ///   2. `~/.agentfs/fs/{id}.db` (global directory)
     ///
     /// Returns an error if the agent ID is invalid or the database doesn't exist.
     pub fn resolve(id_or_path: impl Into<String>) -> Result<Self> {
@@ -79,17 +93,36 @@ impl AgentFSOptions {
                 );
             }
 
-            let db_path = agentfs_dir().join(format!("{}.db", id_or_path));
-            if !db_path.exists() {
-                anyhow::bail!(
-                    "Agent '{}' not found at '{}'",
-                    id_or_path,
-                    db_path.display()
-                );
+            // Check local directory first (.agentfs in current directory)
+            let local_db_path = local_agentfs_dir().join(format!("{}.db", id_or_path));
+            if local_db_path.exists() {
+                return Ok(Self::with_path(local_db_path.to_str().ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                            "Database path '{}' is not valid UTF-8",
+                            local_db_path.display()
+                        )
+                    },
+                )?));
             }
-            Ok(Self::with_path(db_path.to_str().ok_or_else(|| {
-                anyhow::anyhow!("Database path '{}' is not valid UTF-8", db_path.display())
-            })?))
+
+            // Then check global directory (~/.agentfs/fs)
+            let global_db_path = agentfs_dir().join(format!("{}.db", id_or_path));
+            if global_db_path.exists() {
+                return Ok(Self::with_path(global_db_path.to_str().ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                            "Database path '{}' is not valid UTF-8",
+                            global_db_path.display()
+                        )
+                    },
+                )?));
+            }
+
+            anyhow::bail!(
+                "Agent '{}' not found in local (.agentfs) or global (~/.agentfs/fs) directories",
+                id_or_path
+            );
         }
     }
 }
@@ -138,10 +171,10 @@ impl AgentFS {
                 );
             }
 
-            // Ensure .agentfs directory exists
+            // Ensure ~/.agentfs/fs directory exists
             let agentfs_dir = agentfs_dir();
             if !agentfs_dir.exists() {
-                std::fs::create_dir_all(agentfs_dir)?;
+                std::fs::create_dir_all(&agentfs_dir)?;
             }
             format!("{}/{}.db", agentfs_dir.display(), id)
         } else {
@@ -337,19 +370,42 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_valid_agent_id_with_existing_db() {
-        // Setup: create .agentfs directory and a test database
-        let agentfs_dir = agentfs_dir();
-        let _ = std::fs::create_dir_all(agentfs_dir);
-        let db_path = agentfs_dir.join("test-resolve-agent.db");
+    fn test_resolve_valid_agent_id_with_existing_db_global() {
+        // Setup: create global ~/.agentfs/fs directory and a test database
+        let global_dir = agentfs_dir();
+        let _ = std::fs::create_dir_all(&global_dir);
+        let db_path = global_dir.join("test-resolve-agent-global.db");
         std::fs::write(&db_path, b"test").unwrap();
 
-        let opts = AgentFSOptions::resolve("test-resolve-agent").unwrap();
+        let opts = AgentFSOptions::resolve("test-resolve-agent-global").unwrap();
         assert!(opts.id.is_none());
         assert_eq!(opts.path, Some(db_path.to_string_lossy().to_string()));
 
         // Cleanup
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_resolve_local_takes_precedence_over_global() {
+        // Setup: create both local and global directories with same agent ID
+        let local_dir = local_agentfs_dir();
+        let global_dir = agentfs_dir();
+        let _ = std::fs::create_dir_all(local_dir);
+        let _ = std::fs::create_dir_all(&global_dir);
+
+        let local_db_path = local_dir.join("test-precedence-agent.db");
+        let global_db_path = global_dir.join("test-precedence-agent.db");
+        std::fs::write(&local_db_path, b"local").unwrap();
+        std::fs::write(&global_db_path, b"global").unwrap();
+
+        // Resolve should find the local one first
+        let opts = AgentFSOptions::resolve("test-precedence-agent").unwrap();
+        assert!(opts.id.is_none());
+        assert_eq!(opts.path, Some(local_db_path.to_string_lossy().to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&local_db_path);
+        let _ = std::fs::remove_file(&global_db_path);
     }
 
     #[test]
@@ -377,15 +433,15 @@ mod tests {
 
     #[test]
     fn test_resolve_valid_agent_id_formats() {
-        // Setup: create .agentfs directory and test databases
-        let agentfs_dir = agentfs_dir();
-        let _ = std::fs::create_dir_all(agentfs_dir);
+        // Setup: create global ~/.agentfs/fs directory and test databases
+        let global_dir = agentfs_dir();
+        let _ = std::fs::create_dir_all(&global_dir);
 
         // Test various valid ID formats
         let valid_ids = ["my-agent", "my_agent", "MyAgent123", "agent-123_test"];
 
         for id in valid_ids {
-            let db_path = agentfs_dir.join(format!("{}.db", id));
+            let db_path = global_dir.join(format!("{}.db", id));
             std::fs::write(&db_path, b"test").unwrap();
 
             let opts = AgentFSOptions::resolve(id).unwrap();
