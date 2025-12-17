@@ -104,7 +104,10 @@ fn is_mounted(path: &std::path::Path) -> bool {
 /// macFUSE installed can still run the other commands.
 #[cfg(target_os = "macos")]
 fn supports_fuse() -> bool {
-    for lib_name in &[c"libfuse.2.dylib", c"libfuse.dylib"] {
+    for lib_name in &[
+        c"/usr/local/lib/libfuse.2.dylib",
+        c"/usr/local/lib/libfuse.dylib",
+    ] {
         let handle = unsafe { libc::dlopen(lib_name.as_ptr(), libc::RTLD_LAZY) };
         if !handle.is_null() {
             unsafe { libc::dlclose(handle) };
