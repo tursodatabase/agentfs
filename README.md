@@ -153,6 +153,12 @@ AgentFS is an agent filesystem accessible through an SDK that provides three ess
 
 At the heart of AgentFS is the [agent filesystem](SPEC.md), a complete SQLite-based storage system for agents implemented using [Turso](https://github.com/tursodatabase/turso). Everything an agent does—every file it creates, every piece of state it stores, every tool it invokes—lives in a single SQLite database file.
 
+## 🤔 FAQ
+
+### How is AgentFS different from _X_?
+
+[Docker Sandbox](https://www.docker.com/blog/docker-sandboxes-a-new-approach-for-coding-agent-safety/) and AgentFS are complementary rather than competing. AgentFS answers "what happened and what's the state?" while Docker Sandboxes answer "how do I run this safely?" You could use both together: run an agent inside a Docker Sandbox for security, while using AgentFS inside that sandbox for structured state management and audit trails.
+
 ## 📚 Learn More
 
 - **[User Manual](MANUAL.md)** - Complete guide to using the AgentFS CLI and SDK
