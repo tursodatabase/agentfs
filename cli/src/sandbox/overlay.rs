@@ -45,6 +45,7 @@ const DEFAULT_ALLOWED_DIRS: &[&str] = &[
     ".claude",      // Claude Code config
     ".claude.json", // Claude Code config file
     ".local",       // Local data directory
+    ".npm",         // npm local registry
 ];
 
 /// Field index for mount point in /proc/self/mountinfo.
