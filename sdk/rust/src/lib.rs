@@ -107,6 +107,16 @@ impl AgentFSOptions {
             }
         }
     }
+
+    pub fn opts_to_db_path(opts: AgentFSOptions) -> Result<String> {
+        if let Some(path) = opts.path {
+            Ok(path)
+        } else if let Some(id) = opts.id {
+            Ok(format!("{}/{}.db", agentfs_dir().display(), id))
+        } else {
+            Ok(":memory:".to_string())
+        }
+    }
 }
 
 /// The main AgentFS SDK struct
