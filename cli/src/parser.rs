@@ -106,6 +106,21 @@ pub enum Command {
         #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
         id_or_path: String,
     },
+    /// Start an NFS server to export an AgentFS filesystem over the network
+    #[cfg(unix)]
+    Nfs {
+        /// Agent ID or database path
+        #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
+        id_or_path: String,
+
+        /// IP address to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+
+        /// Port to listen on
+        #[arg(long, default_value = "11111")]
+        port: u32,
+    },
 }
 
 #[derive(Subcommand, Debug)]

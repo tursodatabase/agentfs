@@ -1,12 +1,12 @@
-//! NFS-based run command for macOS.
+//! NFS-based run command for macOS and Linux.
 //!
 //! This module provides a sandboxed execution environment using NFS for
-//! filesystem mounting on macOS. The current working directory becomes a
+//! filesystem mounting. The current working directory becomes a
 //! copy-on-write overlay backed by AgentFS, mounted via a localhost NFS server.
 //!
-//! This approach works without requiring macFUSE or FSKit system extensions.
+//! This approach works without requiring FUSE or other system extensions.
 
-#![cfg(target_os = "macos")]
+#![cfg(unix)]
 
 use agentfs_sdk::{AgentFS, AgentFSOptions, FileSystem, HostFS, OverlayFS};
 use anyhow::{Context, Result};
@@ -172,9 +172,9 @@ fn find_available_port(start_port: u32) -> Result<u32> {
     );
 }
 
-/// Mount the NFS filesystem.
+/// Mount the NFS filesystem (macOS version).
+#[cfg(target_os = "macos")]
 fn mount_nfs(port: u32, mountpoint: &Path) -> Result<()> {
-    // macOS mount_nfs syntax
     let output = Command::new("/sbin/mount_nfs")
         .args([
             "-o",
@@ -191,6 +191,35 @@ fn mount_nfs(port: u32, mountpoint: &Path) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("Failed to mount NFS: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
+/// Mount the NFS filesystem (Linux version).
+#[cfg(target_os = "linux")]
+fn mount_nfs(port: u32, mountpoint: &Path) -> Result<()> {
+    let output = Command::new("mount")
+        .args([
+            "-t",
+            "nfs",
+            "-o",
+            &format!(
+                "vers=3,tcp,port={},mountport={},nolock,soft,timeo=10,retrans=2",
+                port, port
+            ),
+            "127.0.0.1:/",
+            mountpoint.to_str().unwrap(),
+        ])
+        .output()
+        .context("Failed to execute mount. Make sure nfs-common is installed.")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Failed to mount NFS: {}. Make sure nfs-common is installed (apt-get install nfs-common).",
+            stderr.trim()
+        );
     }
 
     Ok(())
@@ -219,7 +248,8 @@ fn run_command_in_mount(
     Ok(status.code().unwrap_or(1))
 }
 
-/// Unmount the NFS filesystem.
+/// Unmount the NFS filesystem (macOS version).
+#[cfg(target_os = "macos")]
 fn unmount(mountpoint: &Path) -> Result<()> {
     let output = Command::new("/sbin/umount")
         .arg(mountpoint)
@@ -237,6 +267,31 @@ fn unmount(mountpoint: &Path) -> Result<()> {
         if !output2.status.success() {
             anyhow::bail!(
                 "Failed to unmount: {}. You may need to manually unmount with: umount -f {}",
+                stderr.trim(),
+                mountpoint.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Unmount the NFS filesystem (Linux version).
+#[cfg(target_os = "linux")]
+fn unmount(mountpoint: &Path) -> Result<()> {
+    let output = Command::new("umount")
+        .arg(mountpoint)
+        .output()
+        .context("Failed to execute umount")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Try lazy unmount
+        let output2 = Command::new("umount").arg("-l").arg(mountpoint).output()?;
+
+        if !output2.status.success() {
+            anyhow::bail!(
+                "Failed to unmount: {}. You may need to manually unmount with: umount -l {}",
                 stderr.trim(),
                 mountpoint.display()
             );

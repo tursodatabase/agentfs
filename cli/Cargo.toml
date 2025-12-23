@@ -27,10 +27,14 @@ dirs = "6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Linux-only dependencies for FUSE functionality
+# Linux-only dependencies for FUSE and NFS functionality
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.15", default-features = false, features = ["abi-7-29"] }
 uuid = { version = "1", features = ["v4"] }
+# NFS server for userspace filesystem (used by `agentfs run` and `agentfs nfs`)
+nfsserve = "0.10"
+async-trait = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # macOS dependencies for FUSE and NFS functionality
 [target.'cfg(target_os = "macos")'.dependencies]

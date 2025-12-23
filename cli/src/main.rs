@@ -103,6 +103,18 @@ fn main() {
             }
         }
         Command::Completions { command } => handle_completions(command),
+        #[cfg(unix)]
+        Command::Nfs {
+            id_or_path,
+            bind,
+            port,
+        } => {
+            let rt = get_runtime();
+            if let Err(e) = rt.block_on(cmd::nfs::handle_nfs_command(id_or_path, bind, port)) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 

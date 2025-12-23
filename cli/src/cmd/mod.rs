@@ -24,5 +24,9 @@ mod run;
 #[path = "run_stub.rs"]
 mod run;
 
+// Standalone NFS server command (Unix only)
+#[cfg(unix)]
+pub mod nfs;
+
 pub use mount::{mount, MountArgs};
 pub use run::handle_run_command;

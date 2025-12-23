@@ -8,7 +8,7 @@ pub mod daemon;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod fuse;
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub mod nfs;
 
 pub fn get_runtime() -> tokio::runtime::Runtime {

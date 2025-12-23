@@ -1,10 +1,8 @@
 //! NFS server adapter for AgentFS.
 //!
 //! This module implements nfsserve's NFSFileSystem trait on top of AgentFS's
-//! FileSystem trait, enabling macOS to mount AgentFS via NFS without requiring
-//! macFUSE or FSKit system extensions.
-
-#![cfg(target_os = "macos")]
+//! FileSystem trait, enabling systems to mount AgentFS via NFS without requiring
+//! FUSE or other system extensions.
 
 use std::collections::HashMap;
 use std::sync::Arc;

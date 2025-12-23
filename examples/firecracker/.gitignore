@@ -1,0 +1,20 @@
+# Built artifacts
+linux-amazon/
+linux-6.1.*/
+busybox-*/
+vmlinux
+vmlinux-*
+rootfs.ext4
+firecracker
+*.tar.xz
+*.tar.gz
+*.tar.bz2
+
+# Config files generated at runtime
+vm_config.json
+test_config.json
+test_disk.raw
+test_disk_config.json
+
+# Mount points
+rootfs_mnt/
