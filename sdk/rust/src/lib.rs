@@ -1,3 +1,4 @@
+pub mod connection_pool;
 pub mod filesystem;
 pub mod kvstore;
 pub mod toolcalls;
@@ -169,7 +170,7 @@ impl AgentFS {
         let conn = Arc::new(conn);
 
         let kv = KvStore::from_connection(conn.clone()).await?;
-        let fs = filesystem::AgentFS::from_connection(conn.clone()).await?;
+        let fs = filesystem::AgentFS::new(&db_path).await?;
         let tools = ToolCalls::from_connection(conn.clone()).await?;
 
         Ok(Self {
@@ -194,7 +195,7 @@ impl AgentFS {
         let conn = Arc::new(conn);
 
         let kv = KvStore::from_connection(conn.clone()).await?;
-        let fs = filesystem::AgentFS::from_connection(conn.clone()).await?;
+        let fs = filesystem::AgentFS::new(db_path).await?;
         let tools = ToolCalls::from_connection(conn.clone()).await?;
 
         Ok(Self {
