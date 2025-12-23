@@ -655,6 +655,58 @@ impl Filesystem for AgentFSFuse {
         reply.created(&TTL, &attr, 0, fh, 0);
     }
 
+    /// Creates a symbolic link.
+    ///
+    /// Creates a symlink at `name` under `parent` pointing to `link`.
+    fn symlink(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        link_name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        let Some(path) = self.lookup_path(parent, link_name) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+
+        let Some(target_str) = target.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+
+        let fs = self.fs.clone();
+        let target_owned = target_str.to_string();
+        let (result, path) = self.runtime.block_on(async move {
+            let result = fs.symlink(&target_owned, &path).await;
+            (result, path)
+        });
+
+        if result.is_err() {
+            reply.error(libc::EIO);
+            return;
+        }
+
+        // Get the new symlink's stats
+        let fs = self.fs.clone();
+        let (stat_result, path) = self.runtime.block_on(async move {
+            let result = fs.lstat(&path).await;
+            (result, path)
+        });
+
+        match stat_result {
+            Ok(Some(stats)) => {
+                let attr = fillattr(&stats, self.uid, self.gid);
+                self.add_path(attr.ino, path);
+                reply.entry(&TTL, &attr, 0);
+            }
+            _ => {
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
     /// Removes a file (unlinks it from the directory).
     ///
     /// Gets the file's inode before removal to clean up the path cache.

@@ -80,6 +80,50 @@ if [ "$NESTED_CONTENT" != "nested file" ]; then
     exit 1
 fi
 
+# Test symlink creation
+ln -s nested.txt "$MOUNTPOINT/testdir/link_to_nested"
+if [ ! -L "$MOUNTPOINT/testdir/link_to_nested" ]; then
+    echo "FAILED: symlink was not created"
+    kill $MOUNT_PID 2>/dev/null || true
+    exit 1
+fi
+
+# Test reading symlink target
+LINK_TARGET=$(readlink "$MOUNTPOINT/testdir/link_to_nested")
+if [ "$LINK_TARGET" != "nested.txt" ]; then
+    echo "FAILED: symlink target mismatch"
+    echo "Expected: nested.txt"
+    echo "Got: $LINK_TARGET"
+    kill $MOUNT_PID 2>/dev/null || true
+    exit 1
+fi
+
+# Test following symlink to read file
+LINKED_CONTENT=$(cat "$MOUNTPOINT/testdir/link_to_nested")
+if [ "$LINKED_CONTENT" != "nested file" ]; then
+    echo "FAILED: reading through symlink failed"
+    echo "Expected: nested file"
+    echo "Got: $LINKED_CONTENT"
+    kill $MOUNT_PID 2>/dev/null || true
+    exit 1
+fi
+
+# Test symlink to directory
+ln -s testdir "$MOUNTPOINT/link_to_testdir"
+if [ ! -L "$MOUNTPOINT/link_to_testdir" ]; then
+    echo "FAILED: symlink to directory was not created"
+    kill $MOUNT_PID 2>/dev/null || true
+    exit 1
+fi
+
+# Test accessing file through directory symlink
+DIR_LINKED_CONTENT=$(cat "$MOUNTPOINT/link_to_testdir/nested.txt")
+if [ "$DIR_LINKED_CONTENT" != "nested file" ]; then
+    echo "FAILED: reading through directory symlink failed"
+    kill $MOUNT_PID 2>/dev/null || true
+    exit 1
+fi
+
 # Unmount
 fusermount -u "$MOUNTPOINT"
 

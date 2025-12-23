@@ -49,4 +49,31 @@ if ! cat "$TEST_DIR/target_dir/file.txt" | grep -q "test content"; then
     exit 1
 fi
 
+# Test 5: Create a symlink inside the sandbox (tests FUSE symlink creation)
+output=$(cargo run -- run /bin/bash -c "ln -s target_dir/file.txt $TEST_DIR/new_symlink && readlink $TEST_DIR/new_symlink" 2>&1)
+
+if ! echo "$output" | grep -q "target_dir/file.txt"; then
+    echo "FAILED: could not create symlink in sandbox"
+    echo "$output"
+    exit 1
+fi
+
+# Test 6: Create and follow symlink to read file content
+output=$(cargo run -- run /bin/bash -c "ln -s target_dir $TEST_DIR/new_dir_link && cat $TEST_DIR/new_dir_link/file.txt" 2>&1)
+
+if ! echo "$output" | grep -q "test content"; then
+    echo "FAILED: could not read through newly created symlink"
+    echo "$output"
+    exit 1
+fi
+
+# Test 7: Verify symlinks created in sandbox are visible via ls -l
+output=$(cargo run -- run /bin/bash -c "ln -s foo $TEST_DIR/test_link && ls -la $TEST_DIR/test_link" 2>&1)
+
+if ! echo "$output" | grep -qE "^lrwx.*test_link -> foo"; then
+    echo "FAILED: newly created symlink not shown correctly in ls"
+    echo "$output"
+    exit 1
+fi
+
 echo "OK"

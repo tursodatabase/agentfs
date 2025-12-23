@@ -364,7 +364,11 @@ impl OverlayFS {
 
             match stats {
                 Some(s) if s.is_directory() => {
-                    // Already a directory, continue
+                    // Directory exists in base or delta
+                    // Make sure it exists in delta too (required for delta operations)
+                    if self.delta.stat(&current).await?.is_none() {
+                        self.delta.mkdir(&current).await?;
+                    }
                 }
                 Some(_) => {
                     // Exists but not a directory - this is an error
