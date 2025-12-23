@@ -42,6 +42,132 @@ pub struct FuseMountOptions {
 struct OpenFile {
     /// The file handle from the filesystem layer.
     file: BoxedFile,
+    /// Inode number for this file (needed for buffer key).
+    ino: u64,
+}
+
+/// Default chunk size (matches AgentFS default).
+const CHUNK_SIZE: usize = 4096;
+
+/// Maximum dirty bytes before triggering a flush (64 MB).
+const WRITE_BUFFER_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Key for identifying a dirty chunk: (inode, chunk index).
+type ChunkKey = (u64, i64);
+
+/// Write buffer for batching writes before committing to SQLite.
+///
+/// This buffer implements write-back caching at the FUSE layer:
+/// - Writes are buffered in memory instead of going directly to SQLite
+/// - Reads check the buffer first (read-through)
+/// - Data is flushed to SQLite on fsync, flush, release, or when buffer is full
+///
+/// This dramatically reduces write amplification by:
+/// 1. Batching multiple writes into single transactions
+/// 2. Allowing checkpoint to run less frequently
+/// 3. Coalescing overwrites to the same chunks
+struct WriteBuffer {
+    /// Dirty chunks keyed by (inode, chunk index).
+    dirty_chunks: HashMap<ChunkKey, Vec<u8>>,
+    /// Total bytes currently buffered.
+    dirty_bytes: usize,
+    /// Pending file sizes (tracks size changes from writes past EOF).
+    /// Maps inode -> new size.
+    pending_sizes: HashMap<u64, u64>,
+    /// Original file sizes when buffering started (for correct truncation).
+    /// Maps inode -> original size at first write.
+    original_sizes: HashMap<u64, u64>,
+}
+
+impl WriteBuffer {
+    fn new() -> Self {
+        Self {
+            dirty_chunks: HashMap::new(),
+            dirty_bytes: 0,
+            pending_sizes: HashMap::new(),
+            original_sizes: HashMap::new(),
+        }
+    }
+
+    /// Check if the buffer needs flushing due to size.
+    fn needs_flush(&self) -> bool {
+        self.dirty_bytes >= WRITE_BUFFER_MAX_BYTES
+    }
+
+    /// Get a dirty chunk if it exists.
+    fn get_chunk(&self, ino: u64, chunk_idx: i64) -> Option<&Vec<u8>> {
+        self.dirty_chunks.get(&(ino, chunk_idx))
+    }
+
+    /// Insert or update a dirty chunk.
+    fn put_chunk(&mut self, ino: u64, chunk_idx: i64, data: Vec<u8>) {
+        let key = (ino, chunk_idx);
+        // Subtract old size if replacing
+        if let Some(old) = self.dirty_chunks.get(&key) {
+            self.dirty_bytes -= old.len();
+        }
+        self.dirty_bytes += data.len();
+        self.dirty_chunks.insert(key, data);
+    }
+
+    /// Track the original file size before buffering starts (for correct truncation).
+    fn track_original_size(&mut self, ino: u64, current_size: u64) {
+        // Only record the first time we see this inode
+        self.original_sizes.entry(ino).or_insert(current_size);
+    }
+
+    /// Update pending file size if write extends past original size.
+    fn update_pending_size(&mut self, ino: u64, write_end: u64) {
+        // Only track pending size if it extends past the original file size
+        if let Some(&original) = self.original_sizes.get(&ino) {
+            if write_end > original {
+                self.pending_sizes
+                    .entry(ino)
+                    .and_modify(|s| *s = (*s).max(write_end))
+                    .or_insert(write_end);
+            }
+        }
+    }
+
+    /// Get pending size for an inode (if any writes extended the file).
+    fn get_pending_size(&self, ino: u64) -> Option<u64> {
+        self.pending_sizes.get(&ino).copied()
+    }
+
+    /// Remove all dirty chunks for an inode, returning them.
+    fn take_chunks_for_ino(&mut self, ino: u64) -> Vec<(i64, Vec<u8>)> {
+        let keys: Vec<_> = self
+            .dirty_chunks
+            .keys()
+            .filter(|(i, _)| *i == ino)
+            .copied()
+            .collect();
+
+        let mut chunks = Vec::new();
+        for key in keys {
+            if let Some(data) = self.dirty_chunks.remove(&key) {
+                self.dirty_bytes -= data.len();
+                chunks.push((key.1, data));
+            }
+        }
+        chunks
+    }
+
+    /// Clear pending size and original size for an inode (after flush).
+    fn clear_inode_state(&mut self, ino: u64) {
+        self.pending_sizes.remove(&ino);
+        self.original_sizes.remove(&ino);
+    }
+
+    /// Take all dirty data, clearing the buffer.
+    fn take_all(&mut self) -> (HashMap<ChunkKey, Vec<u8>>, HashMap<u64, u64>) {
+        self.dirty_bytes = 0;
+        self.original_sizes.clear();
+        (
+            std::mem::take(&mut self.dirty_chunks),
+            std::mem::take(&mut self.pending_sizes),
+        )
+    }
 }
 
 struct AgentFSFuse {
@@ -56,6 +182,8 @@ struct AgentFSFuse {
     uid: u32,
     /// Group ID to report for all files (set at mount time)
     gid: u32,
+    /// Write buffer for batching writes before SQLite
+    write_buffer: Arc<Mutex<WriteBuffer>>,
 }
 
 impl Filesystem for AgentFSFuse {
@@ -111,7 +239,18 @@ impl Filesystem for AgentFSFuse {
         let result = self.runtime.block_on(async move { fs.lstat(&path).await });
 
         match result {
-            Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
+            Ok(Some(stats)) => {
+                let mut attr = fillattr(&stats, self.uid, self.gid);
+
+                // Check for pending size from buffered writes
+                let write_buffer = self.write_buffer.lock();
+                if let Some(pending_size) = write_buffer.get_pending_size(ino) {
+                    // Use the larger of db size or pending size
+                    attr.size = attr.size.max(pending_size);
+                }
+
+                reply.attr(&TTL, &attr);
+            }
             Ok(None) => reply.error(libc::ENOENT),
             Err(_) => reply.error(libc::EIO),
         }
@@ -650,7 +789,13 @@ impl Filesystem for AgentFSFuse {
         };
 
         let fh = self.alloc_fh();
-        self.open_files.lock().insert(fh, OpenFile { file });
+        self.open_files.lock().insert(
+            fh,
+            OpenFile {
+                file,
+                ino: attr.ino,
+            },
+        );
 
         reply.created(&TTL, &attr, 0, fh, 0);
     }
@@ -848,7 +993,7 @@ impl Filesystem for AgentFSFuse {
         match result {
             Ok(file) => {
                 let fh = self.alloc_fh();
-                self.open_files.lock().insert(fh, OpenFile { file });
+                self.open_files.lock().insert(fh, OpenFile { file, ino });
                 reply.opened(fh, 0);
             }
             Err(_) => reply.error(libc::EIO),
@@ -856,10 +1001,13 @@ impl Filesystem for AgentFSFuse {
     }
 
     /// Reads data using the file handle.
+    ///
+    /// Checks the write buffer first for dirty chunks (read-through),
+    /// then falls back to reading from SQLite for non-buffered data.
     fn read(
         &mut self,
         _req: &Request,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         offset: i64,
         size: u32,
@@ -876,17 +1024,84 @@ impl Filesystem for AgentFSFuse {
             open_file.file.clone()
         };
 
-        let result = self
-            .runtime
-            .block_on(async move { file.pread(offset as u64, size as u64).await });
-
-        match result {
-            Ok(data) => reply.data(&data),
-            Err(_) => reply.error(libc::EIO),
+        let offset = offset as u64;
+        let size = size as u64;
+        if size == 0 {
+            reply.data(&[]);
+            return;
         }
+
+        let read_end = offset + size;
+        let start_chunk = (offset / CHUNK_SIZE as u64) as i64;
+        let end_chunk = ((read_end - 1) / CHUNK_SIZE as u64) as i64;
+
+        // First pass: check which chunks are in buffer (keyed by inode, not fh)
+        let mut buffered_chunks: HashMap<i64, Vec<u8>> = HashMap::new();
+        let mut missing_chunks: Vec<i64> = Vec::new();
+        {
+            let write_buffer = self.write_buffer.lock();
+            for chunk_idx in start_chunk..=end_chunk {
+                if let Some(buffered) = write_buffer.get_chunk(ino, chunk_idx) {
+                    buffered_chunks.insert(chunk_idx, buffered.clone());
+                } else {
+                    missing_chunks.push(chunk_idx);
+                }
+            }
+        }
+
+        // Second pass: read missing chunks from file (without holding lock)
+        let mut file_chunks: HashMap<i64, Vec<u8>> = HashMap::new();
+        for &chunk_idx in &missing_chunks {
+            let chunk_start = chunk_idx as u64 * CHUNK_SIZE as u64;
+            let file = file.clone();
+            let read_result = self
+                .runtime
+                .block_on(async move { file.pread(chunk_start, CHUNK_SIZE as u64).await });
+
+            match read_result {
+                Ok(data) => {
+                    file_chunks.insert(chunk_idx, data);
+                }
+                Err(_) => {
+                    // File might be shorter than requested - use empty for missing
+                    file_chunks.insert(chunk_idx, Vec::new());
+                }
+            }
+        }
+
+        // Assemble result from buffered and file chunks
+        let mut result = Vec::with_capacity(size as usize);
+        for chunk_idx in start_chunk..=end_chunk {
+            let chunk_start = chunk_idx as u64 * CHUNK_SIZE as u64;
+
+            // Calculate what part of this chunk we need
+            let read_start_in_chunk = if offset > chunk_start {
+                (offset - chunk_start) as usize
+            } else {
+                0
+            };
+            let read_end_in_chunk = std::cmp::min(CHUNK_SIZE, (read_end - chunk_start) as usize);
+
+            let chunk_data = buffered_chunks
+                .get(&chunk_idx)
+                .or_else(|| file_chunks.get(&chunk_idx));
+
+            if let Some(data) = chunk_data {
+                let end = std::cmp::min(read_end_in_chunk, data.len());
+                if read_start_in_chunk < end {
+                    result.extend_from_slice(&data[read_start_in_chunk..end]);
+                }
+            }
+        }
+
+        reply.data(&result);
     }
 
     /// Writes data using the file handle.
+    ///
+    /// Writes are buffered in memory and batched to SQLite on flush/fsync.
+    /// This dramatically reduces write amplification by avoiding per-write
+    /// SQLite transactions and WAL checkpoints.
     fn write(
         &mut self,
         _req: &Request,
@@ -899,44 +1114,120 @@ impl Filesystem for AgentFSFuse {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let file = {
+        let (file, ino) = {
             let open_files = self.open_files.lock();
             let Some(open_file) = open_files.get(&fh) else {
                 reply.error(libc::EBADF);
                 return;
             };
-            open_file.file.clone()
+            (open_file.file.clone(), open_file.ino)
         };
 
         let data_len = data.len();
-        let data_vec = data.to_vec();
-        let result = self
-            .runtime
-            .block_on(async move { file.pwrite(offset as u64, &data_vec).await });
-
-        match result {
-            Ok(()) => reply.written(data_len as u32),
-            Err(_) => reply.error(libc::EIO),
+        if data_len == 0 {
+            reply.written(0);
+            return;
         }
+
+        let offset = offset as u64;
+        let write_end = offset + data_len as u64;
+
+        // Calculate affected chunks
+        let start_chunk = (offset / CHUNK_SIZE as u64) as i64;
+        let end_chunk = ((write_end - 1) / CHUNK_SIZE as u64) as i64;
+
+        // Get current file size for tracking original size (needed for correct truncation)
+        let current_size = {
+            let file = file.clone();
+            self.runtime
+                .block_on(async move { file.fstat().await })
+                .map(|s| s.size as u64)
+                .unwrap_or(0)
+        };
+
+        let mut write_buffer = self.write_buffer.lock();
+
+        // Track original file size before any buffered writes
+        write_buffer.track_original_size(ino, current_size);
+
+        // Process each affected chunk
+        let mut written = 0usize;
+        for chunk_idx in start_chunk..=end_chunk {
+            let chunk_start = chunk_idx as u64 * CHUNK_SIZE as u64;
+
+            // Calculate what part of this chunk we're writing
+            let write_start_in_chunk = if offset > chunk_start {
+                (offset - chunk_start) as usize
+            } else {
+                0
+            };
+            let write_end_in_chunk = std::cmp::min(CHUNK_SIZE, (write_end - chunk_start) as usize);
+
+            // Get existing chunk data (from buffer or file)
+            let mut chunk_data = if let Some(buffered) = write_buffer.get_chunk(ino, chunk_idx) {
+                buffered.clone()
+            } else {
+                // Load from file if partial write needs existing data
+                let needs_existing = write_start_in_chunk > 0 || write_end_in_chunk < CHUNK_SIZE;
+                if needs_existing {
+                    let file = file.clone();
+                    let chunk_start = chunk_start;
+                    match self
+                        .runtime
+                        .block_on(async move { file.pread(chunk_start, CHUNK_SIZE as u64).await })
+                    {
+                        Ok(existing) => {
+                            let mut v = existing;
+                            v.resize(CHUNK_SIZE, 0);
+                            v
+                        }
+                        Err(_) => vec![0u8; CHUNK_SIZE],
+                    }
+                } else {
+                    vec![0u8; CHUNK_SIZE]
+                }
+            };
+
+            // Calculate what part of input data goes into this chunk
+            let data_start = if chunk_start > offset {
+                (chunk_start - offset) as usize
+            } else {
+                0
+            };
+            let data_end = std::cmp::min(
+                data_len,
+                data_start + (write_end_in_chunk - write_start_in_chunk),
+            );
+
+            // Copy new data into chunk
+            let src = &data[data_start..data_end];
+            chunk_data[write_start_in_chunk..write_start_in_chunk + src.len()].copy_from_slice(src);
+
+            written += src.len();
+
+            // Store in buffer (keyed by inode, not fh)
+            write_buffer.put_chunk(ino, chunk_idx, chunk_data);
+        }
+
+        // Track pending file size (only if extending past original)
+        write_buffer.update_pending_size(ino, write_end);
+
+        // Check if we need to flush due to buffer size
+        let needs_flush = write_buffer.needs_flush();
+        drop(write_buffer);
+
+        if needs_flush {
+            // Flush all dirty data to SQLite
+            self.flush_write_buffer();
+        }
+
+        reply.written(written as u32);
     }
 
     /// Flushes data to the backend storage.
     ///
-    /// Since writes go directly to the database, this is a no-op.
-    fn flush(&mut self, _req: &Request, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        let open_files = self.open_files.lock();
-        if open_files.contains_key(&fh) {
-            reply.ok();
-        } else {
-            reply.error(libc::EBADF);
-        }
-    }
-
-    /// Synchronizes file data to persistent storage using the file handle.
-    ///
-    /// This now uses the file handle's fsync which knows which layer(s) the
-    /// file exists in, avoiding errors when a file only exists in one layer.
-    fn fsync(&mut self, _req: &Request, _ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
+    /// Flushes buffered writes for this inode to SQLite.
+    fn flush(&mut self, _req: &Request, ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         let file = {
             let open_files = self.open_files.lock();
             match open_files.get(&fh) {
@@ -948,6 +1239,31 @@ impl Filesystem for AgentFSFuse {
             }
         };
 
+        // Flush buffered writes for this inode
+        self.flush_inode(ino, &file);
+        reply.ok();
+    }
+
+    /// Synchronizes file data to persistent storage using the file handle.
+    ///
+    /// Flushes buffered writes to SQLite, then calls fsync on the underlying
+    /// file handle to ensure data is persisted to disk.
+    fn fsync(&mut self, _req: &Request, ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        let file = {
+            let open_files = self.open_files.lock();
+            match open_files.get(&fh) {
+                Some(open_file) => open_file.file.clone(),
+                None => {
+                    reply.error(libc::EBADF);
+                    return;
+                }
+            }
+        };
+
+        // First flush buffered writes
+        self.flush_inode(ino, &file);
+
+        // Then fsync the file
         let result = self.runtime.block_on(async move { file.fsync().await });
 
         match result {
@@ -958,18 +1274,27 @@ impl Filesystem for AgentFSFuse {
 
     /// Releases (closes) an open file handle.
     ///
-    /// Removes the file handle from the open files table.
-    /// Since writes go directly to the database, no flushing is needed.
+    /// Flushes any buffered writes for this inode before removing it.
     fn release(
         &mut self,
         _req: &Request,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        // Get file before removing from open_files
+        let file = {
+            let open_files = self.open_files.lock();
+            open_files.get(&fh).map(|f| f.file.clone())
+        };
+
+        // Flush buffered writes before closing
+        if let Some(file) = file {
+            self.flush_inode(ino, &file);
+        }
         self.open_files.lock().remove(&fh);
         reply.ok();
     }
@@ -1028,6 +1353,7 @@ impl AgentFSFuse {
             next_fh: AtomicU64::new(1),
             uid,
             gid,
+            write_buffer: Arc::new(Mutex::new(WriteBuffer::new())),
         }
     }
 
@@ -1085,6 +1411,99 @@ impl AgentFSFuse {
     /// handle that identifies an open file throughout its lifetime.
     fn alloc_fh(&self) -> u64 {
         self.next_fh.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Flush all dirty data from the write buffer to SQLite.
+    ///
+    /// This writes all buffered chunks to the underlying filesystem in a
+    /// single batch, dramatically reducing write amplification compared to
+    /// per-write SQLite transactions.
+    fn flush_write_buffer(&self) {
+        // Take all dirty data from buffer (releases lock immediately)
+        let (dirty_chunks, pending_sizes) = {
+            let mut buffer = self.write_buffer.lock();
+            buffer.take_all()
+        };
+
+        if dirty_chunks.is_empty() {
+            return;
+        }
+
+        // Group chunks by inode
+        let mut chunks_by_ino: HashMap<u64, Vec<(i64, Vec<u8>)>> = HashMap::new();
+        for ((ino, chunk_idx), data) in dirty_chunks {
+            chunks_by_ino.entry(ino).or_default().push((chunk_idx, data));
+        }
+
+        // Collect file handles for each inode (brief lock, then release)
+        let files_by_ino: HashMap<u64, BoxedFile> = {
+            let open_files = self.open_files.lock();
+            chunks_by_ino
+                .keys()
+                .filter_map(|&ino| {
+                    // Find any open file handle for this inode
+                    open_files
+                        .values()
+                        .find(|f| f.ino == ino)
+                        .map(|f| (ino, f.file.clone()))
+                })
+                .collect()
+        };
+
+        // Flush each inode's chunks (no locks held during I/O)
+        for (ino, chunks) in chunks_by_ino {
+            if let Some(file) = files_by_ino.get(&ino) {
+                // Write all chunks for this inode
+                for (chunk_idx, data) in chunks {
+                    let offset = chunk_idx as u64 * CHUNK_SIZE as u64;
+                    let file = file.clone();
+                    let _ = self
+                        .runtime
+                        .block_on(async move { file.pwrite(offset, &data).await });
+                }
+
+                // Update file size if we have a pending size for this inode
+                if let Some(&new_size) = pending_sizes.get(&ino) {
+                    let file = file.clone();
+                    let _ = self
+                        .runtime
+                        .block_on(async move { file.truncate(new_size).await });
+                }
+            }
+        }
+    }
+
+    /// Flush dirty data for a specific inode to SQLite.
+    fn flush_inode(&self, ino: u64, file: &BoxedFile) {
+        // Take chunks for this inode and clear its state
+        let (chunks, pending_size) = {
+            let mut buffer = self.write_buffer.lock();
+            let chunks = buffer.take_chunks_for_ino(ino);
+            let pending_size = buffer.get_pending_size(ino);
+            buffer.clear_inode_state(ino);
+            (chunks, pending_size)
+        };
+
+        if chunks.is_empty() {
+            return;
+        }
+
+        // Write all chunks (no locks held during I/O)
+        for (chunk_idx, data) in chunks {
+            let offset = chunk_idx as u64 * CHUNK_SIZE as u64;
+            let file = file.clone();
+            let _ = self
+                .runtime
+                .block_on(async move { file.pwrite(offset, &data).await });
+        }
+
+        // Update file size if writes extended past original
+        if let Some(new_size) = pending_size {
+            let file = file.clone();
+            let _ = self
+                .runtime
+                .block_on(async move { file.truncate(new_size).await });
+        }
     }
 }
 
