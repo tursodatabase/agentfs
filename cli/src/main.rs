@@ -103,6 +103,9 @@ fn main() {
             }
         }
         Command::Completions { command } => handle_completions(command),
+        Command::Version => {
+            println!("agentfs {}", env!("CARGO_PKG_VERSION"));
+        }
         #[cfg(unix)]
         Command::Nfs {
             id_or_path,
