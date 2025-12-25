@@ -216,10 +216,7 @@ pub async fn handle_write<T: Guest<Sandbox>>(
         match entry {
             FdEntry::Passthrough { kernel_fd, .. } => {
                 // Passthrough file - rewrite FD and return modified syscall for tail_inject
-                let new_syscall = reverie::syscalls::Write::new()
-                    .with_fd(kernel_fd)
-                    .with_buf(args.buf())
-                    .with_len(args.len());
+                let new_syscall = args.with_fd(kernel_fd);
 
                 return Ok(crate::syscall::SyscallResult::Syscall(Syscall::Write(
                     new_syscall,
