@@ -207,7 +207,8 @@ impl OverlayFS {
     /// base layer represents. This is stored in the delta database so that
     /// tools like `agentfs diff` can determine what files were modified.
     pub async fn init(&self, base_path: &str) -> Result<()> {
-        Self::init_schema(&self.delta.get_connection(), base_path).await
+        let conn = self.delta.pool().get().await?;
+        Self::init_schema(&conn, base_path).await
     }
 
     /// Extract the parent path from a normalized path
@@ -250,7 +251,7 @@ impl OverlayFS {
     /// then /foo/bar is also considered deleted.
     async fn is_whiteout(&self, path: &str) -> Result<bool> {
         let normalized = self.normalize_path(path);
-        let conn = self.delta.get_connection();
+        let conn = self.delta.pool().get().await?;
 
         // Check the path itself and all parent paths
         let mut check_path = normalized.clone();
@@ -290,7 +291,7 @@ impl OverlayFS {
     async fn create_whiteout(&self, path: &str) -> Result<()> {
         let normalized = self.normalize_path(path);
         let parent = Self::parent_path(&normalized);
-        let conn = self.delta.get_connection();
+        let conn = self.delta.pool().get().await?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         conn.execute(
@@ -305,7 +306,7 @@ impl OverlayFS {
     /// Remove a whiteout (un-delete a path)
     async fn remove_whiteout(&self, path: &str) -> Result<()> {
         let normalized = self.normalize_path(path);
-        let conn = self.delta.get_connection();
+        let conn = self.delta.pool().get().await?;
 
         conn.execute(
             "DELETE FROM fs_whiteout WHERE path = ?",
@@ -318,7 +319,7 @@ impl OverlayFS {
     /// Get all whiteouts that are direct children of a directory
     async fn get_child_whiteouts(&self, dir_path: &str) -> Result<HashSet<String>> {
         let normalized = self.normalize_path(dir_path);
-        let conn = self.delta.get_connection();
+        let conn = self.delta.pool().get().await?;
         let mut whiteouts = HashSet::new();
 
         // Use parent_path index for O(1) lookup instead of LIKE which compiles regex
