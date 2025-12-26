@@ -1592,3 +1592,23 @@ pub async fn handle_getpeername<T: Guest<Sandbox>>(
     // FD not in table, let the original syscall through (will likely fail with EBADF)
     Ok(None)
 }
+
+/// The `chmod` system call.
+///
+/// This intercepts `chmod` system calls and translates paths according to the mount table.
+pub async fn handle_chmod<T: Guest<Sandbox>>(
+    guest: &mut T,
+    args: &reverie::syscalls::Chmod,
+    mount_table: &MountTable,
+) -> Result<Option<Syscall>, Error> {
+    if let Some(path_addr) = args.path() {
+        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
+            let new_syscall = reverie::syscalls::Chmod::new()
+                .with_path(Some(new_path_addr))
+                .with_mode(args.mode());
+
+            return Ok(Some(Syscall::Chmod(new_syscall)));
+        }
+    }
+    Ok(None)
+}
