@@ -15,6 +15,20 @@ pub struct Args {
     pub command: Command,
 }
 
+#[derive(Debug, Parser)]
+pub struct SyncCommandOptions {
+    #[arg(long)]
+    pub sync_remote_url: Option<String>,
+    #[arg(long)]
+    pub sync_partial_prefetch: Option<bool>,
+    #[arg(long)]
+    pub sync_partial_segment_size: Option<usize>,
+    #[arg(long)]
+    pub sync_partial_bootstrap_query: Option<String>,
+    #[arg(long)]
+    pub sync_partial_bootstrap_length: Option<usize>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Manage shell completions
@@ -34,9 +48,25 @@ pub enum Command {
         /// Base directory for overlay filesystem (copy-on-write)
         #[arg(long)]
         base: Option<PathBuf>,
+
+        #[command(flatten)]
+        sync: SyncCommandOptions,
+    },
+    /// Remote sync operations
+    Sync {
+        /// Agent ID or database path
+        #[arg(add = ArgValueCompleter::new(id_or_path_completer))]
+        id_or_path: String,
+
+        #[command(subcommand)]
+        command: SyncCommand,
     },
     /// Filesystem operations
     Fs {
+        /// Agent ID or database path
+        #[arg(add = ArgValueCompleter::new(id_or_path_completer))]
+        id_or_path: String,
+
         #[command(subcommand)]
         command: FsCommand,
     },
@@ -127,23 +157,27 @@ pub enum Command {
 pub enum FsCommand {
     /// List files in the filesystem
     Ls {
-        /// Agent ID or database path
-        #[arg(add = ArgValueCompleter::new(id_or_path_completer))]
-        id_or_path: String,
-
         /// Path to list (default: /)
         #[arg(default_value = "/")]
         fs_path: String,
     },
     /// Display file contents
     Cat {
-        /// Agent ID or database path
-        #[arg(add = ArgValueCompleter::new(id_or_path_completer))]
-        id_or_path: String,
-
         /// Path to the file in the filesystem
         file_path: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SyncCommand {
+    /// Pull remote changes (only of agentfs was initialized with remote sync)
+    Pull,
+    /// Push remote changes (only of agentfs was initialized with remote sync)
+    Push,
+    /// Print synced database stats
+    Stats,
+    /// Checkpoint local synced db
+    Checkpoint,
 }
 
 #[derive(Subcommand, Debug, Clone, Copy)]

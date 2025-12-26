@@ -17,11 +17,16 @@ agentfs-sdk = { path = "../sdk/rust" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
-turso = "0.4.0-pre.17"
+turso = { git = "https://github.com/tursodatabase/turso", rev = "00b0890c8fef7f1ca58ed24da2c1a872816e2c1a", features = [
+    "sync",
+] }
 serde = { version = "1.0", features = ["derive"] }
 parking_lot = "0.12.5"
 clap_complete = { version = "=4.5.61", features = ["unstable-dynamic"] }
 dirs = "6"
+serde_json = "1.0.147"
+tracing = "0.1.44"
+tracing-subscriber = "0.3"
 
 # Unix dependencies
 [target.'cfg(unix)'.dependencies]

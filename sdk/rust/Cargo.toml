@@ -6,7 +6,7 @@ description = "AgentFS SDK for Rust"
 license = "MIT"
 
 [dependencies]
-turso = "0.4.0-pre.17"
+turso = { git = "https://github.com/tursodatabase/turso", rev = "00b0890c8fef7f1ca58ed24da2c1a872816e2c1a" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
