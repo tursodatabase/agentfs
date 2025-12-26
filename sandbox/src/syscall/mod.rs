@@ -118,6 +118,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Dup2(args) => {
             if let Some(result) = file::handle_dup2(guest, args, fd_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -132,6 +133,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Fork(args) => {
             if let Some(result) = process::handle_fork(guest, args, fd_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -139,6 +141,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Vfork(args) => {
             if let Some(result) = process::handle_vfork(guest, args, fd_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -167,6 +170,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Newfstatat(args) => {
             if let Some(result) =
                 stat::handle_newfstatat(guest, args, mount_table, fd_table).await?
@@ -183,6 +187,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Readlink(args) => {
             if let Some(result) = stat::handle_readlink(guest, args, mount_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -199,6 +204,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Symlink(args) => {
             if let Some(result) = stat::handle_symlink(guest, args, mount_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -249,6 +255,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Poll(args) => {
             if let Some(result) = file::handle_poll(guest, args, fd_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -258,6 +265,10 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
         }
         Syscall::Getdents64(args) => file::handle_getdents64(guest, syscall, args, fd_table).await,
         Syscall::Fstat(args) => file::handle_fstat(guest, syscall, args, fd_table).await,
+        #[cfg(target_arch = "aarch64")]
+        Syscall::Fstatat(args) => {
+            file::handle_fstatat(guest, syscall, args, fd_table, mount_table).await
+        }
         Syscall::Pread64(args) => {
             if let Some(result) = file::handle_pread64(guest, args, fd_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -272,6 +283,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Lseek(args) => file::handle_lseek(guest, syscall, args, fd_table).await,
         Syscall::Readv(args) => {
             if let Some(result) = file::handle_readv(guest, args, fd_table).await? {
@@ -345,6 +357,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
         Syscall::Waitid(_) => Ok(SyscallResult::Syscall(syscall)),
         // Memory management
         Syscall::Brk(_) => Ok(SyscallResult::Syscall(syscall)),
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::ArchPrctl(_) => Ok(SyscallResult::Syscall(syscall)),
         Syscall::Mmap(args) => {
             if let Some(result) = file::handle_mmap(guest, args, fd_table).await? {
@@ -358,6 +371,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
         Syscall::Mremap(_) => Ok(SyscallResult::Syscall(syscall)),
         Syscall::Madvise(_) => Ok(SyscallResult::Syscall(syscall)),
         // Path-based file operations
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Access(args) => {
             if let Some(modified) = file::handle_access(guest, args, mount_table).await? {
                 Ok(SyscallResult::Syscall(modified))
@@ -365,6 +379,15 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        Syscall::Faccessat(args) => {
+            if let Some(result) = file::handle_faccessat(guest, args, mount_table, fd_table).await?
+            {
+                Ok(SyscallResult::Value(result))
+            } else {
+                Ok(SyscallResult::Syscall(syscall))
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Rename(args) => {
             if let Some(modified) = file::handle_rename(guest, args, mount_table).await? {
                 Ok(SyscallResult::Syscall(modified))
@@ -372,9 +395,24 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Unlink(args) => {
             if let Some(modified) = file::handle_unlink(guest, args, mount_table).await? {
                 Ok(SyscallResult::Syscall(modified))
+            } else {
+                Ok(SyscallResult::Syscall(syscall))
+            }
+        }
+        Syscall::Chdir(args) => {
+            if let Some(modified) = file::handle_chdir(guest, args, mount_table).await? {
+                Ok(SyscallResult::Syscall(modified))
+            } else {
+                Ok(SyscallResult::Syscall(syscall))
+            }
+        }
+        Syscall::Fchownat(args) => {
+            if let Some(result) = file::handle_fchownat(guest, args, mount_table, fd_table).await? {
+                Ok(SyscallResult::Value(result))
             } else {
                 Ok(SyscallResult::Syscall(syscall))
             }
@@ -384,6 +422,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
         Syscall::SetRobustList(_) => Ok(SyscallResult::Syscall(syscall)),
         Syscall::Futex(_) => Ok(SyscallResult::Syscall(syscall)),
         // Time - passthrough
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Time(_) => Ok(SyscallResult::Syscall(syscall)),
         Syscall::ClockGettime(_) => Ok(SyscallResult::Syscall(syscall)),
         Syscall::ClockGetres(_) => Ok(SyscallResult::Syscall(syscall)),
@@ -400,6 +439,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
         Syscall::Kill(_) => Ok(SyscallResult::Syscall(syscall)),
         // System information - passthrough
         Syscall::Uname(_) => Ok(SyscallResult::Syscall(syscall)),
+        #[cfg(not(target_arch = "aarch64"))]
         Syscall::Getpgrp(_) => Ok(SyscallResult::Syscall(syscall)),
         Syscall::Getpgid(_) => Ok(SyscallResult::Syscall(syscall)),
         Syscall::Setpgid(_) => Ok(SyscallResult::Syscall(syscall)),
@@ -415,6 +455,7 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
             use reverie::syscalls::Sysno;
             match *num {
                 Sysno::rseq => Ok(SyscallResult::Syscall(syscall)), // rseq - passthrough
+                Sysno::lseek => Ok(SyscallResult::Syscall(syscall)),
                 Sysno::faccessat2 => {
                     if let Some(result) =
                         file::handle_faccessat2(guest, args, mount_table, fd_table).await?

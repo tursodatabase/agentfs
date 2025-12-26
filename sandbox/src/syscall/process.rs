@@ -5,6 +5,7 @@ use reverie::{syscalls::Syscall, Error, Guest};
 ///
 /// This intercepts `fork` system calls to properly handle FD table inheritance.
 /// The child process gets a deep copy of the parent's FD table.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_fork<T: Guest<Sandbox>>(
     guest: &mut T,
     _args: &reverie::syscalls::Fork,
@@ -34,6 +35,7 @@ pub async fn handle_fork<T: Guest<Sandbox>>(
 ///
 /// Note: In practice, modern Linux kernels implement vfork identically to fork with
 /// copy-on-write, so we treat it the same as fork for FD table purposes.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_vfork<T: Guest<Sandbox>>(
     guest: &mut T,
     _args: &reverie::syscalls::Vfork,

@@ -343,6 +343,7 @@ pub async fn handle_dup<T: Guest<Sandbox>>(
 /// The `dup2` system call.
 ///
 /// This intercepts `dup2` system calls and handles virtual FD duplication.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_dup2<T: Guest<Sandbox>>(
     guest: &mut T,
     args: &reverie::syscalls::Dup2,
@@ -855,6 +856,7 @@ pub async fn handle_pselect6<T: Guest<Sandbox>>(
 ///
 /// This intercepts `poll` system calls and translates virtual FDs in the pollfd array
 /// to kernel FDs before calling the real syscall, then translates the results back.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_poll<T: Guest<Sandbox>>(
     guest: &mut T,
     args: &reverie::syscalls::Poll,
@@ -1090,6 +1092,98 @@ pub async fn handle_fstat<T: Guest<Sandbox>>(
     Ok(crate::syscall::SyscallResult::Syscall(syscall))
 }
 
+/// The `fstatat` system call.
+///
+/// This intercepts `fstatat` system calls and translates virtual FDs to kernel FDs,
+/// or calls FileOps::fstatat() for virtual files.
+#[cfg(target_arch = "aarch64")]
+pub async fn handle_fstatat<T: Guest<Sandbox>>(
+    guest: &mut T,
+    syscall: Syscall,
+    args: &reverie::syscalls::Fstatat,
+    fd_table: &FdTable,
+    mount_table: &MountTable,
+) -> Result<crate::syscall::SyscallResult, Error> {
+    if let Some(path_addr) = args.path() {
+        // Read the original path from guest memory
+        let mut path: std::path::PathBuf = path_addr.read(&guest.memory())?;
+
+        // Handle dirfd resolution for relative paths
+        let dirfd = args.dirfd();
+        let kernel_dirfd = if dirfd == libc::AT_FDCWD {
+            dirfd
+        } else if path.is_relative() {
+            // For relative paths, resolve against dirfd
+            if let Some(dir_entry) = fd_table.get(dirfd) {
+                // Check if this is a passthrough directory with a kernel FD first
+                if let Some(kfd) = dir_entry.kernel_fd() {
+                    // Passthrough directory - use the kernel FD and keep path as-is
+                    kfd
+                } else if let Some(dir_path) = dir_entry.path() {
+                    // Virtual directory - resolve relative path against the directory's path
+                    path = dir_path.join(&path);
+                    // For virtual directories, we'll use AT_FDCWD since we have the full path now
+                    libc::AT_FDCWD
+                } else {
+                    // Virtual file without a path - this shouldn't happen for directories
+
+                    use reverie::Errno;
+                    return Err(Error::Errno(Errno::EBADFD));
+                }
+            } else {
+                // dirfd not in table - will likely fail
+                dirfd
+            }
+        } else {
+            // Absolute path - dirfd is ignored, use AT_FDCWD
+            libc::AT_FDCWD
+        };
+
+        // Check if this path matches a mount point
+        if let Some((vfs, _translated_path)) = mount_table.resolve(&path) {
+            // Check if this is a virtual VFS (like SQLite)
+            if vfs.is_virtual() {
+                // For virtual VFS, open the file directly without going to the kernel
+                match vfs.stat(&path).await {
+                    Ok(stat_buf) => {
+                        // Write the stat result to guest memory
+                        if let Some(stat_addr) = args.stat() {
+                            // Convert stat struct to bytes and write
+                            let stat_bytes: &[u8] = unsafe {
+                                std::slice::from_raw_parts(
+                                    &stat_buf as *const _ as *const u8,
+                                    std::mem::size_of::<libc::stat>(),
+                                )
+                            };
+                            guest
+                                .memory()
+                                .write_exact(stat_addr.0.cast::<u8>(), stat_bytes)?;
+                        }
+                        return Ok(crate::syscall::SyscallResult::Value(0)); // Success
+                    }
+                    Err(e) => {
+                        // Map VFS errors to errno
+                        let errno = match e {
+                            crate::vfs::VfsError::NotFound => -libc::ENOENT as i64,
+                            crate::vfs::VfsError::PermissionDenied => -libc::EACCES as i64,
+                            _ => -libc::EIO as i64,
+                        };
+                        return Ok(crate::syscall::SyscallResult::Value(errno));
+                    }
+                }
+            }
+        }
+        // No mount point matches - pass through to kernel with original path
+        let new_syscall = args.with_dirfd(kernel_dirfd).with_path(Some(path_addr));
+
+        return Ok(crate::syscall::SyscallResult::Syscall(Syscall::Fstatat(
+            new_syscall,
+        )));
+    }
+    // FD not in table, let the original syscall through (will likely fail with EBADF)
+    Ok(crate::syscall::SyscallResult::Syscall(syscall))
+}
+
 /// The `pread64` system call.
 ///
 /// This intercepts `pread64` system calls and translates virtual FDs to kernel FDs.
@@ -1146,6 +1240,7 @@ pub async fn handle_pwrite64<T: Guest<Sandbox>>(
 ///
 /// This intercepts `lseek` system calls and translates virtual FDs to kernel FDs,
 /// or calls FileOps::seek() for virtual files.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_lseek<T: Guest<Sandbox>>(
     _guest: &mut T,
     syscall: Syscall,
@@ -1236,6 +1331,7 @@ pub async fn handle_mmap<T: Guest<Sandbox>>(
 /// The `access` system call.
 ///
 /// This intercepts `access` system calls and translates paths according to the mount table.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_access<T: Guest<Sandbox>>(
     guest: &mut T,
     args: &reverie::syscalls::Access,
@@ -1309,9 +1405,54 @@ pub async fn handle_faccessat2<T: Guest<Sandbox>>(
     Ok(Some(result))
 }
 
+/// The `faccessat` system call.
+///
+/// This intercepts `faccessat` system calls, translates paths according to the mount table,
+/// and virtualizes the dirfd parameter.
+pub async fn handle_faccessat<T: Guest<Sandbox>>(
+    guest: &mut T,
+    args: &reverie::syscalls::Faccessat,
+    mount_table: &MountTable,
+    fd_table: &FdTable,
+) -> Result<Option<i64>, Error> {
+    let Some(pathname_addr) = args.path() else {
+        return Ok(None);
+    };
+    let dirfd = args.dirfd();
+
+    // Check if dirfd needs virtualization
+    let dirfd_needs_translation = dirfd != libc::AT_FDCWD && fd_table.translate(dirfd).is_some();
+
+    // Check if path needs virtualization
+    let translated_path_opt = translate_path(guest, pathname_addr, mount_table).await?;
+    let path_needs_translation = translated_path_opt.is_some();
+
+    // If nothing needs virtualization, let the original syscall pass through
+    if !dirfd_needs_translation && !path_needs_translation {
+        return Ok(None);
+    }
+
+    // Virtualize the dirfd if needed
+    let kernel_dirfd = if dirfd == libc::AT_FDCWD {
+        dirfd
+    } else {
+        fd_table.translate(dirfd).unwrap_or(dirfd)
+    };
+
+    let new_path_addr = translated_path_opt.unwrap_or(pathname_addr);
+    let new_syscall =
+        Syscall::Faccessat(args.with_dirfd(kernel_dirfd).with_path(Some(new_path_addr)));
+
+    // Build and inject the syscall with virtualized parameters
+    let result = guest.inject(new_syscall).await?;
+
+    Ok(Some(result))
+}
+
 /// The `rename` system call.
 ///
 /// This intercepts `rename` system calls and translates both paths according to the mount table.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_rename<T: Guest<Sandbox>>(
     guest: &mut T,
     args: &reverie::syscalls::Rename,
@@ -1359,6 +1500,7 @@ pub async fn handle_rename<T: Guest<Sandbox>>(
 /// The `unlink` system call.
 ///
 /// This intercepts `unlink` system calls and translates paths according to the mount table.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_unlink<T: Guest<Sandbox>>(
     guest: &mut T,
     args: &reverie::syscalls::Unlink,
@@ -1575,4 +1717,68 @@ pub async fn handle_getpeername<T: Guest<Sandbox>>(
 
     // FD not in table, let the original syscall through (will likely fail with EBADF)
     Ok(None)
+}
+
+/// The `chdir` system call.
+///
+/// This intercepts `chdir` system calls and translates paths according to the mount table.
+pub async fn handle_chdir<T: Guest<Sandbox>>(
+    guest: &mut T,
+    args: &reverie::syscalls::Chdir,
+    mount_table: &MountTable,
+) -> Result<Option<Syscall>, Error> {
+    if let Some(path_addr) = args.path() {
+        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
+            let new_syscall = args.with_path(Some(new_path_addr));
+
+            return Ok(Some(Syscall::Chdir(new_syscall)));
+        }
+    }
+    Ok(None)
+}
+
+/// The `fchownat` system call.
+///
+/// This intercepts `fchownat` system calls, translates paths according to the mount table,
+/// and virtualizes the dirfd parameter.
+pub async fn handle_fchownat<T: Guest<Sandbox>>(
+    guest: &mut T,
+    args: &reverie::syscalls::Fchownat,
+    mount_table: &MountTable,
+    fd_table: &FdTable,
+) -> Result<Option<i64>, Error> {
+    let Some(pathname_addr) = args.path() else {
+        return Ok(None);
+    };
+    let dirfd = args.dirfd();
+
+    // Check if dirfd needs virtualization
+    let dirfd_needs_translation = dirfd != libc::AT_FDCWD && fd_table.translate(dirfd).is_some();
+
+    // Check if path needs virtualization
+    let translated_path_opt = translate_path(guest, pathname_addr, mount_table).await?;
+    let path_needs_translation = translated_path_opt.is_some();
+
+    // If nothing needs virtualization, let the original syscall pass through
+    if !dirfd_needs_translation && !path_needs_translation {
+        return Ok(None);
+    }
+
+    // Virtualize the dirfd if needed
+    let kernel_dirfd = if dirfd == libc::AT_FDCWD {
+        dirfd
+    } else {
+        fd_table.translate(dirfd).unwrap_or(dirfd)
+    };
+
+    let new_path_addr = translated_path_opt.unwrap_or(pathname_addr);
+    let new_syscall = Syscall::Fchownat(
+        args.with_dirfd(kernel_dirfd)
+            .with_path(Some(new_path_addr)),
+    );
+
+    // Build and inject the syscall with virtualized parameters
+    let result = guest.inject(new_syscall).await?;
+
+    Ok(Some(result))
 }

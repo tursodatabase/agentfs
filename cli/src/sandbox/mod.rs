@@ -4,8 +4,8 @@
 //! - `overlay`: FUSE + namespace-based sandbox with copy-on-write filesystem
 //! - `ptrace`: ptrace-based syscall interception sandbox (experimental)
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 pub mod overlay;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 pub mod ptrace;

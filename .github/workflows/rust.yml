@@ -100,6 +100,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # necessary for sandbox
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libunwind-dev
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:

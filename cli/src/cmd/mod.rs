@@ -13,14 +13,14 @@ mod mount;
 // - macOS: use NFS-based sandbox (run_nfs.rs)
 // - Other platforms: use stub (run_stub.rs)
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 mod run;
 
 #[cfg(target_os = "macos")]
 #[path = "run_nfs.rs"]
 mod run;
 
-#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
+#[cfg(not(any(all(target_os = "linux"), target_os = "macos")))]
 #[path = "run_stub.rs"]
 mod run;
 

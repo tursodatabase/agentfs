@@ -169,7 +169,7 @@ impl Vfs for SqliteVfs {
             let stat_ptr = stat.as_mut_ptr();
             (*stat_ptr).st_dev = 0;
             (*stat_ptr).st_ino = stats.ino as u64;
-            (*stat_ptr).st_nlink = stats.nlink as u64;
+            (*stat_ptr).st_nlink = stats.nlink.into();
             (*stat_ptr).st_mode = stats.mode;
             (*stat_ptr).st_uid = stats.uid;
             (*stat_ptr).st_gid = stats.gid;
@@ -203,7 +203,7 @@ impl Vfs for SqliteVfs {
             let stat_ptr = stat.as_mut_ptr();
             (*stat_ptr).st_dev = 0;
             (*stat_ptr).st_ino = stats.ino as u64;
-            (*stat_ptr).st_nlink = stats.nlink as u64;
+            (*stat_ptr).st_nlink = stats.nlink.into();
             (*stat_ptr).st_mode = stats.mode;
             (*stat_ptr).st_uid = stats.uid;
             (*stat_ptr).st_gid = stats.gid;
@@ -339,7 +339,7 @@ impl FileOps for SqliteFileOps {
             let stat_ptr = stat.as_mut_ptr();
             (*stat_ptr).st_dev = 0;
             (*stat_ptr).st_ino = stats.ino as u64;
-            (*stat_ptr).st_nlink = stats.nlink as u64;
+            (*stat_ptr).st_nlink = stats.nlink.into();
             (*stat_ptr).st_mode = stats.mode;
             (*stat_ptr).st_uid = stats.uid;
             (*stat_ptr).st_gid = stats.gid;
@@ -468,7 +468,7 @@ impl FileOps for SqliteDirectoryOps {
             let stat_ptr = stat.as_mut_ptr();
             (*stat_ptr).st_dev = 0;
             (*stat_ptr).st_ino = stats.ino as u64;
-            (*stat_ptr).st_nlink = stats.nlink as u64;
+            (*stat_ptr).st_nlink = stats.nlink.into();
             (*stat_ptr).st_mode = stats.mode;
             (*stat_ptr).st_uid = stats.uid;
             (*stat_ptr).st_gid = stats.gid;

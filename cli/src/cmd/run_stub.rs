@@ -12,7 +12,9 @@ pub async fn handle_run_command(
     _command: PathBuf,
     _args: Vec<String>,
 ) -> Result<()> {
-    eprintln!("Error: The 'run' command is only available on Linux x86_64.");
+    eprintln!(
+        "Error: The 'run' command is only available on Linux (on ARM requires libunwind-dev)."
+    );
     eprintln!();
     eprintln!("However, you can still use the other AgentFS commands:");
     eprintln!("  - 'agentfs init' to create a new agent filesystem");

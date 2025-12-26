@@ -1,4 +1,4 @@
-//! Run command handler for Linux x86_64.
+//! Run command handler for Linux.
 //!
 //! Dispatches to either the overlay sandbox (default) or the experimental
 //! ptrace-based sandbox based on command-line flags.

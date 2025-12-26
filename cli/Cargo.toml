@@ -35,6 +35,11 @@ uuid = { version = "1", features = ["v4"] }
 nfsserve = "0.10"
 async-trait = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Sandbox dependencies - (requires libunwind-dev on ARM)
+agentfs-sandbox = { path = "../sandbox" }
+reverie = { git = "https://github.com/facebookexperimental/reverie" }
+reverie-ptrace = { git = "https://github.com/facebookexperimental/reverie" }
+reverie-process = { git = "https://github.com/facebookexperimental/reverie" }
 
 # macOS dependencies for FUSE and NFS functionality
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -52,12 +57,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # with Apple clang (`veor3q_u8` in `aegis128l_neon_sha3.c`).
 aegis = { version = "0.9.6", features = ["pure-rust"] }
 
-# Sandbox dependencies - Linux x86_64 only (requires libunwind-ptrace)
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-agentfs-sandbox = { path = "../sandbox" }
-reverie = { git = "https://github.com/facebookexperimental/reverie" }
-reverie-ptrace = { git = "https://github.com/facebookexperimental/reverie" }
-reverie-process = { git = "https://github.com/facebookexperimental/reverie" }
 
 # The profile that 'dist' will build with
 [profile.dist]
