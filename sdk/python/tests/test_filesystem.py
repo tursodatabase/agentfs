@@ -6,7 +6,7 @@ import tempfile
 import pytest
 from turso.aio import connect
 
-from agentfs_sdk import Filesystem
+from agentfs_sdk import ErrnoException, Filesystem
 
 
 @pytest.mark.asyncio
@@ -107,7 +107,7 @@ class TestFilesystemReadOperations:
             await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
             fs = await Filesystem.from_database(db)
 
-            with pytest.raises(FileNotFoundError):
+            with pytest.raises(ErrnoException):
                 await fs.read_file("/non-existent.txt")
             await db.close()
 
@@ -237,7 +237,7 @@ class TestFilesystemDeleteOperations:
 
             await fs.write_file("/delete-me.txt", "content")
             await fs.delete_file("/delete-me.txt")
-            with pytest.raises(FileNotFoundError):
+            with pytest.raises(ErrnoException):
                 await fs.read_file("/delete-me.txt")
             await db.close()
 
@@ -249,7 +249,7 @@ class TestFilesystemDeleteOperations:
             await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
             fs = await Filesystem.from_database(db)
 
-            with pytest.raises(FileNotFoundError, match="ENOENT"):
+            with pytest.raises(ErrnoException, match="ENOENT"):
                 await fs.delete_file("/non-existent.txt")
             await db.close()
 
@@ -721,6 +721,533 @@ class TestFilesystemStats:
             await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
             fs = await Filesystem.from_database(db)
 
-            with pytest.raises(FileNotFoundError, match="ENOENT"):
+            with pytest.raises(ErrnoException, match="ENOENT"):
                 await fs.stat("/nonexistent")
+            await db.close()
+
+
+@pytest.mark.asyncio
+class TestFilesystemMkdir:
+    """Tests for mkdir() operation"""
+
+    async def test_create_directory(self):
+        """Should create a directory with mkdir()"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/newdir")
+            entries = await fs.readdir("/")
+            assert "newdir" in entries
+            await db.close()
+
+    async def test_mkdir_throws_eexist_for_existing_directory(self):
+        """Should throw EEXIST when mkdir() is called on an existing directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/exists")
+            with pytest.raises(ErrnoException, match="EEXIST"):
+                await fs.mkdir("/exists")
+            await db.close()
+
+    async def test_mkdir_throws_enoent_for_missing_parent(self):
+        """Should throw ENOENT when parent directory does not exist"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.mkdir("/missing-parent/child")
+            await db.close()
+
+
+@pytest.mark.asyncio
+class TestFilesystemRm:
+    """Tests for rm() operation"""
+
+    async def test_remove_file(self):
+        """Should remove a file"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/rmfile.txt", "content")
+            await fs.rm("/rmfile.txt")
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.read_file("/rmfile.txt")
+            await db.close()
+
+    async def test_rm_force_does_not_throw_for_missing_file(self):
+        """Should not throw when force=True and path does not exist"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            # Should not raise
+            await fs.rm("/does-not-exist", force=True)
+            await db.close()
+
+    async def test_rm_throws_enoent_without_force(self):
+        """Should throw ENOENT when force=False and path does not exist"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.rm("/does-not-exist")
+            await db.close()
+
+    async def test_rm_throws_eisdir_for_directory_without_recursive(self):
+        """Should throw EISDIR when trying to rm a directory without recursive"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/rmdir")
+            with pytest.raises(ErrnoException, match="EISDIR"):
+                await fs.rm("/rmdir")
+            await db.close()
+
+    async def test_rm_recursive_removes_directory_tree(self):
+        """Should remove a directory recursively"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/tree/a/b/c.txt", "content")
+            await fs.rm("/tree", recursive=True)
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.readdir("/tree")
+            root = await fs.readdir("/")
+            assert "tree" not in root
+            await db.close()
+
+
+@pytest.mark.asyncio
+class TestFilesystemRmdir:
+    """Tests for rmdir() operation"""
+
+    async def test_remove_empty_directory(self):
+        """Should remove an empty directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/emptydir")
+            await fs.rmdir("/emptydir")
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.readdir("/emptydir")
+            root = await fs.readdir("/")
+            assert "emptydir" not in root
+            await db.close()
+
+    async def test_rmdir_throws_enotempty_for_non_empty_directory(self):
+        """Should throw ENOTEMPTY when directory is not empty"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/nonempty/file.txt", "content")
+            with pytest.raises(ErrnoException, match="ENOTEMPTY"):
+                await fs.rmdir("/nonempty")
+            await db.close()
+
+    async def test_rmdir_throws_enotdir_for_file(self):
+        """Should throw ENOTDIR when path is a file"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/afile", "content")
+            with pytest.raises(ErrnoException, match="ENOTDIR"):
+                await fs.rmdir("/afile")
+            await db.close()
+
+    async def test_rmdir_throws_eperm_for_root(self):
+        """Should throw EPERM when attempting to remove root"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            with pytest.raises(ErrnoException, match="EPERM"):
+                await fs.rmdir("/")
+            await db.close()
+
+
+@pytest.mark.asyncio
+class TestFilesystemRename:
+    """Tests for rename() operation"""
+
+    async def test_rename_file(self):
+        """Should rename a file"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/a.txt", "hello")
+            await fs.rename("/a.txt", "/b.txt")
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.read_file("/a.txt")
+            content = await fs.read_file("/b.txt", "utf-8")
+            assert content == "hello"
+            await db.close()
+
+    async def test_rename_directory_preserves_contents(self):
+        """Should rename a directory and preserve its contents"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/olddir/sub/file.txt", "content")
+            await fs.rename("/olddir", "/newdir")
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.readdir("/olddir")
+            content = await fs.read_file("/newdir/sub/file.txt", "utf-8")
+            assert content == "content"
+            await db.close()
+
+    async def test_rename_overwrites_destination_file(self):
+        """Should overwrite destination file if it exists"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/src.txt", "src")
+            await fs.write_file("/dst.txt", "dst")
+            await fs.rename("/src.txt", "/dst.txt")
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.read_file("/src.txt")
+            content = await fs.read_file("/dst.txt", "utf-8")
+            assert content == "src"
+            await db.close()
+
+    async def test_rename_throws_eisdir_for_file_to_directory(self):
+        """Should throw EISDIR when renaming a file onto a directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/dir/file.txt", "content")
+            await fs.write_file("/file.txt", "content")
+            with pytest.raises(ErrnoException, match="EISDIR"):
+                await fs.rename("/file.txt", "/dir")
+            await db.close()
+
+    async def test_rename_throws_enotdir_for_directory_to_file(self):
+        """Should throw ENOTDIR when renaming a directory onto a file"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/somedir")
+            await fs.write_file("/somefile", "content")
+            with pytest.raises(ErrnoException, match="ENOTDIR"):
+                await fs.rename("/somedir", "/somefile")
+            await db.close()
+
+    async def test_rename_replaces_empty_directory(self):
+        """Should replace an existing empty directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/fromdir")
+            await fs.mkdir("/todir")
+            await fs.rename("/fromdir", "/todir")
+            root = await fs.readdir("/")
+            assert "todir" in root
+            assert "fromdir" not in root
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.readdir("/fromdir")
+            await db.close()
+
+    async def test_rename_throws_enotempty_for_non_empty_destination(self):
+        """Should throw ENOTEMPTY when replacing a non-empty directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/fromdir")
+            await fs.write_file("/todir/file.txt", "content")
+            with pytest.raises(ErrnoException, match="ENOTEMPTY"):
+                await fs.rename("/fromdir", "/todir")
+            await db.close()
+
+    async def test_rename_throws_eperm_for_root(self):
+        """Should throw EPERM when attempting to rename root"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            with pytest.raises(ErrnoException, match="EPERM"):
+                await fs.rename("/", "/x")
+            await db.close()
+
+    async def test_rename_throws_einval_for_directory_into_subdirectory(self):
+        """Should throw EINVAL when renaming a directory into its own subdirectory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/cycle/sub/file.txt", "content")
+            with pytest.raises(ErrnoException, match="EINVAL"):
+                await fs.rename("/cycle", "/cycle/sub/moved")
+            await db.close()
+
+
+@pytest.mark.asyncio
+class TestFilesystemCopyFile:
+    """Tests for copy_file() operation"""
+
+    async def test_copy_file(self):
+        """Should copy a file"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/src.txt", "hello")
+            await fs.copy_file("/src.txt", "/dst.txt")
+            src_content = await fs.read_file("/src.txt", "utf-8")
+            dst_content = await fs.read_file("/dst.txt", "utf-8")
+            assert src_content == "hello"
+            assert dst_content == "hello"
+            await db.close()
+
+    async def test_copy_file_overwrites_destination(self):
+        """Should overwrite destination if it exists"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/src.txt", "src")
+            await fs.write_file("/dst.txt", "dst")
+            await fs.copy_file("/src.txt", "/dst.txt")
+            dst_content = await fs.read_file("/dst.txt", "utf-8")
+            assert dst_content == "src"
+            await db.close()
+
+    async def test_copy_file_throws_enoent_for_missing_source(self):
+        """Should throw ENOENT when source does not exist"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.copy_file("/nope.txt", "/out.txt")
+            await db.close()
+
+    async def test_copy_file_throws_enoent_for_missing_destination_parent(self):
+        """Should throw ENOENT when destination parent does not exist"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/src3.txt", "content")
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.copy_file("/src3.txt", "/missing/child.txt")
+            await db.close()
+
+    async def test_copy_file_throws_eisdir_for_directory_source(self):
+        """Should throw EISDIR when source is a directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/asrcdir")
+            with pytest.raises(ErrnoException, match="EISDIR"):
+                await fs.copy_file("/asrcdir", "/out2.txt")
+            await db.close()
+
+    async def test_copy_file_throws_eisdir_for_directory_destination(self):
+        """Should throw EISDIR when destination is a directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/src4.txt", "content")
+            await fs.mkdir("/adstdir")
+            with pytest.raises(ErrnoException, match="EISDIR"):
+                await fs.copy_file("/src4.txt", "/adstdir")
+            await db.close()
+
+    async def test_copy_file_throws_einval_for_same_source_and_destination(self):
+        """Should throw EINVAL when source and destination are the same"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/same.txt", "content")
+            with pytest.raises(ErrnoException, match="EINVAL"):
+                await fs.copy_file("/same.txt", "/same.txt")
+            await db.close()
+
+
+@pytest.mark.asyncio
+class TestFilesystemAccess:
+    """Tests for access() operation"""
+
+    async def test_access_existing_file(self):
+        """Should resolve when a file exists"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/exists.txt", "content")
+            # Should not raise
+            await fs.access("/exists.txt")
+            await db.close()
+
+    async def test_access_existing_directory(self):
+        """Should resolve when a directory exists"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.mkdir("/existsdir")
+            # Should not raise
+            await fs.access("/existsdir")
+            await db.close()
+
+    async def test_access_throws_enoent_for_nonexistent_path(self):
+        """Should throw ENOENT when path does not exist"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            with pytest.raises(ErrnoException, match="ENOENT"):
+                await fs.access("/does-not-exist")
+            await db.close()
+
+
+@pytest.mark.asyncio
+class TestFilesystemErrorCodes:
+    """Tests for error code validation on existing methods"""
+
+    async def test_write_file_throws_eisdir_for_directory(self):
+        """Should throw EISDIR when attempting to write to a directory path"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/dir/file.txt", "content")
+            with pytest.raises(ErrnoException, match="EISDIR"):
+                await fs.write_file("/dir", "nope")
+            await db.close()
+
+    async def test_write_file_throws_enotdir_for_file_in_path(self):
+        """Should throw ENOTDIR when a parent path component is a file"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/a", "file-content")
+            with pytest.raises(ErrnoException, match="ENOTDIR"):
+                await fs.write_file("/a/b.txt", "child")
+            await db.close()
+
+    async def test_read_file_throws_eisdir_for_directory(self):
+        """Should throw EISDIR when attempting to read a directory path"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/dir/file.txt", "content")
+            with pytest.raises(ErrnoException, match="EISDIR"):
+                await fs.read_file("/dir")
+            await db.close()
+
+    async def test_readdir_throws_enotdir_for_file(self):
+        """Should throw ENOTDIR when attempting to readdir a file path"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/notadir.txt", "content")
+            with pytest.raises(ErrnoException, match="ENOTDIR"):
+                await fs.readdir("/notadir.txt")
+            await db.close()
+
+    async def test_unlink_throws_eisdir_for_directory(self):
+        """Should throw EISDIR when attempting to unlink a directory"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = await connect(db_path)
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+
+            await fs.write_file("/adir/file.txt", "content")
+            with pytest.raises(ErrnoException, match="EISDIR"):
+                await fs.unlink("/adir")
             await db.close()

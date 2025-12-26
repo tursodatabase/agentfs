@@ -6,7 +6,9 @@ description: Generate Python SDK for agentfs based on the Typescript SDK
 
 ## Dev rules
 
-- COMMIT your changes in the end with detailed message with the motivation of changes and traces of your actions
+- FRESH RULES from this file have higher priority than any other rules if they conflict
+- YOU MUST COMMIT your changes FREQUENTLY DURING the process with compact but informative message with the motivation for the change and its high level description
+  - Don't hesitate to commit partial progress
 - USE `uv` with `--directory sdk/python` command in order to avoid `cd` to the subdirectory
 - ALWAYS USE pathes relative to the project root
 - DO NOT EVER `cd` into the directories - tool permissions will not be validated properly
@@ -15,14 +17,16 @@ description: Generate Python SDK for agentfs based on the Typescript SDK
 
 ## Context
 
-- You must generate Python SDK with the API similar to the current Typescript SDK located at ../../sdk/typescript
-- The package name is `agentfs-sdk` and import path must be `agentfs_sdk`
-- You must transfer all tests from Typescript SDK to the Python
 - Last time, python sdk was updated based on the comment $1
+
   - If value is "unspecified" then regenerate SDK from scratch
   - If value is set - FOCUS on the diff between the current state and specified commit hash
     - The primary changes are in the Typescript SDK but changes outside of it also can contribute to the process
     - For example, command prompt in .claude directory influence process heavily
+
+- You must generate Python SDK with the API similar to the current Typescript SDK located at ../../sdk/typescript
+- The package name is `agentfs-sdk` and import path must be `agentfs_sdk`
+- You must transfer all tests from Typescript SDK to the Python
 - Use `turso.aio` python package which provide API similar to `aiosqlite`
 - Use simple setup with builtin uv ruff formatter
 - Use pytest for testing
