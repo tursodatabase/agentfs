@@ -1719,6 +1719,7 @@ pub async fn handle_getpeername<T: Guest<Sandbox>>(
     Ok(None)
 }
 
+
 /// The `chdir` system call.
 ///
 /// This intercepts `chdir` system calls and translates paths according to the mount table.
@@ -1736,6 +1737,24 @@ pub async fn handle_chdir<T: Guest<Sandbox>>(
     }
     Ok(None)
 }
+
+/// The `chmod` system call.
+///
+/// This intercepts `chmod` system calls and translates paths according to the mount table.
+pub async fn handle_chmod<T: Guest<Sandbox>>(
+    guest: &mut T,
+    args: &reverie::syscalls::Chmod,
+    mount_table: &MountTable,
+) -> Result<Option<Syscall>, Error> {
+    if let Some(path_addr) = args.path() {
+        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
+            let new_syscall = args.with_path(Some(new_path_addr));
+            return Ok(Some(Syscall::Chmod(new_syscall)));
+        }
+    }
+    Ok(None)
+}
+
 
 /// The `fchownat` system call.
 ///
@@ -1782,3 +1801,5 @@ pub async fn handle_fchownat<T: Guest<Sandbox>>(
 
     Ok(Some(result))
 }
+=======
+>>>>>>> 5b8386a (feat: intercept chmod system call)
