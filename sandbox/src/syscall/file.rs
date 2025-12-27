@@ -1625,23 +1625,13 @@ pub async fn handle_socket<T: Guest<Sandbox>>(
     args: &reverie::syscalls::Socket,
     fd_table: &FdTable,
 ) -> Result<Option<i64>, Error> {
-    // Execute the syscall to create the socket
-    let kernel_fd = guest.inject(Syscall::Socket(*args)).await?;
-
-    // If the syscall succeeded (returned a valid FD), virtualize it
-    if kernel_fd >= 0 {
-        // Create passthrough FD entry (sockets don't have paths)
-        let entry = FdEntry::Passthrough {
-            kernel_fd: kernel_fd as i32,
-            flags: 0,
-            path: None,
-        };
-        let virtual_fd = fd_table.allocate(entry);
-        Ok(Some(virtual_fd as i64))
-    } else {
-        // Return the error code as-is
-        Ok(Some(kernel_fd))
+    if let Some(path_addr) = args.path() {
+        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
+            let new_syscall = args.with_path(Some(new_path_addr));
+            return Ok(Some(Syscall::Chmod(new_syscall)));
+        }
     }
+    Ok(None)
 }
 
 /// The `sendto` system call.
