@@ -1737,6 +1737,23 @@ pub async fn handle_chdir<T: Guest<Sandbox>>(
     Ok(None)
 }
 
+/// The `rmdir` system call.
+///
+/// This intercepts `rmdir` system calls and translates paths according to the mount table.
+pub async fn handle_rmdir<T: Guest<Sandbox>>(
+    guest: &mut T,
+    args: &reverie::syscalls::Rmdir,
+    mount_table: &MountTable,
+) -> Result<Option<Syscall>, Error> {
+    if let Some(path_addr) = args.path() {
+        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
+            let new_syscall = args.with_path(Some(new_path_addr));
+            return Ok(Some(Syscall::Rmdir(new_syscall)));
+        }
+    }
+    Ok(None)
+}
+
 /// The `fchmodat` system call (used for `chmod` on ARM).
 ///
 /// This intercepts `fchmodat` system calls and translates paths according to the mount table.

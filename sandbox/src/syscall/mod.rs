@@ -133,6 +133,13 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
                 Ok(SyscallResult::Syscall(syscall))
             }
         }
+        Syscall::Rmdir(args) => {
+            if let Some(modified) = file::handle_rmdir(guest, args, mount_table).await? {
+                Ok(SyscallResult::Syscall(modified))
+            } else {
+                Ok(SyscallResult::Syscall(syscall))
+            }
+        }
         #[cfg(not(target_arch = "aarch64"))]
         Syscall::Fork(args) => {
             if let Some(result) = process::handle_fork(guest, args, fd_table).await? {
