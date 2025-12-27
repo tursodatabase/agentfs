@@ -16,8 +16,10 @@ pub async fn handle_mcp_server_command(
     tools_filter: Option<Vec<String>>,
 ) -> Result<()> {
     // Resolve and open AgentFS
-    let options = AgentFSOptions::resolve(&id_or_path)
-        .context(format!("Failed to resolve agent ID or path: {}", id_or_path))?;
+    let options = AgentFSOptions::resolve(&id_or_path).context(format!(
+        "Failed to resolve agent ID or path: {}",
+        id_or_path
+    ))?;
 
     eprintln!("Using agent: {}", id_or_path);
 
@@ -193,25 +195,13 @@ impl McpServer {
                 let params: MkdirParams = serde_json::from_value(arguments)?;
                 self.handle_mkdir(params).await?
             }
-            "rmdir" => {
-                let params: RmdirParams = serde_json::from_value(arguments)?;
-                self.handle_rmdir(params).await?
-            }
-            "rm" => {
-                let params: RmParams = serde_json::from_value(arguments)?;
-                self.handle_rm(params).await?
-            }
-            "unlink" => {
-                let params: UnlinkParams = serde_json::from_value(arguments)?;
-                self.handle_unlink(params).await?
-            }
-            "copy_file" => {
-                let params: CopyFileParams = serde_json::from_value(arguments)?;
-                self.handle_copy_file(params).await?
-            }
             "rename" => {
                 let params: RenameParams = serde_json::from_value(arguments)?;
                 self.handle_rename(params).await?
+            }
+            "remove" => {
+                let params: RemoveParams = serde_json::from_value(arguments)?;
+                self.handle_remove(params).await?
             }
             "stat" => {
                 let params: StatParams = serde_json::from_value(arguments)?;
@@ -232,10 +222,6 @@ impl McpServer {
             "kv_delete" => {
                 let params: KvDeleteParams = serde_json::from_value(arguments)?;
                 self.handle_kv_delete(params).await?
-            }
-            "kv_list" => {
-                let params: KvListParams = serde_json::from_value(arguments)?;
-                self.handle_kv_list(params).await?
             }
             _ => anyhow::bail!("Unknown tool: {}", name),
         };
@@ -372,82 +358,19 @@ impl McpServer {
             }));
         }
 
-        if self.is_tool_enabled("rmdir") {
+        if self.is_tool_enabled("remove") {
             tools.push(json!({
-                "name": "rmdir",
-                "description": "Remove an empty directory",
+                "name": "remove",
+                "description": "Remove a file or empty directory",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path of the directory to remove"
+                            "description": "Path of the file or directory to remove"
                         }
                     },
                     "required": ["path"]
-                }
-            }));
-        }
-
-        if self.is_tool_enabled("rm") {
-            tools.push(json!({
-                "name": "rm",
-                "description": "Remove a file or directory",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to remove"
-                        },
-                        "recursive": {
-                            "type": "boolean",
-                            "description": "Remove directories and their contents recursively"
-                        },
-                        "force": {
-                            "type": "boolean",
-                            "description": "Ignore nonexistent files"
-                        }
-                    },
-                    "required": ["path"]
-                }
-            }));
-        }
-
-        if self.is_tool_enabled("unlink") {
-            tools.push(json!({
-                "name": "unlink",
-                "description": "Delete a file",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file to delete"
-                        }
-                    },
-                    "required": ["path"]
-                }
-            }));
-        }
-
-        if self.is_tool_enabled("copy_file") {
-            tools.push(json!({
-                "name": "copy_file",
-                "description": "Copy a file",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "src": {
-                            "type": "string",
-                            "description": "Source file path"
-                        },
-                        "dest": {
-                            "type": "string",
-                            "description": "Destination file path"
-                        }
-                    },
-                    "required": ["src", "dest"]
                 }
             }));
         }
@@ -676,34 +599,14 @@ struct MkdirParams {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct RmdirParams {
-    path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RmParams {
-    path: String,
-    #[serde(default)]
-    recursive: Option<bool>,
-    #[serde(default)]
-    force: Option<bool>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct UnlinkParams {
-    path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CopyFileParams {
-    src: String,
-    dest: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct RenameParams {
     from: String,
     to: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoveParams {
+    path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -730,12 +633,6 @@ struct KvSetParams {
 #[derive(Debug, Serialize, Deserialize)]
 struct KvDeleteParams {
     key: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct KvListParams {
-    #[serde(default)]
-    prefix: Option<String>,
 }
 
 // ============================================================================
@@ -850,58 +747,16 @@ impl McpServer {
     }
 
     /// Remove empty directory
-    async fn handle_rmdir(&self, params: RmdirParams) -> Result<String> {
+    async fn handle_remove(&self, params: RemoveParams) -> Result<String> {
         let path = normalize_path(&params.path)?;
 
         self.agentfs
             .fs
-            .rmdir(&path)
+            .remove(&path)
             .await
             .context("Failed to remove directory")?;
 
         Ok(format!("Removed directory: {}", path))
-    }
-
-    /// Remove file or directory
-    async fn handle_rm(&self, params: RmParams) -> Result<String> {
-        let path = normalize_path(&params.path)?;
-        let recursive = params.recursive.unwrap_or(false);
-        let force = params.force.unwrap_or(false);
-
-        self.agentfs
-            .fs
-            .rm(&path, recursive, force)
-            .await
-            .context("Failed to remove")?;
-
-        Ok(format!("Removed: {}", path))
-    }
-
-    /// Delete file
-    async fn handle_unlink(&self, params: UnlinkParams) -> Result<String> {
-        let path = normalize_path(&params.path)?;
-
-        self.agentfs
-            .fs
-            .unlink(&path)
-            .await
-            .context("Failed to delete file")?;
-
-        Ok(format!("Deleted file: {}", path))
-    }
-
-    /// Copy file
-    async fn handle_copy_file(&self, params: CopyFileParams) -> Result<String> {
-        let src = normalize_path(&params.src)?;
-        let dest = normalize_path(&params.dest)?;
-
-        self.agentfs
-            .fs
-            .copy_file(&src, &dest)
-            .await
-            .context("Failed to copy file")?;
-
-        Ok(format!("Copied {} to {}", src, dest))
     }
 
     /// Rename/move file or directory
@@ -976,22 +831,6 @@ impl McpServer {
         Ok(format!("Deleted key: {}", params.key))
     }
 
-    /// List KV keys
-    async fn handle_kv_list(&self, params: KvListParams) -> Result<String> {
-        let prefix = params.prefix.unwrap_or_default();
-
-        let entries = self
-            .agentfs
-            .kv
-            .list(&prefix)
-            .await
-            .context("Failed to list keys")?;
-
-        let keys: Vec<String> = entries.into_iter().map(|(key, _)| key).collect();
-
-        Ok(serde_json::to_string_pretty(&keys)?)
-    }
-
     /// List all files as resources
     async fn list_resources(&self) -> Result<Vec<JsonValue>> {
         let mut resources = Vec::new();
@@ -1062,12 +901,12 @@ impl McpServer {
 
 #[derive(Debug, Serialize)]
 struct StatsResponse {
-    ino: u64,
+    ino: i64,
     mode: u32,
-    nlink: u64,
+    nlink: u32,
     uid: u32,
     gid: u32,
-    size: u64,
+    size: i64,
     atime: i64,
     mtime: i64,
     ctime: i64,
