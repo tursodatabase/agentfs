@@ -1625,13 +1625,23 @@ pub async fn handle_socket<T: Guest<Sandbox>>(
     args: &reverie::syscalls::Socket,
     fd_table: &FdTable,
 ) -> Result<Option<i64>, Error> {
-    if let Some(path_addr) = args.path() {
-        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
-            let new_syscall = args.with_path(Some(new_path_addr));
-            return Ok(Some(Syscall::Chmod(new_syscall)));
-        }
+    // Execute the syscall to create the socket
+    let kernel_fd = guest.inject(Syscall::Socket(*args)).await?;
+
+    // If the syscall succeeded (returned a valid FD), virtualize it
+    if kernel_fd >= 0 {
+        // Create passthrough FD entry (sockets don't have paths)
+        let entry = FdEntry::Passthrough {
+            kernel_fd: kernel_fd as i32,
+            flags: 0,
+            path: None,
+        };
+        let virtual_fd = fd_table.allocate(entry);
+        Ok(Some(virtual_fd as i64))
+    } else {
+        // Return the error code as-is
+        Ok(Some(kernel_fd))
     }
-    Ok(None)
 }
 
 /// The `sendto` system call.
@@ -1709,7 +1719,6 @@ pub async fn handle_getpeername<T: Guest<Sandbox>>(
     Ok(None)
 }
 
-
 /// The `chdir` system call.
 ///
 /// This intercepts `chdir` system calls and translates paths according to the mount table.
@@ -1744,7 +1753,6 @@ pub async fn handle_chmod<T: Guest<Sandbox>>(
     }
     Ok(None)
 }
-
 
 /// The `fchownat` system call.
 ///
@@ -1781,10 +1789,8 @@ pub async fn handle_fchownat<T: Guest<Sandbox>>(
     };
 
     let new_path_addr = translated_path_opt.unwrap_or(pathname_addr);
-    let new_syscall = Syscall::Fchownat(
-        args.with_dirfd(kernel_dirfd)
-            .with_path(Some(new_path_addr)),
-    );
+    let new_syscall =
+        Syscall::Fchownat(args.with_dirfd(kernel_dirfd).with_path(Some(new_path_addr)));
 
     // Build and inject the syscall with virtualized parameters
     let result = guest.inject(new_syscall).await?;
