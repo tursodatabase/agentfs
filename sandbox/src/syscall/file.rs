@@ -1791,5 +1791,3 @@ pub async fn handle_fchownat<T: Guest<Sandbox>>(
 
     Ok(Some(result))
 }
-=======
->>>>>>> 5b8386a (feat: intercept chmod system call)
