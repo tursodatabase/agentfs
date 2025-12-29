@@ -210,9 +210,15 @@ agentfs run [OPTIONS] <COMMAND> [ARGS]...
 - `[ARGS]...` - Arguments for the command
 
 **Options:**
+- `--session <ID>` - Session identifier for sharing the delta layer across multiple runs. If not provided, a unique session ID is generated for each run. Use the same session ID to share modifications between runs or to join an existing session from another terminal.
+- `--allow <PATH>` - Additional paths to allow read-write access (can be specified multiple times)
+- `--no-default-allows` - Disable default allowed directories (~/.config, ~/.cache, ~/.local, ~/.claude, etc.)
 - `--experimental-sandbox` - Use experimental ptrace-based syscall interception sandbox
 - `--strace` - Enable strace-like output for system calls (only with `--experimental-sandbox`)
 - `-h, --help` - Print help
+
+**Environment Variables:**
+- `AGENTFS_SESSION` - Set automatically inside the sandbox to the current session ID. This allows scripts and programs to identify which session they are running in.
 
 **Examples:**
 
@@ -224,6 +230,32 @@ agentfs run /bin/bash
 Run a Python script:
 ```bash
 agentfs run python3 agent.py
+```
+
+Run with a named session to persist changes across runs:
+```bash
+# First run - creates session "my-session"
+agentfs run --session my-session /bin/bash
+# ... make some changes, then exit
+
+# Second run - reuses the same delta layer
+agentfs run --session my-session /bin/bash
+# ... changes from the first run are still present
+```
+
+Join an existing session from another terminal:
+```bash
+# Terminal 1: Start a session
+agentfs run --session shared-session /bin/bash
+
+# Terminal 2: Join the same session
+agentfs run --session shared-session /bin/bash
+# Both terminals share the same copy-on-write filesystem
+```
+
+Access the session ID from within the sandbox:
+```bash
+agentfs run /bin/bash -c 'echo "Session: $AGENTFS_SESSION"'
 ```
 
 Use experimental ptrace sandbox with strace output:

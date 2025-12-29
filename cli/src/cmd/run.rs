@@ -12,6 +12,7 @@ pub async fn handle_run_command(
     no_default_allows: bool,
     experimental_sandbox: bool,
     strace: bool,
+    session: Option<String>,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
@@ -19,12 +20,15 @@ pub async fn handle_run_command(
         if !allow.is_empty() || no_default_allows {
             eprintln!("Warning: --allow and --no-default-allows are not supported with --experimental-sandbox, ignoring");
         }
+        if session.is_some() {
+            eprintln!("Warning: --session is not supported with --experimental-sandbox, ignoring");
+        }
         crate::sandbox::ptrace::run_cmd(strace, command, args).await;
     } else {
         if strace {
             eprintln!("Warning: --strace is only supported with --experimental-sandbox, ignoring");
         }
-        crate::sandbox::overlay::run_cmd(allow, no_default_allows, command, args).await?;
+        crate::sandbox::overlay::run_cmd(allow, no_default_allows, session, command, args).await?;
     }
     Ok(())
 }

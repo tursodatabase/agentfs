@@ -9,6 +9,7 @@ pub async fn handle_run_command(
     _no_default_allows: bool,
     _experimental_sandbox: bool,
     _strace: bool,
+    _session: Option<String>,
     _command: PathBuf,
     _args: Vec<String>,
 ) -> Result<()> {

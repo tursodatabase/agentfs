@@ -63,6 +63,12 @@ pub enum Command {
         #[arg(long = "strace")]
         strace: bool,
 
+        /// Session identifier for sharing delta layer across multiple runs.
+        /// If not provided, a unique session ID is generated for each run.
+        /// Use the same session ID to share the delta layer between runs.
+        #[arg(long = "session", value_name = "ID")]
+        session: Option<String>,
+
         /// Command to execute
         command: PathBuf,
 

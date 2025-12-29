@@ -2244,7 +2244,7 @@ mod tests {
 
         // Verify correct number of chunks
         let chunk_size = fs.chunk_size();
-        let expected_chunks = (data_size + chunk_size - 1) / chunk_size;
+        let expected_chunks = data_size.div_ceil(chunk_size);
         let ino = fs.resolve_path("/large.bin").await?.unwrap();
         let actual_chunks = fs.get_chunk_count(ino).await? as usize;
         assert_eq!(actual_chunks, expected_chunks);
@@ -2432,11 +2432,7 @@ mod tests {
             let expected_data: Vec<u8> = (0..*size).map(|i| (i % 256) as u8).collect();
             assert_eq!(read_data, expected_data, "Data mismatch for {}", path);
 
-            let expected_chunks = if *size == 0 {
-                0
-            } else {
-                (size + chunk_size - 1) / chunk_size
-            };
+            let expected_chunks = size.div_ceil(chunk_size);
             let ino = fs.resolve_path(path).await?.unwrap();
             let actual_chunks = fs.get_chunk_count(ino).await? as usize;
             assert_eq!(

@@ -27,12 +27,13 @@ pub async fn handle_run_command(
     _no_default_allows: bool,
     _experimental_sandbox: bool,
     _strace: bool,
+    session_id: Option<String>,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
-    let session = setup_run_directory()?;
+    let session = setup_run_directory(session_id)?;
 
     // Initialize the AgentFS database
     let db_path_str = session
@@ -134,9 +135,12 @@ struct RunSession {
     mountpoint: PathBuf,
 }
 
-/// Create a unique run directory with database and mountpoint paths.
-fn setup_run_directory() -> Result<RunSession> {
-    let run_id = uuid::Uuid::new_v4().to_string();
+/// Create a run directory with database and mountpoint paths.
+///
+/// If `session_id` is provided, uses that as the run ID (allowing multiple
+/// runs to share the same delta layer). Otherwise generates a unique UUID.
+fn setup_run_directory(session_id: Option<String>) -> Result<RunSession> {
+    let run_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let home_dir = dirs::home_dir().context("Failed to get home directory")?;
     let run_dir = home_dir.join(".agentfs").join("run").join(&run_id);
     std::fs::create_dir_all(&run_dir).context("Failed to create run directory")?;

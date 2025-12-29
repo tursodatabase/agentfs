@@ -26,6 +26,7 @@ fn main() {
             no_default_allows,
             experimental_sandbox,
             strace,
+            session,
             command,
             args,
         } => {
@@ -35,6 +36,7 @@ fn main() {
                 no_default_allows,
                 experimental_sandbox,
                 strace,
+                session,
                 command,
                 args,
             )) {
