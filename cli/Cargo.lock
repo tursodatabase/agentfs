@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs"
-version = "0.4.0-pre.7"
+version = "0.4.0-pre.8"
 dependencies = [
  "aegis",
  "agentfs-sandbox",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sandbox"
-version = "0.4.0-pre.7"
+version = "0.4.0-pre.8"
 dependencies = [
  "agentfs-sdk",
  "anyhow",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sdk"
-version = "0.4.0-pre.7"
+version = "0.4.0-pre.8"
 dependencies = [
  "aegis",
  "anyhow",
