@@ -111,13 +111,6 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
         Syscall::Read(args) => file::handle_read(guest, syscall, args, fd_table).await,
         Syscall::Write(args) => file::handle_write(guest, syscall, args, fd_table).await,
         Syscall::Close(args) => file::handle_close(guest, syscall, args, fd_table).await,
-        Syscall::Chmod(args) => {
-            if let Some(modified) = file::handle_chmod(guest, args, mount_table).await? {
-                Ok(SyscallResult::Syscall(modified))
-            } else {
-                Ok(SyscallResult::Syscall(syscall))
-            }
-        }
         Syscall::Dup(args) => {
             if let Some(result) = file::handle_dup(guest, args, fd_table).await? {
                 Ok(SyscallResult::Value(result))
@@ -463,6 +456,15 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
             match *num {
                 Sysno::rseq => Ok(SyscallResult::Syscall(syscall)), // rseq - passthrough
                 Sysno::lseek => Ok(SyscallResult::Syscall(syscall)),
+                Sysno::chmod => {
+                    if let Some(result) =
+                        file::handle_chmod(guest, args, mount_table).await?
+                    {
+                        Ok(SyscallResult::Value(result))
+                    } else {
+                        Ok(SyscallResult::Syscall(syscall))
+                    }
+                }
                 Sysno::faccessat2 => {
                     if let Some(result) =
                         file::handle_faccessat2(guest, args, mount_table, fd_table).await?

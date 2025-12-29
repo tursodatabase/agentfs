@@ -1740,18 +1740,40 @@ pub async fn handle_chdir<T: Guest<Sandbox>>(
 /// The `chmod` system call.
 ///
 /// This intercepts `chmod` system calls and translates paths according to the mount table.
+/// Signature: int chmod(const char *pathname, mode_t mode);
 pub async fn handle_chmod<T: Guest<Sandbox>>(
     guest: &mut T,
-    args: &reverie::syscalls::Chmod,
+    syscall_args: &reverie::syscalls::SyscallArgs,
     mount_table: &MountTable,
-) -> Result<Option<Syscall>, Error> {
-    if let Some(path_addr) = args.path() {
-        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
-            let new_syscall = args.with_path(Some(new_path_addr));
-            return Ok(Some(Syscall::Chmod(new_syscall)));
-        }
+) -> Result<Option<i64>, Error> {
+    use reverie::syscalls::PathPtr;
+
+    let pathname_addr: PathPtr = unsafe { std::mem::transmute(syscall_args.arg0) };
+    let mode = syscall_args.arg1 as u32;
+
+    // Check if path needs translation
+    if let Some(new_path_addr) = translate_path(guest, pathname_addr, mount_table).await? {
+        let new_path_raw: usize = unsafe { std::mem::transmute(new_path_addr) };
+
+        // Build and inject the syscall with translated path
+        let result = guest
+            .inject(Syscall::Other(
+                reverie::syscalls::Sysno::chmod,
+                reverie::syscalls::SyscallArgs {
+                    arg0: new_path_raw,
+                    arg1: mode as usize,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
+            ))
+            .await?;
+
+        Ok(Some(result))
+    } else {
+        Ok(None)
     }
-    Ok(None)
 }
 
 /// The `fchownat` system call.
