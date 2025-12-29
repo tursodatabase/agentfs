@@ -301,6 +301,10 @@ impl AgentFS {
         // Disable synchronous mode for filesystem fsync() semantics.
         conn.execute("PRAGMA synchronous = OFF", ()).await?;
 
+        // Set busy timeout to handle concurrent access gracefully.
+        // Without this, concurrent transactions fail immediately with SQLITE_BUSY.
+        conn.execute("PRAGMA busy_timeout = 5000", ()).await?;
+
         // Get chunk_size from config (or use default)
         let chunk_size = Self::read_chunk_size(&conn).await?;
 
