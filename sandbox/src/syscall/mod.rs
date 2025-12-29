@@ -456,10 +456,8 @@ pub async fn dispatch_syscall<T: Guest<Sandbox>>(
             match *num {
                 Sysno::rseq => Ok(SyscallResult::Syscall(syscall)), // rseq - passthrough
                 Sysno::lseek => Ok(SyscallResult::Syscall(syscall)),
-                Sysno::chmod => {
-                    if let Some(result) =
-                        file::handle_chmod(guest, args, mount_table).await?
-                    {
+                Sysno::fchmodat => {
+                    if let Some(result) = file::handle_chmod(guest, args, mount_table).await? {
                         Ok(SyscallResult::Value(result))
                     } else {
                         Ok(SyscallResult::Syscall(syscall))

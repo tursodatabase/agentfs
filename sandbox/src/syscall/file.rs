@@ -1737,40 +1737,43 @@ pub async fn handle_chdir<T: Guest<Sandbox>>(
     Ok(None)
 }
 
-/// The `chmod` system call.
+/// The `fchmodat` system call (used for `chmod` on ARM).
 ///
-/// This intercepts `chmod` system calls and translates paths according to the mount table.
-/// Signature: int chmod(const char *pathname, mode_t mode);
+/// This intercepts `fchmodat` system calls and translates paths according to the mount table.
+/// Signature: int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags);
+/// Note: On ARM (aarch64), chmod is implemented via fchmodat with AT_FDCWD.
 pub async fn handle_chmod<T: Guest<Sandbox>>(
     guest: &mut T,
     syscall_args: &reverie::syscalls::SyscallArgs,
     mount_table: &MountTable,
 ) -> Result<Option<i64>, Error> {
-    use reverie::syscalls::PathPtr;
+    use reverie::syscalls::{Fchmodat, PathPtr, Syscall};
 
-    let pathname_addr: PathPtr = unsafe { std::mem::transmute(syscall_args.arg0) };
-    let mode = syscall_args.arg1 as u32;
+    // 1. 取出四个参数
+    let dirfd = syscall_args.arg0 as i32;
+    let pathname_addr = unsafe { PathPtr::from_raw(syscall_args.arg1 as _) };
+    let mode = syscall_args.arg2 as u32;
+    let flags = syscall_args.arg3 as i32;
+
+    // Only handle AT_FDCWD case (chmod equivalent)
+    // If dirfd is a real fd, it should be handled by a separate fchmodat handler
+    if dirfd != libc::AT_FDCWD {
+        return Ok(None);
+    }
 
     // Check if path needs translation
     if let Some(new_path_addr) = translate_path(guest, pathname_addr, mount_table).await? {
-        let new_path_raw: usize = unsafe { std::mem::transmute(new_path_addr) };
-
         // Build and inject the syscall with translated path
-        let result = guest
-            .inject(Syscall::Other(
-                reverie::syscalls::Sysno::chmod,
-                reverie::syscalls::SyscallArgs {
-                    arg0: new_path_raw,
-                    arg1: mode as usize,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                },
-            ))
+        let injected = guest
+            .inject(Syscall::Fchmodat(Fchmodat {
+                dirfd: AT_FDCWD,
+                pathname: new_path_addr,
+                mode,
+                flags,
+            }))
             .await?;
 
-        Ok(Some(result))
+        Ok(Some(injected))
     } else {
         Ok(None)
     }
