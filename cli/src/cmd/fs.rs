@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 
-use agentfs_sdk::{AgentFS, AgentFSOptions};
+use agentfs_sdk::AgentFSOptions;
 use anyhow::{Context, Result as AnyhowResult};
-use turso::{Builder, Value};
+use turso::Value;
+
+use crate::cmd::init::open_agentfs;
 
 const ROOT_INO: i64 = 1;
 const S_IFMT: u32 = 0o170000;
@@ -16,15 +18,10 @@ pub async fn ls_filesystem(
     path: &str,
 ) -> AnyhowResult<()> {
     let options = AgentFSOptions::resolve(&id_or_path)?;
-    let db_path = options.path.context("No database path resolved")?;
     eprintln!("Using agent: {}", id_or_path);
 
-    let db = Builder::new_local(&db_path)
-        .build()
-        .await
-        .context("Failed to open filesystem")?;
-
-    let conn = db.connect().context("Failed to connect to filesystem")?;
+    let (_, agentfs) = open_agentfs(options).await?;
+    let conn = agentfs.get_connection();
 
     if path != "/" {
         anyhow::bail!("Only root directory (/) is currently supported");
@@ -104,14 +101,8 @@ pub async fn cat_filesystem(
     path: &str,
 ) -> AnyhowResult<()> {
     let options = AgentFSOptions::resolve(&id_or_path)?;
-    let db_path = options.path.context("No database path resolved")?;
-
-    let db = Builder::new_local(&db_path)
-        .build()
-        .await
-        .context("Failed to open filesystem")?;
-
-    let conn = db.connect().context("Failed to connect to filesystem")?;
+    let (_, agentfs) = open_agentfs(options).await?;
+    let conn = agentfs.get_connection();
 
     let path_components: Vec<&str> = path
         .trim_start_matches('/')
@@ -236,7 +227,7 @@ pub async fn diff_filesystem(id_or_path: String) -> AnyhowResult<()> {
     let options = AgentFSOptions::resolve(&id_or_path)?;
     eprintln!("Using agent: {}", id_or_path);
 
-    let agent = AgentFS::open(options)
+    let (_, agent) = open_agentfs(options)
         .await
         .context("Failed to open agent")?;
 

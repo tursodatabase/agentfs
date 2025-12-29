@@ -1,9 +1,9 @@
-use agentfs_sdk::{AgentFS, AgentFSOptions, FileSystem, HostFS, OverlayFS};
+use agentfs_sdk::{AgentFSOptions, FileSystem, HostFS, OverlayFS};
 use anyhow::Result;
 use std::{os::unix::fs::MetadataExt, path::PathBuf, sync::Arc};
-use turso::Value;
+use turso::value::Value;
 
-use crate::fuse::FuseMountOptions;
+use crate::{cmd::init::open_agentfs, fuse::FuseMountOptions};
 
 /// Arguments for the mount command.
 #[derive(Debug, Clone)]
@@ -63,7 +63,7 @@ pub fn mount(args: MountArgs) -> Result<()> {
 
     let mount = move || {
         let rt = crate::get_runtime();
-        let agentfs = rt.block_on(AgentFS::open(opts))?;
+        let (_db, agentfs) = rt.block_on(open_agentfs(opts))?;
 
         // Check for overlay configuration
         let fs: Arc<dyn FileSystem> = rt.block_on(async {

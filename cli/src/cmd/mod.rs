@@ -1,6 +1,7 @@
 pub mod completions;
 pub mod fs;
 pub mod init;
+pub mod sync;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mount;

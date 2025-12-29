@@ -4,8 +4,9 @@ use clap_complete::CompleteEnv;
 use agentfs::{
     cmd::{self, completions::handle_completions},
     get_runtime,
-    parser::{Args, Command, FsCommand},
+    parser::{Args, Command, FsCommand, SyncCommand},
 };
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() {
     reset_sigpipe();
@@ -13,14 +14,70 @@ fn main() {
     CompleteEnv::with_factory(Args::command).complete();
     let args = Args::parse();
 
+    let default_env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::level_filters::LevelFilter::ERROR.into())
+        .from_env_lossy();
+    if let Err(e) = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_line_number(true)
+                .with_thread_ids(true),
+        )
+        .with(default_env_filter.add_directive("rustyline=off".parse().unwrap()))
+        .try_init()
+    {
+        println!("Unable to setup tracing appender: {e:?}");
+    }
+
     match args.command {
-        Command::Init { id, force, base } => {
+        Command::Init {
+            id,
+            force,
+            base,
+            sync,
+        } => {
             let rt = get_runtime();
-            if let Err(e) = rt.block_on(cmd::init::init_database(id, force, base)) {
+            if let Err(e) = rt.block_on(cmd::init::init_database(id, sync, force, base)) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         }
+        Command::Sync {
+            id_or_path,
+            command,
+        } => match command {
+            SyncCommand::Pull => {
+                let rt = get_runtime();
+                if let Err(e) = rt.block_on(cmd::sync::handle_pull_command(id_or_path)) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            SyncCommand::Push => {
+                let rt = get_runtime();
+                if let Err(e) = rt.block_on(cmd::sync::handle_push_command(id_or_path)) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            SyncCommand::Checkpoint => {
+                let rt = get_runtime();
+                if let Err(e) = rt.block_on(cmd::sync::handle_checkpoint_command(id_or_path)) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            SyncCommand::Stats => {
+                let rt = get_runtime();
+                if let Err(e) = rt.block_on(cmd::sync::handle_stats_command(
+                    &mut std::io::stdout(),
+                    id_or_path,
+                )) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        },
         Command::Run {
             allow,
             no_default_allows,
@@ -71,13 +128,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Command::Fs { command } => {
+        Command::Fs {
+            command,
+            id_or_path,
+        } => {
             let rt = get_runtime();
             match command {
-                FsCommand::Ls {
-                    id_or_path,
-                    fs_path,
-                } => {
+                FsCommand::Ls { fs_path } => {
                     if let Err(e) = rt.block_on(cmd::fs::ls_filesystem(
                         &mut std::io::stdout(),
                         id_or_path,
@@ -87,10 +144,7 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
-                FsCommand::Cat {
-                    id_or_path,
-                    file_path,
-                } => {
+                FsCommand::Cat { file_path } => {
                     if let Err(e) = rt.block_on(cmd::fs::cat_filesystem(
                         &mut std::io::stdout(),
                         id_or_path,
