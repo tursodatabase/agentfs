@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Database } from "@tursodatabase/database";
-import { Filesystem } from "../src/filesystem.js";
+import { AgentFS as Filesystem } from "../src/filesystem/agentfs.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";

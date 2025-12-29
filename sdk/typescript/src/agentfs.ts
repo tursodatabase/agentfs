@@ -1,6 +1,6 @@
 import type { DatabasePromise } from '@tursodatabase/database-common';
 import { KvStore } from './kvstore.js';
-import { Filesystem } from './filesystem.js';
+import { AgentFS as Filesystem } from './filesystem/index.js';
 import { ToolCalls } from './toolcalls.js';
 
 /**

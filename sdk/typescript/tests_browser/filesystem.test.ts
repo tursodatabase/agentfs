@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { Database } from "@tursodatabase/database-wasm/vite";
-import { Filesystem } from "../src/filesystem.js";
+import { AgentFS as Filesystem } from "../src/filesystem/agentfs.js";
 
 import { Buffer } from "buffer";
 globalThis.Buffer = Buffer;

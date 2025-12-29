@@ -9,7 +9,7 @@
  * @see https://docs.turso.tech/agentfs/sdk/typescript
  */
 
-import type { Filesystem } from "../../filesystem.js";
+import type { AgentFS as Filesystem } from "../../filesystem/agentfs.js";
 import { AgentFS, type AgentFSOptions } from "../../index_node.js";
 import type {
   BufferEncoding,

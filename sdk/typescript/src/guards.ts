@@ -1,6 +1,6 @@
 import type { DatabasePromise } from '@tursodatabase/database-common';
 import { createFsError, type FsSyscall } from './errors.js';
-import { S_IFDIR, S_IFLNK, S_IFMT } from './filesystem.js';
+import { S_IFDIR, S_IFLNK, S_IFMT } from './filesystem/interface.js';
 
 async function getInodeMode(db: DatabasePromise, ino: number): Promise<number | null> {
   const stmt = db.prepare('SELECT mode FROM fs_inode WHERE ino = ?');

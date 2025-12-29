@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from "fs";
 import { AgentFSCore, AgentFSOptions } from "./agentfs.js";
 import { DatabasePromise } from "@tursodatabase/database-common";
 import { KvStore } from "./kvstore.js";
-import { Filesystem } from "./filesystem.js";
+import { AgentFS as Filesystem } from "./filesystem/index.js";
 import { ToolCalls } from "./toolcalls.js";
 
 export class AgentFS extends AgentFSCore {
@@ -71,7 +71,7 @@ export class AgentFS extends AgentFSCore {
 
 export { AgentFSOptions } from './agentfs.js';
 export { KvStore } from './kvstore.js';
-export { Filesystem } from './filesystem.js';
-export type { Stats } from './filesystem.js';
+export { AgentFS as Filesystem } from './filesystem/index.js';
+export type { Stats, DirEntry, FilesystemStats, FileHandle, FileSystem } from './filesystem/index.js';
 export { ToolCalls } from './toolcalls.js';
 export type { ToolCall, ToolCallStats } from './toolcalls.js';
