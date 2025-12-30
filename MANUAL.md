@@ -216,7 +216,7 @@ agentfs run [OPTIONS] <COMMAND> [ARGS]...
 
 **Environment Variables:**
 - `AGENTFS` - Set to `1` inside the sandbox to indicate an AgentFS environment
-- `AGENTFS_SANDBOX` - Set to the sandbox type (`macos-sandbox` or `overlay`)
+- `AGENTFS_SANDBOX` - Set to the sandbox type (`macos-sandbox` or `linux-namespace`)
 
 #### Platform-Specific Sandboxing
 

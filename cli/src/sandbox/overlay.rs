@@ -927,7 +927,7 @@ fn exec_command(command: PathBuf, args: Vec<String>, session_id: &str) -> ! {
 /// Setup environment variables for the sandbox.
 fn setup_env_vars(session_id: &str) {
     std::env::set_var("AGENTFS", "1");
-    std::env::set_var("AGENTFS_SANDBOX", "linux-container");
+    std::env::set_var("AGENTFS_SANDBOX", "linux-namespace");
     std::env::set_var("AGENTFS_SESSION", session_id);
     std::env::set_var("PS1", "🤖 \\u@\\h:\\w\\$ ");
 

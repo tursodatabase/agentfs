@@ -188,7 +188,7 @@ pub fn wrap_command_with_sandbox(
 
     // Set environment variables
     cmd.env("AGENTFS", "1");
-    cmd.env("AGENTFS_SANDBOX", "seatbelt");
+    cmd.env("AGENTFS_SANDBOX", "macos-sandbox");
 
     cmd
 }
