@@ -5,8 +5,11 @@ pub mod sandbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod daemon;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub mod fuse;
+
+#[cfg(target_os = "linux")]
+pub mod fuser;
 
 #[cfg(unix)]
 pub mod nfs;

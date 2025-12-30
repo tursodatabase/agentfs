@@ -22,40 +22,30 @@ serde = { version = "1.0", features = ["derive"] }
 parking_lot = "0.12.5"
 clap_complete = { version = "=4.5.61", features = ["unstable-dynamic"] }
 dirs = "6"
+# NFS server for userspace filesystem (used by `agentfs run` and `agentfs nfs`)
+uuid = { version = "1", features = ["v4"] }
+nfsserve = "0.10"
+async-trait = "0.1"
 
 # Unix dependencies
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Linux-only dependencies for FUSE and NFS functionality
+# Linux-only dependencies for FUSE and sandbox functionality
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.15", default-features = false, features = ["abi-7-29"] }
-uuid = { version = "1", features = ["v4"] }
-# NFS server for userspace filesystem (used by `agentfs run` and `agentfs nfs`)
-nfsserve = "0.10"
-async-trait = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Sandbox dependencies - (requires libunwind-dev on ARM)
 agentfs-sandbox = { path = "../sandbox" }
 reverie = { git = "https://github.com/facebookexperimental/reverie" }
 reverie-ptrace = { git = "https://github.com/facebookexperimental/reverie" }
 reverie-process = { git = "https://github.com/facebookexperimental/reverie" }
-
-# macOS dependencies for FUSE and NFS functionality
-[target.'cfg(target_os = "macos")'.dependencies]
-fuser = { version = "0.15", default-features = false, features = [
-    "abi-7-29",
-    "libfuse",
-] }
-# NFS server for userspace filesystem without FUSE (used by `agentfs run`)
-nfsserve = "0.10"
-uuid = { version = "1", features = ["v4"] }
-async-trait = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Ensure transitive `aegis` (pulled in by `turso`) builds on macOS arm64 by
-# forcing the `pure-rust` feature, which skips the C/NEON backend that fails
-# with Apple clang (`veor3q_u8` in `aegis128l_neon_sha3.c`).
-aegis = { version = "0.9.6", features = ["pure-rust"] }
+# Vendored fuser dependencies (pure-Rust FUSE implementation)
+log = "0.4"
+memchr = "2.7"
+page_size = "0.6"
+smallvec = "1.6"
+zerocopy = { version = "0.8", features = ["derive"] }
+nix = { version = "0.29", features = ["fs", "user"] }
 
 
 # The profile that 'dist' will build with
