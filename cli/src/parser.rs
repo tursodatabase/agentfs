@@ -69,8 +69,8 @@ pub enum Command {
         #[arg(long = "session", value_name = "ID")]
         session: Option<String>,
 
-        /// Command to execute
-        command: PathBuf,
+        /// Command to execute (defaults to bash on Linux, zsh on macOS)
+        command: Option<PathBuf>,
 
         /// Arguments for the command
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

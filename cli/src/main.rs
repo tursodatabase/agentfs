@@ -30,6 +30,7 @@ fn main() {
             command,
             args,
         } => {
+            let command = command.unwrap_or_else(default_shell);
             let rt = get_runtime();
             if let Err(e) = rt.block_on(cmd::handle_run_command(
                 allow,
@@ -131,3 +132,16 @@ fn reset_sigpipe() {
 
 #[cfg(not(unix))]
 fn reset_sigpipe() {}
+
+/// Returns the default shell for the current platform.
+/// Linux uses bash, macOS uses zsh.
+fn default_shell() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        std::path::PathBuf::from("zsh")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::path::PathBuf::from("bash")
+    }
+}
