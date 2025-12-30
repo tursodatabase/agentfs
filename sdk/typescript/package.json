@@ -1,6 +1,6 @@
 {
   "name": "agentfs-sdk",
-  "version": "0.4.0-pre.10",
+  "version": "0.4.0-pre.11",
   "description": "AgentFS SDK",
   "main": "dist/index_node.js",
   "types": "dist/index_node.d.ts",
