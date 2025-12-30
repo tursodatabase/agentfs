@@ -21,6 +21,16 @@ use std::{
 };
 use tokio::runtime::Runtime;
 
+/// Convert an anyhow::Error to an errno code for FUSE replies.
+///
+/// If the error is a filesystem-specific FsError, returns the appropriate
+/// errno code (ENOENT, EEXIST, ENOTDIR, etc.). Otherwise falls back to EIO.
+fn error_to_errno(e: &anyhow::Error) -> i32 {
+    e.downcast_ref::<FsError>()
+        .map(|fs_err| fs_err.to_errno())
+        .unwrap_or(libc::EIO)
+}
+
 /// Cache entries never expire - we explicitly invalidate on mutations.
 /// This is safe because we are the only writer to the filesystem.
 const TTL: Duration = Duration::MAX;
@@ -111,7 +121,7 @@ impl Filesystem for AgentFSFuse {
                 reply.entry(&TTL, &attr, 0);
             }
             Ok(None) => reply.error(libc::ENOENT),
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -131,7 +141,7 @@ impl Filesystem for AgentFSFuse {
         match result {
             Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
             Ok(None) => reply.error(libc::ENOENT),
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -153,7 +163,7 @@ impl Filesystem for AgentFSFuse {
         match result {
             Ok(Some(target)) => reply.data(target.as_bytes()),
             Ok(None) => reply.error(libc::ENOENT),
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -191,8 +201,8 @@ impl Filesystem for AgentFSFuse {
                 .runtime
                 .block_on(async move { fs.chmod(&path, new_mode).await });
 
-            if result.is_err() {
-                reply.error(libc::EIO);
+            if let Err(e) = result {
+                reply.error(error_to_errno(&e));
                 return;
             }
         }
@@ -227,8 +237,8 @@ impl Filesystem for AgentFSFuse {
                 })
             };
 
-            if result.is_err() {
-                reply.error(libc::EIO);
+            if let Err(e) = result {
+                reply.error(error_to_errno(&e));
                 return;
             }
         }
@@ -245,7 +255,7 @@ impl Filesystem for AgentFSFuse {
         match result {
             Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
             Ok(None) => reply.error(libc::ENOENT),
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -285,8 +295,8 @@ impl Filesystem for AgentFSFuse {
                 reply.error(libc::ENOENT);
                 return;
             }
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                reply.error(error_to_errno(&e));
                 return;
             }
         };
@@ -384,8 +394,8 @@ impl Filesystem for AgentFSFuse {
                 reply.error(libc::ENOENT);
                 return;
             }
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                reply.error(error_to_errno(&e));
                 return;
             }
         };
@@ -519,8 +529,8 @@ impl Filesystem for AgentFSFuse {
             (result, path)
         });
 
-        if result.is_err() {
-            reply.error(libc::EIO);
+        if let Err(e) = result {
+            reply.error(error_to_errno(&e));
             return;
         }
 
@@ -537,9 +547,11 @@ impl Filesystem for AgentFSFuse {
                 self.add_path(attr.ino, path);
                 reply.entry(&TTL, &attr, 0);
             }
-            _ => {
-                // Fail the operation if we cannot stat the new directory
-                reply.error(libc::EIO);
+            Ok(None) => {
+                reply.error(libc::ENOENT);
+            }
+            Err(e) => {
+                reply.error(error_to_errno(&e));
             }
         }
     }
@@ -567,8 +579,8 @@ impl Filesystem for AgentFSFuse {
                 reply.error(libc::ENOENT);
                 return;
             }
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                reply.error(error_to_errno(&e));
                 return;
             }
         };
@@ -594,8 +606,8 @@ impl Filesystem for AgentFSFuse {
                 reply.error(libc::ENOENT);
                 return;
             }
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                reply.error(error_to_errno(&e));
                 return;
             }
             Ok(Some(_)) => {} // Empty directory, proceed
@@ -611,7 +623,7 @@ impl Filesystem for AgentFSFuse {
                 self.drop_path(ino);
                 reply.ok();
             }
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -649,8 +661,8 @@ impl Filesystem for AgentFSFuse {
 
         let path = match result {
             Ok(p) => p,
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                reply.error(error_to_errno(&e));
                 return;
             }
         };
@@ -668,9 +680,12 @@ impl Filesystem for AgentFSFuse {
                 self.add_path(attr.ino, path.clone());
                 attr
             }
-            _ => {
-                // Fail the operation if we cannot stat the new file
-                reply.error(libc::EIO);
+            Ok(None) => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Err(e) => {
+                reply.error(error_to_errno(&e));
                 return;
             }
         };
@@ -684,8 +699,8 @@ impl Filesystem for AgentFSFuse {
 
         let file = match open_result {
             Ok(file) => file,
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                reply.error(error_to_errno(&e));
                 return;
             }
         };
@@ -724,8 +739,8 @@ impl Filesystem for AgentFSFuse {
             (result, path)
         });
 
-        if result.is_err() {
-            reply.error(libc::EIO);
+        if let Err(e) = result {
+            reply.error(error_to_errno(&e));
             return;
         }
 
@@ -742,8 +757,11 @@ impl Filesystem for AgentFSFuse {
                 self.add_path(attr.ino, path);
                 reply.entry(&TTL, &attr, 0);
             }
-            _ => {
-                reply.error(libc::EIO);
+            Ok(None) => {
+                reply.error(libc::ENOENT);
+            }
+            Err(e) => {
+                reply.error(error_to_errno(&e));
             }
         }
     }
@@ -770,8 +788,8 @@ impl Filesystem for AgentFSFuse {
                 reply.error(libc::ENOENT);
                 return;
             }
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                reply.error(error_to_errno(e));
                 return;
             }
         };
@@ -791,7 +809,7 @@ impl Filesystem for AgentFSFuse {
                 self.drop_path(ino);
                 reply.ok();
             }
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -857,13 +875,7 @@ impl Filesystem for AgentFSFuse {
                 }
                 reply.ok();
             }
-            Err(e) => {
-                let errno = e
-                    .downcast_ref::<FsError>()
-                    .map(|fs_err| fs_err.to_errno())
-                    .unwrap_or(libc::EIO);
-                reply.error(errno);
-            }
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -892,7 +904,7 @@ impl Filesystem for AgentFSFuse {
                 self.open_files.lock().insert(fh, OpenFile { file });
                 reply.opened(fh, 0);
             }
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -923,7 +935,7 @@ impl Filesystem for AgentFSFuse {
 
         match result {
             Ok(data) => reply.data(&data),
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -957,7 +969,7 @@ impl Filesystem for AgentFSFuse {
 
         match result {
             Ok(()) => reply.written(data_len as u32),
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
@@ -993,7 +1005,7 @@ impl Filesystem for AgentFSFuse {
 
         match result {
             Ok(()) => reply.ok(),
-            Err(_) => reply.error(libc::EIO),
+            Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
