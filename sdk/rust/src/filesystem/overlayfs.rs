@@ -659,6 +659,49 @@ impl FileSystem for OverlayFS {
         Ok(())
     }
 
+    async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
+        let normalized = self.normalize_path(path);
+
+        // Check if whited-out
+        if self.is_whiteout(&normalized).await? {
+            return Err(FsError::NotFound.into());
+        }
+
+        // If file exists in delta, chmod there directly
+        if self.exists_in_delta(&normalized).await? {
+            return self.delta.chmod(&normalized, mode).await;
+        }
+
+        // Check if exists in base
+        let base_stats = self.base.lstat(&normalized).await?;
+        if let Some(stats) = base_stats {
+            // Need to copy to delta first, then chmod
+            if stats.is_directory() {
+                // For directories, just create in delta and chmod
+                self.ensure_parent_dirs(&normalized).await?;
+                self.delta.mkdir(&normalized).await?;
+                self.delta.chmod(&normalized, mode).await?;
+            } else if stats.is_symlink() {
+                // For symlinks, copy the symlink to delta
+                if let Some(target) = self.base.readlink(&normalized).await? {
+                    self.ensure_parent_dirs(&normalized).await?;
+                    self.delta.symlink(&target, &normalized).await?;
+                    self.delta.chmod(&normalized, mode).await?;
+                }
+            } else {
+                // For regular files, copy content to delta
+                if let Some(data) = self.base.read_file(&normalized).await? {
+                    self.ensure_parent_dirs(&normalized).await?;
+                    self.delta.write_file(&normalized, &data).await?;
+                    self.delta.chmod(&normalized, mode).await?;
+                }
+            }
+            Ok(())
+        } else {
+            Err(FsError::NotFound.into())
+        }
+    }
+
     async fn rename(&self, from: &str, to: &str) -> Result<()> {
         let from_normalized = self.normalize_path(from);
         let to_normalized = self.normalize_path(to);
@@ -940,6 +983,98 @@ mod tests {
         // Should be visible again with new content
         let data = overlay.read_file("/base.txt").await?.unwrap();
         assert_eq!(data, b"recreated");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overlay_chmod_delta_file() -> Result<()> {
+        let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
+
+        // Write a new file to delta
+        overlay.write_file("/new.txt", b"content").await?;
+
+        // chmod it
+        overlay.chmod("/new.txt", 0o755).await?;
+
+        let stats = overlay.stat("/new.txt").await?.unwrap();
+        assert_eq!(
+            stats.mode & 0o777,
+            0o755,
+            "Mode should be 0o755 after chmod"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overlay_chmod_base_file_copies_to_delta() -> Result<()> {
+        let (overlay, base_dir, _delta_dir) = create_test_overlay().await?;
+
+        // Get original mode of base file
+        let original_stats = overlay.stat("/base.txt").await?.unwrap();
+
+        // chmod the base file - should copy to delta
+        overlay.chmod("/base.txt", 0o755).await?;
+
+        let stats = overlay.stat("/base.txt").await?.unwrap();
+        assert_eq!(
+            stats.mode & 0o777,
+            0o755,
+            "Mode should be 0o755 after chmod"
+        );
+
+        // Verify base file is unchanged
+        use std::os::unix::fs::PermissionsExt;
+        let base_path = base_dir.path().join("base.txt");
+        let base_meta = std::fs::metadata(&base_path)?;
+        assert_eq!(
+            base_meta.permissions().mode() & 0o777,
+            original_stats.mode & 0o777,
+            "Base file should be unchanged"
+        );
+
+        // Verify content is preserved after copy-on-write
+        let data = overlay.read_file("/base.txt").await?.unwrap();
+        assert_eq!(data, b"base content", "Content should be preserved");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overlay_chmod_whiteout_fails() -> Result<()> {
+        let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
+
+        // Delete the base file (creates whiteout)
+        overlay.remove("/base.txt").await?;
+
+        // chmod should fail on whited-out file
+        let result = overlay.chmod("/base.txt", 0o755).await;
+        assert!(result.is_err(), "chmod on whited-out file should fail");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overlay_chmod_nonexistent_fails() -> Result<()> {
+        let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
+
+        let result = overlay.chmod("/nonexistent.txt", 0o755).await;
+        assert!(result.is_err(), "chmod on nonexistent file should fail");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overlay_chmod_directory() -> Result<()> {
+        let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
+
+        // chmod the base subdir
+        overlay.chmod("/subdir", 0o700).await?;
+
+        let stats = overlay.stat("/subdir").await?.unwrap();
+        assert_eq!(stats.mode & 0o777, 0o700, "Directory mode should be 0o700");
+        assert!(stats.is_directory(), "Should still be a directory");
 
         Ok(())
     }

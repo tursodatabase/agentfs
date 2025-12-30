@@ -1659,6 +1659,45 @@ impl AgentFS {
         Ok(())
     }
 
+    /// Change file mode/permissions.
+    ///
+    /// Only modifies the permission bits (lower 12 bits), preserving the file type.
+    pub async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
+        let path = self.normalize_path(path);
+
+        let ino = self
+            .resolve_path(&path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Path does not exist"))?;
+
+        // Get current mode to preserve file type bits
+        let mut rows = self
+            .conn
+            .query("SELECT mode FROM fs_inode WHERE ino = ?", (ino,))
+            .await?;
+
+        let current_mode = if let Some(row) = rows.next().await? {
+            row.get_value(0)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u32
+        } else {
+            anyhow::bail!("Inode not found");
+        };
+
+        // Preserve file type bits (upper bits), replace permission bits (lower 12 bits)
+        let new_mode = (current_mode & S_IFMT) | (mode & 0o7777);
+
+        self.conn
+            .execute(
+                "UPDATE fs_inode SET mode = ? WHERE ino = ?",
+                (new_mode as i64, ino),
+            )
+            .await?;
+
+        Ok(())
+    }
+
     /// Rename/move a file or directory.
     ///
     /// This operation is atomic - either all changes succeed or none do.
@@ -1955,6 +1994,10 @@ impl FileSystem for AgentFS {
 
     async fn remove(&self, path: &str) -> Result<()> {
         AgentFS::remove(self, path).await
+    }
+
+    async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
+        AgentFS::chmod(self, path, mode).await
     }
 
     async fn rename(&self, from: &str, to: &str) -> Result<()> {
@@ -2996,6 +3039,94 @@ mod tests {
         // Verify the content
         let content = fs.read_file("/link.txt").await?.unwrap();
         assert_eq!(content, b"new content");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_chmod_regular_file() -> Result<()> {
+        let (fs, _dir) = create_test_fs().await?;
+
+        // Create a file with default permissions
+        fs.write_file("/test.txt", b"content").await?;
+
+        let stats = fs.stat("/test.txt").await?.unwrap();
+        assert_eq!(
+            stats.mode & 0o7777,
+            0o644,
+            "Default file mode should be 0o644"
+        );
+
+        // Change to executable
+        fs.chmod("/test.txt", 0o755).await?;
+
+        let stats = fs.stat("/test.txt").await?.unwrap();
+        assert_eq!(
+            stats.mode & 0o7777,
+            0o755,
+            "Mode should be 0o755 after chmod"
+        );
+        assert!(stats.is_file(), "Should still be a regular file");
+
+        // Change to read-only
+        fs.chmod("/test.txt", 0o444).await?;
+
+        let stats = fs.stat("/test.txt").await?.unwrap();
+        assert_eq!(
+            stats.mode & 0o7777,
+            0o444,
+            "Mode should be 0o444 after chmod"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_chmod_preserves_file_type() -> Result<()> {
+        let (fs, _dir) = create_test_fs().await?;
+
+        // Create a regular file
+        fs.write_file("/file.txt", b"content").await?;
+        fs.chmod("/file.txt", 0o755).await?;
+        let stats = fs.stat("/file.txt").await?.unwrap();
+        assert!(stats.is_file(), "Should remain a regular file after chmod");
+
+        // Create a directory
+        fs.mkdir("/dir").await?;
+        fs.chmod("/dir", 0o700).await?;
+        let stats = fs.stat("/dir").await?.unwrap();
+        assert!(
+            stats.is_directory(),
+            "Should remain a directory after chmod"
+        );
+        assert_eq!(stats.mode & 0o7777, 0o700, "Directory mode should be 0o700");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_chmod_nonexistent_fails() -> Result<()> {
+        let (fs, _dir) = create_test_fs().await?;
+
+        let result = fs.chmod("/nonexistent.txt", 0o755).await;
+        assert!(result.is_err(), "chmod on nonexistent file should fail");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_chmod_symlink() -> Result<()> {
+        let (fs, _dir) = create_test_fs().await?;
+
+        // Create target and symlink
+        fs.write_file("/target.txt", b"content").await?;
+        fs.symlink("/target.txt", "/link.txt").await?;
+
+        // chmod the symlink path (should work on the symlink inode)
+        fs.chmod("/link.txt", 0o755).await?;
+
+        let stats = fs.lstat("/link.txt").await?.unwrap();
+        assert!(stats.is_symlink(), "Should still be a symlink");
 
         Ok(())
     }

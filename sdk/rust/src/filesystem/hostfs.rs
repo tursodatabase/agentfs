@@ -235,6 +235,15 @@ impl FileSystem for HostFS {
         Ok(())
     }
 
+    async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let full_path = self.resolve_path(path);
+        let permissions = std::fs::Permissions::from_mode(mode);
+        fs::set_permissions(&full_path, permissions).await?;
+        Ok(())
+    }
+
     async fn rename(&self, from: &str, to: &str) -> Result<()> {
         let from_path = self.resolve_path(from);
         let to_path = self.resolve_path(to);
@@ -363,6 +372,55 @@ mod tests {
         file.pwrite(6, b"rust!").await?;
         let data = fs.read_file("/test.txt").await?.unwrap();
         assert_eq!(data, b"hello rust!");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_hostfs_chmod() -> Result<()> {
+        let dir = tempdir()?;
+        let fs = HostFS::new(dir.path())?;
+
+        // Create a file
+        fs.write_file("/test.txt", b"content").await?;
+
+        // Change to executable
+        fs.chmod("/test.txt", 0o755).await?;
+
+        let stats = fs.stat("/test.txt").await?.unwrap();
+        assert_eq!(
+            stats.mode & 0o777,
+            0o755,
+            "Mode should be 0o755 after chmod"
+        );
+
+        // Change to read-only
+        fs.chmod("/test.txt", 0o444).await?;
+
+        let stats = fs.stat("/test.txt").await?.unwrap();
+        assert_eq!(
+            stats.mode & 0o777,
+            0o444,
+            "Mode should be 0o444 after chmod"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_hostfs_chmod_directory() -> Result<()> {
+        let dir = tempdir()?;
+        let fs = HostFS::new(dir.path())?;
+
+        // Create a directory
+        fs.mkdir("/subdir").await?;
+
+        // Change permissions
+        fs.chmod("/subdir", 0o700).await?;
+
+        let stats = fs.stat("/subdir").await?.unwrap();
+        assert_eq!(stats.mode & 0o777, 0o700, "Directory mode should be 0o700");
+        assert!(stats.is_directory(), "Should still be a directory");
 
         Ok(())
     }

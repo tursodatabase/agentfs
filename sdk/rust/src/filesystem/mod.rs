@@ -184,6 +184,12 @@ pub trait FileSystem: Send + Sync {
     /// Remove a file or empty directory
     async fn remove(&self, path: &str) -> Result<()>;
 
+    /// Change file mode/permissions
+    ///
+    /// The mode parameter contains the full mode including file type bits,
+    /// but only the permission bits (lower 12 bits) will be modified.
+    async fn chmod(&self, path: &str, mode: u32) -> Result<()>;
+
     /// Rename/move a file or directory
     async fn rename(&self, from: &str, to: &str) -> Result<()>;
 

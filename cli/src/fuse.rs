@@ -157,15 +157,15 @@ impl Filesystem for AgentFSFuse {
         }
     }
 
-    /// Sets file attributes, primarily handling truncate operations.
+    /// Sets file attributes, handling truncate and chmod operations.
     ///
-    /// Currently only `size` changes (truncate) are supported. Other attribute
-    /// changes (mode, uid, gid, timestamps) are accepted but ignored.
+    /// Currently `size` changes (truncate) and `mode` changes (chmod) are supported.
+    /// Other attribute changes (uid, gid, timestamps) are accepted but ignored.
     fn setattr(
         &mut self,
         _req: &Request,
         ino: u64,
-        _mode: Option<u32>,
+        mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
@@ -179,6 +179,24 @@ impl Filesystem for AgentFSFuse {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
+        // Handle chmod
+        if let Some(new_mode) = mode {
+            let Some(path) = self.path_cache.lock().get(&ino).cloned() else {
+                reply.error(libc::ENOENT);
+                return;
+            };
+
+            let fs = self.fs.clone();
+            let result = self
+                .runtime
+                .block_on(async move { fs.chmod(&path, new_mode).await });
+
+            if result.is_err() {
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
         // Handle truncate
         if let Some(new_size) = size {
             let result = if let Some(fh) = fh {
@@ -610,7 +628,7 @@ impl Filesystem for AgentFSFuse {
         _req: &Request,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         _flags: i32,
         reply: ReplyCreate,
@@ -620,24 +638,29 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        // Create empty file
+        // Create empty file and set mode
         let fs = self.fs.clone();
-        let (result, path) = self.runtime.block_on(async move {
-            let result = fs.write_file(&path, &[]).await;
-            (result, path)
+        let result = self.runtime.block_on(async move {
+            fs.write_file(&path, &[]).await?;
+            // Set the requested mode (includes execute permissions for build scripts)
+            fs.chmod(&path, mode).await?;
+            Ok::<_, anyhow::Error>(path)
         });
 
-        if result.is_err() {
-            reply.error(libc::EIO);
-            return;
-        }
+        let path = match result {
+            Ok(p) => p,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
 
         // Get the new file's stats
         let fs = self.fs.clone();
-        let (stat_result, path) = self.runtime.block_on(async move {
-            let result = fs.stat(&path).await;
-            (result, path)
-        });
+        let path_for_stat = path.clone();
+        let stat_result = self
+            .runtime
+            .block_on(async move { fs.stat(&path_for_stat).await });
 
         let attr = match stat_result {
             Ok(Some(stats)) => {
