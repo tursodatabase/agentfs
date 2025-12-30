@@ -1748,22 +1748,23 @@ pub async fn handle_chmod<T: Guest<Sandbox>>(
     mount_table: &MountTable,
 ) -> Result<Option<i64>, Error> {
     use reverie::syscalls::{Fchmodat, PathPtr, Syscall};
+    use libc::AT_FDCWD;
 
-    // 1. 取出四个参数
     let dirfd = syscall_args.arg0 as i32;
-    let pathname_addr = unsafe { PathPtr::from_raw(syscall_args.arg1 as _) };
+    let pathname_addr = match unsafe { PathPtr::from_ptr(syscall_args.arg1 as _) } {
+        Some(ptr) => ptr,
+        None => {
+            return Ok(None);
+        }
+    };
     let mode = syscall_args.arg2 as u32;
     let flags = syscall_args.arg3 as i32;
 
-    // Only handle AT_FDCWD case (chmod equivalent)
-    // If dirfd is a real fd, it should be handled by a separate fchmodat handler
     if dirfd != libc::AT_FDCWD {
         return Ok(None);
     }
 
-    // Check if path needs translation
     if let Some(new_path_addr) = translate_path(guest, pathname_addr, mount_table).await? {
-        // Build and inject the syscall with translated path
         let injected = guest
             .inject(Syscall::Fchmodat(Fchmodat {
                 dirfd: AT_FDCWD,
