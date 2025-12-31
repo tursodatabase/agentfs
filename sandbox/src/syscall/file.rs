@@ -1740,6 +1740,7 @@ pub async fn handle_chdir<T: Guest<Sandbox>>(
 /// The `rmdir` system call.
 ///
 /// This intercepts `rmdir` system calls and translates paths according to the mount table.
+#[cfg(not(target_arch = "aarch64"))]
 pub async fn handle_rmdir<T: Guest<Sandbox>>(
     guest: &mut T,
     args: &reverie::syscalls::Rmdir,
@@ -1749,6 +1750,42 @@ pub async fn handle_rmdir<T: Guest<Sandbox>>(
         if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
             let new_syscall = args.with_path(Some(new_path_addr));
             return Ok(Some(Syscall::Rmdir(new_syscall)));
+        }
+    }
+    Ok(None)
+}
+
+/// The `unlinkat` system call (used for `unlink` and `rmdir` on ARM).
+///
+/// This intercepts `unlinkat` system calls and translates paths according to the mount table.
+/// Signature: int unlinkat(int dirfd, const char *pathname, int flags);
+/// Note: On ARM (aarch64), both unlink and rmdir are implemented via unlinkat:
+///   - unlink: unlinkat(AT_FDCWD, pathname, 0)
+///   - rmdir: unlinkat(AT_FDCWD, pathname, AT_REMOVEDIR)
+#[cfg(target_arch = "aarch64")]
+pub async fn handle_unlinkat<T: Guest<Sandbox>>(
+    guest: &mut T,
+    args: &reverie::syscalls::Unlinkat,
+    mount_table: &MountTable,
+) -> Result<Option<Syscall>, Error> {
+    use libc::AT_FDCWD;
+    use reverie::syscalls::AtFlags;
+
+    let dirfd = args.dirfd();
+    let flags = args.flags();
+
+    // Only handle AT_FDCWD for now (same as handle_chmod)
+    if dirfd != AT_FDCWD {
+        return Ok(None);
+    }
+
+    if let Some(path_addr) = args.path() {
+        if let Some(new_path_addr) = translate_path(guest, path_addr, mount_table).await? {
+            let new_syscall = args
+                .with_dirfd(AT_FDCWD)
+                .with_path(Some(new_path_addr))
+                .with_flags(AtFlags::from_bits_truncate(flags));
+            return Ok(Some(Syscall::Unlinkat(new_syscall)));
         }
     }
     Ok(None)
