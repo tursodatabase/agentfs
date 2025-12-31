@@ -1748,7 +1748,7 @@ pub async fn handle_chmod<T: Guest<Sandbox>>(
     mount_table: &MountTable,
 ) -> Result<Option<i64>, Error> {
     use libc::AT_FDCWD;
-    use reverie::syscalls::{Fchmodat, PathPtr, Syscall};
+    use reverie::syscalls::{AtFlags, Mode, PathPtr, Syscall};
 
     let dirfd = syscall_args.arg0 as i32;
     let pathname_addr = match unsafe { PathPtr::from_ptr(syscall_args.arg1 as _) } {
@@ -1768,8 +1768,8 @@ pub async fn handle_chmod<T: Guest<Sandbox>>(
         let new_syscall = reverie::syscalls::Fchmodat::new()
             .with_dirfd(AT_FDCWD)
             .with_path(Some(new_path_addr))
-            .with_mode(mode)
-            .with_flags(flags);
+            .with_mode(Mode::from_bits_truncate(mode))
+            .with_flags(AtFlags::from_bits_truncate(flags));
         let injected = guest.inject(Syscall::Fchmodat(new_syscall)).await?;
 
         Ok(Some(injected))
