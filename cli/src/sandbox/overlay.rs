@@ -20,8 +20,10 @@ use anyhow::{bail, Context, Result};
 use std::{
     cmp::Reverse,
     ffi::CString,
+    fs,
     io::BufRead,
     os::unix::ffi::OsStrExt,
+    os::unix::fs::MetadataExt,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
     sync::{
@@ -180,7 +182,16 @@ pub async fn run_cmd(
         .await
         .context("Failed to create delta AgentFS")?;
 
-    let base = Arc::new(HostFS::new(&fd_path).context("Failed to create HostFS")?);
+    let hostfs = HostFS::new(&fd_path).context("Failed to create HostFS")?;
+    #[cfg(target_family = "unix")]
+    let hostfs = {
+        let mountpoint_inode = fs::metadata(&session.fuse_mountpoint)
+            .map(|m| m.ino())
+            .context("Failed to get mountpoint inode")?;
+        hostfs.with_fuse_mountpoint(mountpoint_inode)
+    };
+
+    let base = Arc::new(hostfs);
     let overlay = OverlayFS::new(base, agentfs.fs);
 
     let cwd_str = cwd

@@ -70,6 +70,13 @@ struct AgentFSFuse {
     uid: u32,
     /// Group ID to report for all files (set at mount time)
     gid: u32,
+    /// Lossy string representation of the absolute mountpoint path.
+    /// This is used to avoid looking up ourselves inside ourselves, 
+    /// e.g., when we mount an under filesystem `/` at /mntpnt,
+    /// we do not want to look up `/mntpnt/mntpnt`, because the handler will then try
+    /// to lookup `/mntpnt` from he under filesystem, which will hit our mountpoint again,
+    /// causing a deadlock.
+    mountpoint_path: String,
 }
 
 impl Filesystem for AgentFSFuse {
@@ -1072,7 +1079,13 @@ impl AgentFSFuse {
     ///
     /// The uid and gid are used for all file ownership to avoid "dubious ownership"
     /// errors from tools like git that check file ownership.
-    fn new(fs: Arc<dyn FileSystem>, runtime: Runtime, uid: u32, gid: u32) -> Self {
+    fn new(
+        fs: Arc<dyn FileSystem>,
+        runtime: Runtime,
+        uid: u32,
+        gid: u32,
+        mountpoint_path: PathBuf,
+    ) -> Self {
         Self {
             fs,
             runtime,
@@ -1081,6 +1094,7 @@ impl AgentFSFuse {
             next_fh: AtomicU64::new(1),
             uid,
             gid,
+            mountpoint_path: mountpoint_path.as_os_str().to_string_lossy().to_string(),
         }
     }
 
@@ -1097,10 +1111,17 @@ impl AgentFSFuse {
         let parent_path = path_cache.get(&parent_ino)?;
         let name_str = name.to_str()?;
 
-        if parent_path == "/" {
-            Some(format!("/{}", name_str))
+        let path = if parent_path == "/" {
+            format!("/{}", name_str)
         } else {
-            Some(format!("{}/{}", parent_path, name_str))
+            format!("{}/{}", parent_path, name_str)
+        };
+
+        if path.starts_with(&self.mountpoint_path) {
+            // Cut the head off
+            None
+        } else {
+            Some(path)
         }
     }
 
@@ -1190,7 +1211,7 @@ pub fn mount(
     let uid = opts.uid.unwrap_or_else(|| unsafe { libc::getuid() });
     let gid = opts.gid.unwrap_or_else(|| unsafe { libc::getgid() });
 
-    let fs = AgentFSFuse::new(fs, runtime, uid, gid);
+    let fs = AgentFSFuse::new(fs, runtime, uid, gid, opts.mountpoint.clone());
 
     fs.add_path(1, "/".to_string());
 

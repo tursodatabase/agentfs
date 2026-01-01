@@ -50,7 +50,21 @@ pub fn mount(args: MountArgs) -> Result<()> {
         anyhow::bail!("Mountpoint does not exist: {}", args.mountpoint.display());
     }
 
-    let mountpoint = args.mountpoint.clone();
+    let mountpoint = std::fs::canonicalize(args.mountpoint.clone())?;
+    let mountpoint_ino = {
+        #[cfg(target_family = "unix")]
+        {
+            use anyhow::Context as _;
+            std::fs::metadata(mountpoint.clone()).context("Failed to get mountpoint inode")?.ino()
+        }
+        #[cfg(not(target_family = "unix"))]
+        {
+            // Should be impossible to reach this path
+            return Err(anyhow::anyhow!(
+                "FUSE mountpoint inode is not supported on this platform"
+            ));
+        }
+    };
 
     let fuse_opts = FuseMountOptions {
         mountpoint: args.mountpoint,
@@ -92,6 +106,10 @@ pub fn mount(args: MountArgs) -> Result<()> {
                 // Create OverlayFS with HostFS base
                 eprintln!("Using overlay filesystem with base: {}", base_path);
                 let hostfs = HostFS::new(&base_path)?;
+                #[cfg(target_family = "unix")]
+                let hostfs = {
+                    hostfs.with_fuse_mountpoint(mountpoint_ino)
+                };
                 let overlay = OverlayFS::new(Arc::new(hostfs), agentfs.fs);
                 Ok::<Arc<dyn FileSystem>, anyhow::Error>(Arc::new(overlay))
             } else {

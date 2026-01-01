@@ -15,6 +15,22 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct HostFS {
     root: PathBuf,
+    // If the HostFS is mounted as an overlay underfilesystem via FUSE, we need to know
+    // the inode of the FUSE mountpoint to avoid deadlock.
+    //
+    // For example, if we overlay `/` and mount it at /mntpnt, then when we do an `ls /mntpnt`,
+    // inside the readdir_plus handler (which grabs a global fuser lock),
+    // agentfs reads `/`, and sees the direntry `mntpnt`, and then stats `/mntpnt`, which would enter a new fuser handler
+    // trying to grab the fuser lock, causing a deadlock.
+    //
+    // The linux kernel overlay filesystem does not have this problem because it has access to the under filesystem
+    // directly, and it does not cross mountpoints, so it will just return /mntpnt as a raw direntry of the underlying ext4/xfs
+    // filesystem and does not call into the overlay layer at all. We do not have this access, so we have to special-case ourselves.
+    //
+    // We only need to compare the root inode, because for anything under /mntpnt, the access is gated by the fuse layer, and we block
+    // looking up ourselves in the fuse layer, but `ls /mntpnt` has to pass the fuse layer and come to us.
+    #[cfg(target_family = "unix")]
+    fuse_mountpoint_inode: Option<u64>,
 }
 
 /// An open file handle for HostFS.
@@ -84,7 +100,17 @@ impl HostFS {
         if !root.is_dir() {
             anyhow::bail!("Root path is not a directory: {}", root.display());
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            fuse_mountpoint_inode: None,
+        })
+    }
+
+    /// Create a new HostFS rooted at the given directory with a FUSE mountpoint inode
+    #[cfg(target_family = "unix")]
+    pub fn with_fuse_mountpoint(mut self, inode: u64) -> Self {
+        self.fuse_mountpoint_inode = Some(inode);
+        self
     }
 
     /// Get the root directory
@@ -174,6 +200,16 @@ impl FileSystem for HostFS {
         };
 
         while let Some(entry) = dir.next_entry().await? {
+            #[cfg(target_family = "unix")]
+            {
+                // We won't be able to stat the mountpoint, so better not even expose it
+                if let Some(inode) = self.fuse_mountpoint_inode {
+                    if entry.ino() == inode {
+                        continue;
+                    }
+                }
+            }
+
             if let Some(name) = entry.file_name().to_str() {
                 entries.push(name.to_string());
             }
@@ -194,6 +230,15 @@ impl FileSystem for HostFS {
         };
 
         while let Some(entry) = dir.next_entry().await? {
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(inode) = self.fuse_mountpoint_inode {
+                    if entry.ino() == inode {
+                        continue;
+                    }
+                }
+            }
+
             if let Some(name) = entry.file_name().to_str() {
                 // Build the virtual path for this entry
                 let entry_path = if path == "/" {
