@@ -71,7 +71,7 @@ struct AgentFSFuse {
     /// Group ID to report for all files (set at mount time)
     gid: u32,
     /// Lossy string representation of the absolute mountpoint path.
-    /// This is used to avoid looking up ourselves inside ourselves, 
+    /// This is used to avoid looking up ourselves inside ourselves,
     /// e.g., when we mount an under filesystem `/` at /mntpnt,
     /// we do not want to look up `/mntpnt/mntpnt`, because the handler will then try
     /// to lookup `/mntpnt` from he under filesystem, which will hit our mountpoint again,
