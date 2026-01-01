@@ -1118,7 +1118,8 @@ impl AgentFSFuse {
         };
 
         if path.starts_with(&self.mountpoint_path) {
-            // Cut the head off
+            // Cut the head off here so we never try to lookup anything that falls within
+            // our own mount inside our handlers by immediately returning ENOENT.
             None
         } else {
             Some(path)
