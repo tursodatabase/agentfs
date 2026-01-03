@@ -1,10 +1,11 @@
-//! NFS-based run command for macOS and Linux.
+//! Darwin (macOS) run command implementation.
 //!
 //! This module provides a sandboxed execution environment using NFS for
 //! filesystem mounting. The current working directory becomes a
 //! copy-on-write overlay backed by AgentFS, mounted via a localhost NFS server.
 //!
-//! This approach works without requiring FUSE or other system extensions.
+//! Sandboxing is enforced using macOS sandbox-exec with dynamically generated
+//! profiles that restrict file writes to the NFS mountpoint and allowed paths.
 
 #![cfg(unix)]
 
@@ -19,13 +20,13 @@ use tokio::sync::Mutex;
 use crate::nfs::AgentNFS;
 
 #[cfg(target_os = "macos")]
-use crate::sandbox::sandbox_macos::{generate_sandbox_profile, SandboxConfig};
+use crate::sandbox::darwin::{generate_sandbox_profile, SandboxConfig};
 
 /// Default NFS port to try (use a high port to avoid needing root)
 const DEFAULT_NFS_PORT: u32 = 11111;
 
-/// Handle the `run` command using NFS on macOS.
-pub async fn handle_run_command(
+/// Run the command in a Darwin sandbox.
+pub async fn run(
     allow: Vec<PathBuf>,
     no_default_allows: bool,
     _experimental_sandbox: bool,

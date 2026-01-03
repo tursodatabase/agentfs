@@ -1,15 +1,15 @@
 //! Sandbox implementations for running commands in isolated environments.
 //!
 //! This module provides platform-specific sandbox approaches:
-//! - `overlay`: (Linux) FUSE + namespace-based sandbox with copy-on-write filesystem
-//! - `ptrace`: (Linux) ptrace-based syscall interception sandbox (experimental)
-//! - `sandbox_macos`: (macOS) Kernel-enforced sandbox using sandbox-exec
+//! - `linux`: FUSE + namespace-based sandbox with copy-on-write filesystem
+//! - `linux_ptrace`: ptrace-based syscall interception sandbox (experimental)
+//! - `darwin`: Kernel-enforced sandbox using sandbox-exec
 
 #[cfg(target_os = "linux")]
-pub mod overlay;
+pub mod linux;
 
 #[cfg(target_os = "linux")]
-pub mod ptrace;
+pub mod linux_ptrace;
 
 #[cfg(target_os = "macos")]
-pub mod sandbox_macos;
+pub mod darwin;
