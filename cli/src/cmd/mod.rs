@@ -1,12 +1,13 @@
 pub mod completions;
 pub mod fs;
 pub mod init;
+pub mod ps;
 
 #[cfg(target_os = "linux")]
-mod mount;
+pub mod mount;
 #[cfg(not(target_os = "linux"))]
 #[path = "mount_stub.rs"]
-mod mount;
+pub mod mount;
 
 // Run module selection:
 // - Linux x86_64: use overlay sandbox (run.rs)
