@@ -76,15 +76,15 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Mount an agent filesystem using FUSE
+    /// Mount an agent filesystem using FUSE (or list mounts if no args)
     Mount {
-        /// Agent ID or database path
+        /// Agent ID or database path (if omitted, lists current mounts)
         #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
-        id_or_path: String,
+        id_or_path: Option<String>,
 
         /// Mount point directory
         #[arg(value_name = "MOUNTPOINT", add = ArgValueCompleter::new(PathCompleter::dir()))]
-        mountpoint: PathBuf,
+        mountpoint: Option<PathBuf>,
 
         /// Automatically unmount on exit
         #[arg(short = 'a', long)]
@@ -111,6 +111,12 @@ pub enum Command {
         /// Agent ID or database path
         #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
         id_or_path: String,
+    },
+    /// List sandbox sessions (from `agentfs run`)
+    Ps {
+        /// Show all sessions (including those not currently running)
+        #[arg(short = 'a', long)]
+        all: bool,
     },
     /// Start an NFS server to export an AgentFS filesystem over the network
     #[cfg(unix)]

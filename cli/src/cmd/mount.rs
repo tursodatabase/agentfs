@@ -1,9 +1,54 @@
-use agentfs_sdk::{AgentFS, AgentFSOptions, FileSystem, HostFS, OverlayFS};
+use agentfs_sdk::{get_mounted_agents, AgentFS, AgentFSOptions, FileSystem, HostFS, OverlayFS};
 use anyhow::Result;
-use std::{os::unix::fs::MetadataExt, path::PathBuf, sync::Arc};
+use std::{io::Write, os::unix::fs::MetadataExt, path::PathBuf, sync::Arc};
 use turso::Value;
 
 use crate::fuse::FuseMountOptions;
+
+/// List all currently mounted agentfs filesystems
+pub fn list_mounts<W: Write>(out: &mut W) {
+    let mounts = get_mounted_agents();
+
+    if mounts.is_empty() {
+        let _ = writeln!(out, "No agentfs filesystems mounted.");
+        return;
+    }
+
+    // Calculate column widths
+    let id_width = mounts
+        .iter()
+        .map(|m| m.agent_id.len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    let mount_width = mounts
+        .iter()
+        .map(|m| m.mountpoint.to_string_lossy().len())
+        .max()
+        .unwrap_or(10)
+        .max(10);
+
+    // Print header
+    let _ = writeln!(
+        out,
+        "{:<id_width$}  {:<mount_width$}",
+        "AGENT ID", "MOUNTPOINT",
+        id_width = id_width,
+        mount_width = mount_width
+    );
+
+    // Print mounts
+    for mount in &mounts {
+        let _ = writeln!(
+            out,
+            "{:<id_width$}  {:<mount_width$}",
+            mount.agent_id,
+            mount.mountpoint.display(),
+            id_width = id_width,
+            mount_width = mount_width
+        );
+    }
+}
 
 /// Arguments for the mount command.
 #[derive(Debug, Clone)]
