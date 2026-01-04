@@ -24,6 +24,12 @@ func NewKvStore(db *sql.DB) *KvStore {
 	}
 }
 
+func NewKvStoreFromDatabase(db *sql.DB) *KvStore {
+	kvStore := NewKvStore(db)
+	kvStore.Initialize()
+	return kvStore
+}
+
 func (kv *KvStore) Initialize() (err error) {
 	ctx := context.Background()
 	_, err = kv.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS kv_store (
