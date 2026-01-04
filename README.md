@@ -173,6 +173,8 @@ At the heart of AgentFS is the [agent filesystem](SPEC.md), a complete SQLite-ba
 
 [Docker Sandbox](https://www.docker.com/blog/docker-sandboxes-a-new-approach-for-coding-agent-safety/) and AgentFS are complementary rather than competing. AgentFS answers "what happened and what's the state?" while Docker Sandboxes answer "how do I run this safely?" You could use both together: run an agent inside a Docker Sandbox for security, while using AgentFS inside that sandbox for structured state management and audit trails.
 
+[Git worktrees](https://git-scm.com/docs/git-worktree) let you check out multiple branches of a Git repository into separate directories simultaneously, allowing agents to work on independent copies of the source code, similar to AgentFS. However, AgentFS solves the problem at a lower level, allowing changes to files not tracked by git, but, more importantly, preventing agents from bypassing the isolation. For example, with git worktrees, nothing fundamentally prevents the agent from directly modifying the code edited by other agents. With filesystem-level copy-on-write, AgentFS lets you run untrusted agents on your git-managed source code and more.
+
 ## 📚 Learn More
 
 - **[User Manual](MANUAL.md)** - Complete guide to using the AgentFS CLI and SDK
