@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	_ "github.com/tursodatabase/go-libsql"
+	_ "turso.tech/database/tursogo"
 )
 
 type KeyValuePair struct {

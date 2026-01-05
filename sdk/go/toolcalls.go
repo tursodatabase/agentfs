@@ -7,7 +7,7 @@ import (
 	"math"
 	"time"
 
-	_ "github.com/tursodatabase/go-libsql"
+	_ "turso.tech/database/tursogo"
 )
 
 type ToolCallStatus string
