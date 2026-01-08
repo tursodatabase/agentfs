@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0] - 2026-01-08
+
+### Added
+
+- `agentfs serve` command for NFS and MCP servers.
+- `agentfs mount` command to list all mounted filesystems.
+- `agentfs timeline` command to display agent actions.
+- `agentfs mcp-server` command.
+- Basic sync support to the agentfs CLI.
+- Hard link support across Rust SDK, sandbox, and FUSE.
+- Local file locking on macOS.
+- Explicit sandbox feature in CLI.
+
+### Changed
+
+- `~/.codex` added to default read-write allow list in `agentfs run`.
+- Update just-bash to 2.0.
+- Restructure `agentfs run` command files for clarity.
+
+### Documentation
+
+- Add FAQ entry for `git worktrees`.
+- Add installation guide to README and MANUAL.md.
+
 ## [0.4.1] - 2026-01-02
 
 ### Added
@@ -171,6 +195,7 @@
 - Cross-platform builds (Linux, macOS).
 - Example agent implementations.
 
+[0.5.0]: https://github.com/tursodatabase/agentfs/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/tursodatabase/agentfs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/tursodatabase/agentfs/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/tursodatabase/agentfs/compare/v0.3.0...v0.3.1
