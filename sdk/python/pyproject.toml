@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentfs-sdk"
-version = "0.5.0-pre.1"
+version = "0.5.0"
 description = "AgentFS Python SDK - A filesystem and key-value store for AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
