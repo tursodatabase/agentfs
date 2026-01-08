@@ -1,7 +1,7 @@
 use agentfs::{
     cmd::{self, completions::handle_completions},
     get_runtime,
-    parser::{Args, Command, FsCommand, SyncCommand},
+    parser::{Args, Command, FsCommand, ServeCommand, SyncCommand},
 };
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
@@ -198,6 +198,7 @@ fn main() {
             bind,
             port,
         } => {
+            eprintln!("Warning: `agentfs nfs` is deprecated, use `agentfs serve nfs` instead");
             let rt = get_runtime();
             if let Err(e) = rt.block_on(cmd::nfs::handle_nfs_command(id_or_path, bind, port)) {
                 eprintln!("Error: {}", e);
@@ -205,6 +206,9 @@ fn main() {
             }
         }
         Command::McpServer { id_or_path, tools } => {
+            eprintln!(
+                "Warning: `agentfs mcp-server` is deprecated, use `agentfs serve mcp` instead"
+            );
             let rt = get_runtime();
             if let Err(e) = rt.block_on(cmd::mcp_server::handle_mcp_server_command(
                 id_or_path, tools,
@@ -213,6 +217,29 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Command::Serve { command } => match command {
+            #[cfg(unix)]
+            ServeCommand::Nfs {
+                id_or_path,
+                bind,
+                port,
+            } => {
+                let rt = get_runtime();
+                if let Err(e) = rt.block_on(cmd::nfs::handle_nfs_command(id_or_path, bind, port)) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            ServeCommand::Mcp { id_or_path, tools } => {
+                let rt = get_runtime();
+                if let Err(e) = rt.block_on(cmd::mcp_server::handle_mcp_server_command(
+                    id_or_path, tools,
+                )) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        },
     }
 }
 

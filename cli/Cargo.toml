@@ -47,7 +47,7 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.15", default-features = false, features = ["abi-7-29"] }
 uuid = { version = "1", features = ["v4"] }
-# NFS server for userspace filesystem (used by `agentfs run` and `agentfs nfs`)
+# NFS server for userspace filesystem (used by `agentfs run` and `agentfs serve nfs`)
 nfsserve = "0.10"
 async-trait = "0.1"
 # Sandbox dependencies - (requires libunwind-dev on ARM)

@@ -165,6 +165,7 @@ pub enum Command {
         format: String,
     },
     /// Start an NFS server to export an AgentFS filesystem over the network
+    /// (deprecated: use `agentfs serve nfs` instead)
     #[cfg(unix)]
     Nfs {
         /// Agent ID or database path
@@ -181,6 +182,7 @@ pub enum Command {
     },
 
     /// Start an MCP server exposing filesystem and KV-store tools
+    /// (deprecated: use `agentfs serve mcp` instead)
     McpServer {
         /// Agent ID or database path
         #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
@@ -191,6 +193,12 @@ pub enum Command {
         /// copy_file, rename, stat, access, kv_get, kv_set, kv_delete, kv_list
         #[arg(long, value_delimiter = ',')]
         tools: Option<Vec<String>>,
+    },
+
+    /// Serve an AgentFS filesystem via different protocols
+    Serve {
+        #[command(subcommand)]
+        command: ServeCommand,
     },
 }
 
@@ -227,6 +235,38 @@ pub enum SyncCommand {
     Stats,
     /// Checkpoint local synced db
     Checkpoint,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServeCommand {
+    /// Start an NFS server to export an AgentFS filesystem over the network
+    #[cfg(unix)]
+    Nfs {
+        /// Agent ID or database path
+        #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
+        id_or_path: String,
+
+        /// IP address to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+
+        /// Port to listen on
+        #[arg(long, default_value = "11111")]
+        port: u32,
+    },
+
+    /// Start an MCP server exposing filesystem and KV-store tools
+    Mcp {
+        /// Agent ID or database path
+        #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
+        id_or_path: String,
+
+        /// Tools to expose (comma-separated). If not provided, all tools are exposed.
+        /// Available tools: read_file, write_file, readdir, mkdir, rmdir, rm, unlink,
+        /// copy_file, rename, stat, access, kv_get, kv_set, kv_delete, kv_list
+        #[arg(long, value_delimiter = ',')]
+        tools: Option<Vec<String>>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone, Copy)]

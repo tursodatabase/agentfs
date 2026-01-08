@@ -56,7 +56,7 @@ trap cleanup EXIT
 
 # Clean up from previous failed run
 sudo ip link del "${TAP_DEV}" 2>/dev/null || true
-pkill -f "agentfs nfs.*${NFS_PORT}" 2>/dev/null || true
+pkill -f "agentfs serve nfs.*${NFS_PORT}" 2>/dev/null || true
 sleep 0.5
 
 # Set up TAP device
@@ -66,7 +66,7 @@ sudo ip link set "${TAP_DEV}" up
 
 # Start agentfs NFS server (suppress output)
 cd "${SCRIPT_DIR}"
-${AGENTFS} nfs --bind "${TAP_IP}" --port "${NFS_PORT}" "${AGENT_ID}" >/dev/null 2>&1 &
+${AGENTFS} serve nfs --bind "${TAP_IP}" --port "${NFS_PORT}" "${AGENT_ID}" >/dev/null 2>&1 &
 AGENTFS_PID=$!
 sleep 1
 
