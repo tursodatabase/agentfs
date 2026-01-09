@@ -30,6 +30,45 @@ pub struct WhiteoutCache {
     root: RwLock<WhiteoutNode>,
 }
 
+/// Cache for directories known to exist in the delta layer.
+///
+/// This avoids repeated `delta.stat()` calls in `ensure_parent_dirs()` when
+/// creating many files in the same directory tree (e.g., npm install).
+#[derive(Default, Debug)]
+struct DeltaDirCache {
+    /// Set of normalized paths known to exist as directories in delta
+    dirs: RwLock<HashSet<String>>,
+}
+
+impl DeltaDirCache {
+    fn new() -> Self {
+        let mut dirs = HashSet::new();
+        dirs.insert("/".to_string()); // Root always exists
+        Self {
+            dirs: RwLock::new(dirs),
+        }
+    }
+
+    /// Check if a directory is known to exist in delta
+    fn contains(&self, path: &str) -> bool {
+        self.dirs.read().unwrap().contains(path)
+    }
+
+    /// Mark a directory as existing in delta
+    fn insert(&self, path: &str) {
+        self.dirs.write().unwrap().insert(path.to_string());
+    }
+
+    /// Remove a directory from the cache (called on remove())
+    fn remove(&self, path: &str) {
+        let mut dirs = self.dirs.write().unwrap();
+        dirs.remove(path);
+        // Also remove any children (prefix match)
+        let prefix = format!("{}/", path);
+        dirs.retain(|p| !p.starts_with(&prefix));
+    }
+}
+
 impl WhiteoutCache {
     /// Create an empty whiteout cache
     pub fn new() -> Self {
@@ -179,6 +218,8 @@ pub struct OverlayFS {
     delta: AgentFS,
     /// In-memory cache for whiteout lookups (replaces N db queries with O(depth) trie lookup)
     whiteout_cache: WhiteoutCache,
+    /// Cache of directories known to exist in delta (avoids repeated stat() calls)
+    delta_dir_cache: DeltaDirCache,
 }
 
 /// An open file handle for OverlayFS.
@@ -333,6 +374,7 @@ impl OverlayFS {
             base,
             delta,
             whiteout_cache: WhiteoutCache::new(),
+            delta_dir_cache: DeltaDirCache::new(),
         }
     }
 
@@ -529,28 +571,42 @@ impl OverlayFS {
             // (even if the directory exists in delta, it may have been logically deleted)
             self.remove_whiteout(&current).await?;
 
-            // Check if it exists in delta or base
-            let stats = if let Some(s) = self.delta.stat(&current).await? {
-                Some(s)
-            } else {
-                self.base.stat(&current).await?
-            };
+            // Fast path: if directory is cached as existing in delta, skip expensive stat() calls
+            if self.delta_dir_cache.contains(&current) {
+                continue;
+            }
 
-            match stats {
+            // Check if it exists in delta
+            let delta_stats = self.delta.stat(&current).await?;
+
+            if let Some(s) = &delta_stats {
+                if s.is_directory() {
+                    // Directory exists in delta, cache it and continue
+                    self.delta_dir_cache.insert(&current);
+                    continue;
+                } else {
+                    // Exists in delta but not a directory
+                    return Err(FsError::NotADirectory.into());
+                }
+            }
+
+            // Not in delta, check base
+            let base_stats = self.base.stat(&current).await?;
+
+            match base_stats {
                 Some(s) if s.is_directory() => {
-                    // Directory exists in base or delta
-                    // Make sure it exists in delta too (required for delta operations)
-                    if self.delta.stat(&current).await?.is_none() {
-                        self.delta.mkdir(&current).await?;
-                    }
+                    // Directory exists in base but not delta, create in delta
+                    self.delta.mkdir(&current).await?;
+                    self.delta_dir_cache.insert(&current);
                 }
                 Some(_) => {
-                    // Exists but not a directory - this is an error
+                    // Exists in base but not a directory
                     return Err(FsError::NotADirectory.into());
                 }
                 None => {
-                    // Doesn't exist, create it
+                    // Doesn't exist anywhere, create it
                     self.delta.mkdir(&current).await?;
+                    self.delta_dir_cache.insert(&current);
                 }
             }
         }
@@ -759,6 +815,9 @@ impl FileSystem for OverlayFS {
         // Remove any whiteout for this path
         self.remove_whiteout(&normalized).await?;
 
+        // Invalidate directory cache - writing a file may overwrite a directory
+        self.delta_dir_cache.remove(&normalized);
+
         // Ensure parent directories exist in delta
         self.ensure_parent_dirs(&normalized).await?;
 
@@ -880,7 +939,11 @@ impl FileSystem for OverlayFS {
         self.ensure_parent_dirs(&normalized).await?;
 
         // Create in delta
-        self.delta.mkdir(&normalized).await
+        self.delta.mkdir(&normalized).await?;
+
+        // Update cache
+        self.delta_dir_cache.insert(&normalized);
+        Ok(())
     }
 
     async fn remove(&self, path: &str) -> Result<()> {
@@ -925,6 +988,8 @@ impl FileSystem for OverlayFS {
             if let Some(ino) = delta_ino {
                 self.remove_origin_mapping(ino).await?;
             }
+            // Invalidate delta directory cache (handles both files and directories)
+            self.delta_dir_cache.remove(&normalized);
         }
 
         // Check if it exists in base (and not already whiteout) - use lstat to not follow symlinks
@@ -1030,6 +1095,10 @@ impl FileSystem for OverlayFS {
 
         // Perform rename in delta
         self.delta.rename(&from_normalized, &to_normalized).await?;
+
+        // Invalidate delta directory cache for both source and destination (and their children)
+        self.delta_dir_cache.remove(&from_normalized);
+        self.delta_dir_cache.remove(&to_normalized);
 
         // Create whiteout at source if it existed in base
         if self.base.stat(&from_normalized).await?.is_some() {

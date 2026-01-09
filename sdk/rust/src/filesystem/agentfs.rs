@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use turso::{Builder, Connection, Value};
 
@@ -12,12 +14,60 @@ use super::{
 
 const ROOT_INO: i64 = 1;
 const DEFAULT_CHUNK_SIZE: usize = 4096;
+const DENTRY_CACHE_MAX_SIZE: usize = 10000;
+
+/// LRU cache for directory entry lookups.
+///
+/// Maps (parent_ino, name) -> child_ino to avoid repeated database queries
+/// during path resolution. For a path like `/a/b/c/d`, this reduces queries
+/// from 4 to potentially 0 on cache hits.
+struct DentryCache {
+    // Mutex required because LruCache::get() mutates internal order
+    entries: Mutex<LruCache<(i64, String), i64>>,
+}
+
+impl DentryCache {
+    fn new(max_size: usize) -> Self {
+        Self {
+            entries: Mutex::new(LruCache::new(
+                NonZeroUsize::new(max_size).expect("cache size must be > 0"),
+            )),
+        }
+    }
+
+    /// Look up a cached entry (updates LRU order)
+    fn get(&self, parent_ino: i64, name: &str) -> Option<i64> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&(parent_ino, name.to_string()))
+            .copied()
+    }
+
+    /// Insert an entry into the cache (evicts LRU entry if full)
+    fn insert(&self, parent_ino: i64, name: &str, child_ino: i64) {
+        self.entries
+            .lock()
+            .unwrap()
+            .put((parent_ino, name.to_string()), child_ino);
+    }
+
+    /// Remove an entry from the cache
+    fn remove(&self, parent_ino: i64, name: &str) {
+        self.entries
+            .lock()
+            .unwrap()
+            .pop(&(parent_ino, name.to_string()));
+    }
+}
 
 /// A filesystem backed by SQLite
 #[derive(Clone)]
 pub struct AgentFS {
     conn: Arc<Connection>,
     chunk_size: usize,
+    /// Cache for directory entry lookups (shared across clones)
+    dentry_cache: Arc<DentryCache>,
 }
 
 /// An open file handle for AgentFS.
@@ -348,7 +398,11 @@ impl AgentFS {
         // Get chunk_size from config (or use default)
         let chunk_size = Self::read_chunk_size(&conn).await?;
 
-        let fs = Self { conn, chunk_size };
+        let fs = Self {
+            conn,
+            chunk_size,
+            dentry_cache: Arc::new(DentryCache::new(DENTRY_CACHE_MAX_SIZE)),
+        };
         Ok(fs)
     }
 
@@ -540,6 +594,34 @@ impl AgentFS {
             .collect()
     }
 
+    /// Look up a child entry by parent inode and name.
+    ///
+    /// This is more efficient than `resolve_path` when you already have the parent inode,
+    /// as it avoids re-resolving all parent path components.
+    async fn lookup_child(&self, parent_ino: i64, name: &str) -> Result<Option<i64>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT ino FROM fs_dentry WHERE parent_ino = ? AND name = ?",
+                (parent_ino, name),
+            )
+            .await?;
+
+        let mut found_ino = None;
+        let mut row_count = 0;
+
+        while let Some(row) = rows.next().await? {
+            found_ino = row.get_value(0).ok().and_then(|v| v.as_integer().copied());
+            row_count += 1;
+        }
+
+        if row_count > 1 {
+            return Err(FsError::InvalidPath.into());
+        }
+
+        Ok(found_ino)
+    }
+
     /// Get link count for an inode
     async fn get_link_count(&self, ino: i64) -> Result<u32> {
         let mut rows = self
@@ -622,6 +704,13 @@ impl AgentFS {
 
         let mut current_ino = ROOT_INO;
         for component in components {
+            // Check cache first
+            if let Some(cached_ino) = self.dentry_cache.get(current_ino, &component) {
+                current_ino = cached_ino;
+                continue;
+            }
+
+            // Cache miss - query database
             let mut rows = self
                 .conn
                 .query(
@@ -630,12 +719,28 @@ impl AgentFS {
                 )
                 .await?;
 
-            if let Some(row) = rows.next().await? {
-                current_ino = row
+            let mut found_row = None;
+            let mut row_count = 0;
+
+            while let Some(row) = rows.next().await? {
+                found_row = Some(row);
+                row_count += 1;
+            }
+
+            if row_count > 1 {
+                return Err(FsError::InvalidPath.into());
+            }
+
+            if let Some(row) = found_row {
+                let child_ino = row
                     .get_value(0)
                     .ok()
                     .and_then(|v| v.as_integer().copied())
                     .unwrap_or(0);
+
+                // Populate cache
+                self.dentry_cache.insert(current_ino, &component, child_ino);
+                current_ino = child_ino;
             } else {
                 return Ok(None);
             }
@@ -753,8 +858,8 @@ impl AgentFS {
 
         let name = components.last().unwrap();
 
-        // Check if already exists
-        if (self.resolve_path(&path).await?).is_some() {
+        // Check if already exists (single query using parent_ino we already have)
+        if self.lookup_child(parent_ino, name).await?.is_some() {
             anyhow::bail!("Directory already exists");
         }
 
@@ -793,6 +898,9 @@ impl AgentFS {
             )
             .await?;
 
+        // Populate dentry cache
+        self.dentry_cache.insert(parent_ino, name, ino);
+
         Ok(())
     }
 
@@ -821,8 +929,8 @@ impl AgentFS {
         self.conn.execute("BEGIN IMMEDIATE", ()).await?;
 
         let result: Result<()> = async {
-            // Check if file exists
-            let ino = if let Some(ino) = self.resolve_path(&path).await? {
+            // Check if file exists (single query using parent_ino we already have)
+            let ino = if let Some(ino) = self.lookup_child(parent_ino, name).await? {
                 // Delete existing data
                 self.conn
                     .execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
@@ -863,6 +971,9 @@ impl AgentFS {
                         (ino,),
                     )
                     .await?;
+
+                // Populate dentry cache for new file
+                self.dentry_cache.insert(parent_ino, name, ino);
 
                 ino
             };
@@ -1500,8 +1611,8 @@ impl AgentFS {
 
         let name = components.last().unwrap();
 
-        // Check if entry already exists
-        if (self.resolve_path(&linkpath).await?).is_some() {
+        // Check if entry already exists (single query using parent_ino we already have)
+        if self.lookup_child(parent_ino, name).await?.is_some() {
             anyhow::bail!("Path already exists");
         }
 
@@ -1553,6 +1664,9 @@ impl AgentFS {
                 (ino,),
             )
             .await?;
+
+        // Populate dentry cache
+        self.dentry_cache.insert(parent_ino, name, ino);
 
         Ok(())
     }
@@ -1611,8 +1725,8 @@ impl AgentFS {
 
         let name = components.last().unwrap();
 
-        // Check if new path already exists
-        if (self.resolve_path(&newpath).await?).is_some() {
+        // Check if new path already exists (single query using parent_ino we already have)
+        if self.lookup_child(parent_ino, name).await?.is_some() {
             anyhow::bail!("Path already exists");
         }
 
@@ -1631,6 +1745,9 @@ impl AgentFS {
                 (ino,),
             )
             .await?;
+
+        // Populate dentry cache
+        self.dentry_cache.insert(parent_ino, name, ino);
 
         Ok(())
     }
@@ -1745,6 +1862,9 @@ impl AgentFS {
                 (parent_ino, name.as_str()),
             )
             .await?;
+
+        // Invalidate cache for this entry
+        self.dentry_cache.remove(parent_ino, name);
 
         // Decrement link count
         self.conn
@@ -1984,6 +2104,14 @@ impl AgentFS {
         match result {
             Ok(()) => {
                 self.conn.execute("COMMIT", ()).await?;
+
+                // Invalidate cache for source and destination
+                self.dentry_cache.remove(src_parent_ino, &src_name);
+                self.dentry_cache.remove(dst_parent_ino, &dst_name);
+
+                // Add new entry to cache (source inode is now at destination)
+                self.dentry_cache.insert(dst_parent_ino, &dst_name, src_ino);
+
                 Ok(())
             }
             Err(e) => {
