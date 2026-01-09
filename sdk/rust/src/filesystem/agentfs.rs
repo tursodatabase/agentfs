@@ -87,12 +87,14 @@ impl File for AgentFSFile {
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
+            .prepare_cached(
                 "SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index",
-                (self.ino, start_chunk as i64, end_chunk as i64),
             )
+            .await?;
+        let mut rows = stmt
+            .query((self.ino, start_chunk as i64, end_chunk as i64))
             .await?;
 
         let mut result = Vec::with_capacity(size as usize);
@@ -163,10 +165,11 @@ impl File for AgentFSFile {
         }
 
         // Get current file size
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query("SELECT size FROM fs_inode WHERE ino = ?", (self.ino,))
+            .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
             .await?;
+        let mut rows = stmt.query((self.ino,)).await?;
         let current_size = if let Some(row) = rows.next().await? {
             row.get_value(0)
                 .ok()
@@ -188,22 +191,22 @@ impl File for AgentFSFile {
         // Update file size and mtime
         let new_size = std::cmp::max(current_size, offset + data.len() as u64);
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-        self.conn
-            .execute(
-                "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
-                (new_size as i64, now, self.ino),
-            )
+        let mut stmt = self
+            .conn
+            .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
             .await?;
+        stmt.execute((new_size as i64, now, self.ino)).await?;
 
         Ok(())
     }
 
     async fn truncate(&self, new_size: u64) -> Result<()> {
         // Get current size
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query("SELECT size FROM fs_inode WHERE ino = ?", (self.ino,))
+            .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
             .await?;
+        let mut rows = stmt.query((self.ino,)).await?;
         let current_size = if let Some(row) = rows.next().await? {
             row.get_value(0)
                 .ok()
@@ -220,41 +223,40 @@ impl File for AgentFSFile {
         let result: Result<()> = async {
             if new_size == 0 {
                 // Special case: truncate to zero - just delete all chunks
-                self.conn
-                    .execute("DELETE FROM fs_data WHERE ino = ?", (self.ino,))
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                     .await?;
+                stmt.execute((self.ino,)).await?;
             } else if new_size < current_size {
                 // Shrinking: delete excess chunks and truncate last chunk if needed
                 let last_chunk_idx = (new_size - 1) / chunk_size;
 
                 // Delete all chunks beyond the last one we need
-                self.conn
-                    .execute(
-                        "DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?",
-                        (self.ino, last_chunk_idx as i64),
-                    )
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?")
                     .await?;
+                stmt.execute((self.ino, last_chunk_idx as i64)).await?;
 
                 // Truncate the last chunk if needed
                 let offset_in_chunk = (new_size % chunk_size) as usize;
                 if offset_in_chunk > 0 {
-                    let mut rows = self
+                    let mut stmt = self
                         .conn
-                        .query(
-                            "SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                            (self.ino, last_chunk_idx as i64),
-                        )
+                        .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                         .await?;
+                    let mut rows = stmt.query((self.ino, last_chunk_idx as i64)).await?;
 
                     if let Some(row) = rows.next().await? {
                         if let Ok(Value::Blob(mut chunk_data)) = row.get_value(0) {
                             if chunk_data.len() > offset_in_chunk {
                                 chunk_data.truncate(offset_in_chunk);
-                                self.conn
-                                    .execute(
-                                        "UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?",
-                                        (Value::Blob(chunk_data), self.ino, last_chunk_idx as i64),
-                                    )
+                                let mut stmt = self
+                                    .conn
+                                    .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
+                                    .await?;
+                                stmt.execute((Value::Blob(chunk_data), self.ino, last_chunk_idx as i64))
                                     .await?;
                             }
                         }
@@ -266,12 +268,11 @@ impl File for AgentFSFile {
 
             // Update the inode size and mtime
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            self.conn
-                .execute(
-                    "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
-                    (new_size as i64, now, self.ino),
-                )
+            let mut stmt = self
+                .conn
+                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
                 .await?;
+            stmt.execute((new_size as i64, now, self.ino)).await?;
 
             Ok(())
         }
@@ -295,13 +296,11 @@ impl File for AgentFSFile {
     }
 
     async fn fstat(&self) -> Result<Stats> {
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
-                "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
-                (self.ino,),
-            )
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?")
             .await?;
+        let mut rows = stmt.query((self.ino,)).await?;
 
         if let Some(row) = rows.next().await? {
             AgentFS::build_stats_from_row(&row)
@@ -328,13 +327,11 @@ impl AgentFSFile {
             let to_write = std::cmp::min(remaining_in_chunk, remaining_data);
 
             // Get existing chunk data (if any)
-            let mut rows = self
+            let mut stmt = self
                 .conn
-                .query(
-                    "SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                    (self.ino, chunk_index),
-                )
+                .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                 .await?;
+            let mut rows = stmt.query((self.ino, chunk_index)).await?;
 
             let mut chunk_data = if let Some(row) = rows.next().await? {
                 row.get_value(0)
@@ -361,11 +358,13 @@ impl AgentFSFile {
                 .copy_from_slice(&data[written..written + to_write]);
 
             // Save chunk
-            self.conn
-                .execute(
+            let mut stmt = self
+                .conn
+                .prepare_cached(
                     "INSERT OR REPLACE INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                    (self.ino, chunk_index, Value::Blob(chunk_data)),
                 )
+                .await?;
+            stmt.execute((self.ino, chunk_index, Value::Blob(chunk_data)))
                 .await?;
 
             written += to_write;
@@ -754,13 +753,11 @@ impl AgentFS {
             None => return Ok(None),
         };
 
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
-                "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
-                (ino,),
-            )
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?")
             .await?;
+        let mut rows = stmt.query((ino,)).await?;
 
         if let Some(row) = rows.next().await? {
             let stats = Self::build_stats_from_row(&row)?;
@@ -784,13 +781,11 @@ impl AgentFS {
                 None => return Ok(None),
             };
 
-            let mut rows = self
+            let mut stmt = self
                 .conn
-                .query(
-                    "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
-                    (ino,),
-                )
+                .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?")
                 .await?;
+            let mut rows = stmt.query((ino,)).await?;
 
             if let Some(row) = rows.next().await? {
                 let mode = row
@@ -929,9 +924,11 @@ impl AgentFS {
             // Check if file exists (single query using parent_ino we already have)
             let ino = if let Some(ino) = self.lookup_child(parent_ino, name).await? {
                 // Delete existing data
-                self.conn
-                    .execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                     .await?;
+                stmt.execute((ino,)).await?;
                 ino
             } else {
                 // Create new inode
@@ -954,20 +951,20 @@ impl AgentFS {
                     .ok_or_else(|| anyhow::anyhow!("Failed to get inode"))?;
 
                 // Create directory entry
-                self.conn
-                    .execute(
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
                         "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
-                        (name.as_str(), parent_ino, ino),
                     )
                     .await?;
+                stmt.execute((name.as_str(), parent_ino, ino)).await?;
 
                 // Increment link count
-                self.conn
-                    .execute(
-                        "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?",
-                        (ino,),
-                    )
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
                     .await?;
+                stmt.execute((ino,)).await?;
 
                 // Populate dentry cache for new file
                 self.dentry_cache.insert(parent_ino, name, ino);
@@ -976,22 +973,21 @@ impl AgentFS {
             };
 
             // Write data in chunks
+            let mut stmt = self
+                .conn
+                .prepare_cached("INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)")
+                .await?;
             for (chunk_index, chunk) in data.chunks(self.chunk_size).enumerate() {
-                self.conn
-                    .execute(
-                        "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                        (ino, chunk_index as i64, chunk),
-                    )
-                    .await?;
+                stmt.execute((ino, chunk_index as i64, chunk)).await?;
             }
 
             // Update mode (to regular file), size and mtime
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            self.conn
-                .execute(
-                    "UPDATE fs_inode SET mode = ?, size = ?, mtime = ? WHERE ino = ?",
-                    (DEFAULT_FILE_MODE as i64, data.len() as i64, now, ino),
-                )
+            let mut stmt = self
+                .conn
+                .prepare_cached("UPDATE fs_inode SET mode = ?, size = ?, mtime = ? WHERE ino = ?")
+                .await?;
+            stmt.execute((DEFAULT_FILE_MODE as i64, data.len() as i64, now, ino))
                 .await?;
 
             Ok(())
@@ -1017,13 +1013,11 @@ impl AgentFS {
             None => return Ok(None),
         };
 
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
-                "SELECT data FROM fs_data WHERE ino = ? ORDER BY chunk_index",
-                (ino,),
-            )
+            .prepare_cached("SELECT data FROM fs_data WHERE ino = ? ORDER BY chunk_index")
             .await?;
+        let mut rows = stmt.query((ino,)).await?;
 
         let mut data = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -1052,12 +1046,12 @@ impl AgentFS {
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
-                "SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index",
-                (ino, start_chunk as i64, end_chunk as i64),
-            )
+            .prepare_cached("SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index")
+            .await?;
+        let mut rows = stmt
+            .query((ino, start_chunk as i64, end_chunk as i64))
             .await?;
 
         let mut result = Vec::with_capacity(size as usize);
@@ -1116,10 +1110,11 @@ impl AgentFS {
             // Get or create the inode
             let (ino, current_size) = if let Some(ino) = self.resolve_path(&path).await? {
                 // Get current file size
-                let mut rows = self
+                let mut stmt = self
                     .conn
-                    .query("SELECT size FROM fs_inode WHERE ino = ?", (ino,))
+                    .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
                     .await?;
+                let mut rows = stmt.query((ino,)).await?;
                 let size = if let Some(row) = rows.next().await? {
                     row.get_value(0)
                         .ok()
@@ -1150,20 +1145,20 @@ impl AgentFS {
                     .ok_or_else(|| anyhow::anyhow!("Failed to get inode"))?;
 
                 // Create directory entry
-                self.conn
-                    .execute(
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
                         "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
-                        (name.as_str(), parent_ino, ino),
                     )
                     .await?;
+                stmt.execute((name.as_str(), parent_ino, ino)).await?;
 
                 // Increment link count
-                self.conn
-                    .execute(
-                        "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?",
-                        (ino,),
-                    )
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
                     .await?;
+                stmt.execute((ino,)).await?;
 
                 (ino, 0)
             };
@@ -1171,9 +1166,11 @@ impl AgentFS {
             // Handle empty writes - just update mtime
             if data.is_empty() {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-                self.conn
-                    .execute("UPDATE fs_inode SET mtime = ? WHERE ino = ?", (now, ino))
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("UPDATE fs_inode SET mtime = ? WHERE ino = ?")
                     .await?;
+                stmt.execute((now, ino)).await?;
                 return Ok(());
             }
 
@@ -1208,13 +1205,13 @@ impl AgentFS {
                 // Read existing chunk if we need to preserve some data
                 let needs_read = data_start > 0 || data_end < chunk_size as usize;
                 let mut chunk_data = if needs_read {
-                    let mut rows = self
+                    let mut stmt = self
                         .conn
-                        .query(
+                        .prepare_cached(
                             "SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                            (ino, chunk_idx as i64),
                         )
                         .await?;
+                    let mut rows = stmt.query((ino, chunk_idx as i64)).await?;
                     if let Some(row) = rows.next().await? {
                         if let Ok(Value::Blob(data)) = row.get_value(0) {
                             let mut v = data.clone();
@@ -1247,29 +1244,28 @@ impl AgentFS {
                 };
 
                 // Write the chunk - delete existing then insert
-                self.conn
-                    .execute(
-                        "DELETE FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                        (ino, chunk_idx as i64),
-                    )
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("DELETE FROM fs_data WHERE ino = ? AND chunk_index = ?")
                     .await?;
-                self.conn
-                    .execute(
-                        "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                        (ino, chunk_idx as i64, &chunk_data[..actual_len]),
-                    )
+                stmt.execute((ino, chunk_idx as i64)).await?;
+
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)")
+                    .await?;
+                stmt.execute((ino, chunk_idx as i64, &chunk_data[..actual_len]))
                     .await?;
             }
 
             // Update size and mtime
             let new_size = std::cmp::max(current_size, write_end);
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            self.conn
-                .execute(
-                    "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
-                    (new_size as i64, now, ino),
-                )
+            let mut stmt = self
+                .conn
+                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
                 .await?;
+            stmt.execute((new_size as i64, now, ino)).await?;
 
             Ok(())
         }
@@ -1300,10 +1296,11 @@ impl AgentFS {
             .ok_or_else(|| anyhow::anyhow!("File not found"))?;
 
         // Get current size
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query("SELECT size FROM fs_inode WHERE ino = ?", (ino,))
+            .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
             .await?;
+        let mut rows = stmt.query((ino,)).await?;
         let current_size = if let Some(row) = rows.next().await? {
             row.get_value(0)
                 .ok()
@@ -1320,20 +1317,21 @@ impl AgentFS {
         let result: Result<()> = async {
             if new_size == 0 {
                 // Special case: truncate to zero - just delete all chunks
-                self.conn
-                    .execute("DELETE FROM fs_data WHERE ino = ?", (ino,))
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                     .await?;
+                stmt.execute((ino,)).await?;
             } else if new_size < current_size {
                 // Shrinking: delete excess chunks and truncate last chunk if needed
                 let last_chunk_idx = (new_size - 1) / chunk_size;
 
                 // Delete all chunks beyond the last one we need
-                self.conn
-                    .execute(
-                        "DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?",
-                        (ino, last_chunk_idx as i64),
-                    )
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?")
                     .await?;
+                stmt.execute((ino, last_chunk_idx as i64)).await?;
 
                 // Calculate where in the last chunk the file should end
                 let end_in_last_chunk = ((new_size - 1) % chunk_size) + 1;
@@ -1341,23 +1339,21 @@ impl AgentFS {
                 // If the last chunk needs to be truncated (not a full chunk),
                 // read it, truncate, and rewrite
                 if end_in_last_chunk < chunk_size {
-                    let mut rows = self
+                    let mut stmt = self
                         .conn
-                        .query(
-                            "SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                            (ino, last_chunk_idx as i64),
-                        )
+                        .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                         .await?;
+                    let mut rows = stmt.query((ino, last_chunk_idx as i64)).await?;
 
                     if let Some(row) = rows.next().await? {
                         if let Ok(Value::Blob(chunk_data)) = row.get_value(0) {
                             if chunk_data.len() > end_in_last_chunk as usize {
                                 let truncated = &chunk_data[..end_in_last_chunk as usize];
-                                self.conn
-                                    .execute(
-                                        "UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?",
-                                        (truncated, ino, last_chunk_idx as i64),
-                                    )
+                                let mut stmt = self
+                                    .conn
+                                    .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
+                                    .await?;
+                                stmt.execute((truncated, ino, last_chunk_idx as i64))
                                     .await?;
                             }
                         }
@@ -1374,13 +1370,11 @@ impl AgentFS {
 
                 // Pad the last existing chunk with zeros if it's not full
                 if let Some(last_idx) = last_existing_chunk {
-                    let mut rows = self
+                    let mut stmt = self
                         .conn
-                        .query(
-                            "SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                            (ino, last_idx as i64),
-                        )
+                        .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                         .await?;
+                    let mut rows = stmt.query((ino, last_idx as i64)).await?;
 
                     if let Some(row) = rows.next().await? {
                         if let Ok(Value::Blob(chunk_data)) = row.get_value(0) {
@@ -1396,11 +1390,11 @@ impl AgentFS {
                             if needed_len > current_chunk_len {
                                 let mut padded = chunk_data.clone();
                                 padded.resize(needed_len, 0);
-                                self.conn
-                                    .execute(
-                                        "UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?",
-                                        (&padded[..], ino, last_idx as i64),
-                                    )
+                                let mut stmt = self
+                                    .conn
+                                    .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
+                                    .await?;
+                                stmt.execute((&padded[..], ino, last_idx as i64))
                                     .await?;
                             }
                         }
@@ -1409,31 +1403,32 @@ impl AgentFS {
 
                 // Add new zero-filled chunks if needed
                 let start_new_chunk = last_existing_chunk.map(|i| i + 1).unwrap_or(0);
-                for chunk_idx in start_new_chunk..=last_new_chunk {
-                    let chunk_len = if chunk_idx == last_new_chunk {
-                        ((new_size - 1) % chunk_size + 1) as usize
-                    } else {
-                        chunk_size as usize
-                    };
-                    let zeros = vec![0u8; chunk_len];
-                    self.conn
-                        .execute(
-                            "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                            (ino, chunk_idx as i64, &zeros[..]),
-                        )
+                if start_new_chunk <= last_new_chunk {
+                    let mut stmt = self
+                        .conn
+                        .prepare_cached("INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)")
                         .await?;
+                    for chunk_idx in start_new_chunk..=last_new_chunk {
+                        let chunk_len = if chunk_idx == last_new_chunk {
+                            ((new_size - 1) % chunk_size + 1) as usize
+                        } else {
+                            chunk_size as usize
+                        };
+                        let zeros = vec![0u8; chunk_len];
+                        stmt.execute((ino, chunk_idx as i64, &zeros[..]))
+                            .await?;
+                    }
                 }
             }
             // else: new_size == current_size, nothing to do for data
 
             // Update size and mtime
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            self.conn
-                .execute(
-                    "UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?",
-                    (new_size as i64, now, ino),
-                )
+            let mut stmt = self
+                .conn
+                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
                 .await?;
+            stmt.execute((new_size as i64, now, ino)).await?;
 
             Ok(())
         }
@@ -1458,13 +1453,11 @@ impl AgentFS {
             None => return Ok(None),
         };
 
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
-                "SELECT name FROM fs_dentry WHERE parent_ino = ? ORDER BY name",
-                (ino,),
-            )
+            .prepare_cached("SELECT name FROM fs_dentry WHERE parent_ino = ? ORDER BY name")
             .await?;
+        let mut rows = stmt.query((ino,)).await?;
 
         let mut entries = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -1497,17 +1490,17 @@ impl AgentFS {
         };
 
         // Single JOIN query to get all entry names and their stats (including link count)
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
+            .prepare_cached(
                 "SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime
                  FROM fs_dentry d
                  JOIN fs_inode i ON d.ino = i.ino
                  WHERE d.parent_ino = ?
                  ORDER BY d.name",
-                (ino,),
             )
             .await?;
+        let mut rows = stmt.query((ino,)).await?;
 
         let mut entries = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -2123,7 +2116,11 @@ impl AgentFS {
     /// Returns the total number of inodes and bytes used by file contents.
     pub async fn statfs(&self) -> Result<FilesystemStats> {
         // Count total inodes
-        let mut rows = self.conn.query("SELECT COUNT(*) FROM fs_inode", ()).await?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT COUNT(*) FROM fs_inode")
+            .await?;
+        let mut rows = stmt.query(()).await?;
 
         let inodes = if let Some(row) = rows.next().await? {
             row.get_value(0)
@@ -2135,10 +2132,11 @@ impl AgentFS {
         };
 
         // Sum total bytes used (from file sizes in inodes)
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query("SELECT COALESCE(SUM(size), 0) FROM fs_inode", ())
+            .prepare_cached("SELECT COALESCE(SUM(size), 0) FROM fs_inode")
             .await?;
+        let mut rows = stmt.query(()).await?;
 
         let bytes_used = if let Some(row) = rows.next().await? {
             row.get_value(0)

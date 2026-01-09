@@ -386,7 +386,11 @@ impl OverlayFS {
         let conn = self.delta.get_connection();
 
         // Query all whiteouts from the database
-        let result = conn.query("SELECT path FROM fs_whiteout", ()).await;
+        let result = conn.prepare_cached("SELECT path FROM fs_whiteout").await;
+        let result = match result {
+            Ok(mut stmt) => stmt.query(()).await,
+            Err(e) => Err(e),
+        };
 
         // Handle case where table doesn't exist yet (fresh database)
         let mut rows = match result {
@@ -522,12 +526,14 @@ impl OverlayFS {
         let conn = self.delta.get_connection();
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
-        conn.execute(
-            "INSERT INTO fs_whiteout (path, parent_path, created_at) VALUES (?, ?, ?)
-             ON CONFLICT(path) DO UPDATE SET created_at = excluded.created_at",
-            (normalized.as_str(), parent.as_str(), now),
-        )
-        .await?;
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT INTO fs_whiteout (path, parent_path, created_at) VALUES (?, ?, ?)
+                 ON CONFLICT(path) DO UPDATE SET created_at = excluded.created_at",
+            )
+            .await?;
+        stmt.execute((normalized.as_str(), parent.as_str(), now))
+            .await?;
 
         // Update in-memory cache
         self.whiteout_cache.insert(&normalized);
@@ -539,11 +545,10 @@ impl OverlayFS {
         let normalized = self.normalize_path(path);
         let conn = self.delta.get_connection();
 
-        conn.execute(
-            "DELETE FROM fs_whiteout WHERE path = ?",
-            (normalized.as_str(),),
-        )
-        .await?;
+        let mut stmt = conn
+            .prepare_cached("DELETE FROM fs_whiteout WHERE path = ?")
+            .await?;
+        stmt.execute((normalized.as_str(),)).await?;
 
         // Update in-memory cache
         self.whiteout_cache.remove(&normalized);
@@ -654,11 +659,10 @@ impl OverlayFS {
     /// so stat() can return the original inode number (like Linux overlayfs).
     async fn add_origin_mapping(&self, delta_ino: i64, base_ino: i64) -> Result<()> {
         let conn = self.delta.get_connection();
-        conn.execute(
-            "INSERT OR REPLACE INTO fs_origin (delta_ino, base_ino) VALUES (?, ?)",
-            (delta_ino, base_ino),
-        )
-        .await?;
+        let mut stmt = conn
+            .prepare_cached("INSERT OR REPLACE INTO fs_origin (delta_ino, base_ino) VALUES (?, ?)")
+            .await?;
+        stmt.execute((delta_ino, base_ino)).await?;
         Ok(())
     }
 
@@ -666,13 +670,16 @@ impl OverlayFS {
     async fn get_origin_inode(&self, delta_ino: i64) -> Result<Option<i64>> {
         let conn = self.delta.get_connection();
         let result = conn
-            .query(
-                "SELECT base_ino FROM fs_origin WHERE delta_ino = ?",
-                (delta_ino,),
-            )
+            .prepare_cached("SELECT base_ino FROM fs_origin WHERE delta_ino = ?")
             .await;
 
         // Handle case where fs_origin table doesn't exist yet (for existing databases)
+        let mut stmt = match result {
+            Ok(stmt) => stmt,
+            Err(_) => return Ok(None),
+        };
+
+        let result = stmt.query((delta_ino,)).await;
         let mut rows = match result {
             Ok(rows) => rows,
             Err(_) => return Ok(None),
@@ -691,13 +698,16 @@ impl OverlayFS {
     /// Called when a file is deleted from the delta layer to clean up stale mappings.
     async fn remove_origin_mapping(&self, delta_ino: i64) -> Result<()> {
         let conn = self.delta.get_connection();
-        let result = conn
-            .execute("DELETE FROM fs_origin WHERE delta_ino = ?", (delta_ino,))
+        let stmt_result = conn
+            .prepare_cached("DELETE FROM fs_origin WHERE delta_ino = ?")
             .await;
 
         // Ignore errors for existing databases without fs_origin table
-        match result {
-            Ok(_) => Ok(()),
+        match stmt_result {
+            Ok(mut stmt) => match stmt.execute((delta_ino,)).await {
+                Ok(_) => Ok(()),
+                Err(_) => Ok(()),
+            },
             Err(_) => Ok(()),
         }
     }
