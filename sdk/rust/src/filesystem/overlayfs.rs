@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::{
-    collections::HashSet,
-    sync::Arc,
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use turso::{Connection, Value};
@@ -10,6 +10,109 @@ use turso::{Connection, Value};
 use super::{
     agentfs::AgentFS, BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats,
 };
+
+/// A path-component trie for efficient whiteout lookups.
+///
+/// This replaces N database queries per is_whiteout() call with a single
+/// in-memory trie traversal. The trie is keyed by path components (split by '/'),
+/// making ancestor lookups O(depth) with early termination.
+#[derive(Default, Debug)]
+struct WhiteoutNode {
+    /// Child nodes keyed by path component
+    children: HashMap<String, WhiteoutNode>,
+    /// True if this exact path is a whiteout
+    is_whiteout: bool,
+}
+
+/// Thread-safe whiteout cache wrapping the trie
+#[derive(Default, Debug)]
+pub struct WhiteoutCache {
+    root: RwLock<WhiteoutNode>,
+}
+
+impl WhiteoutCache {
+    /// Create an empty whiteout cache
+    pub fn new() -> Self {
+        Self {
+            root: RwLock::new(WhiteoutNode::default()),
+        }
+    }
+
+    /// Check if path or any ancestor is a whiteout - O(depth) with early exit
+    pub fn has_whiteout_ancestor(&self, path: &str) -> bool {
+        let root = self.root.read().unwrap();
+        let mut node = &*root;
+
+        for component in path.split('/').filter(|s| !s.is_empty()) {
+            if node.is_whiteout {
+                return true; // Ancestor is whiteout, early exit
+            }
+            match node.children.get(component) {
+                Some(child) => node = child,
+                None => return false, // Path not in trie, no whiteout
+            }
+        }
+        node.is_whiteout // Check the final node itself
+    }
+
+    /// Insert a whiteout path into the cache
+    pub fn insert(&self, path: &str) {
+        let mut root = self.root.write().unwrap();
+        let mut node = &mut *root;
+
+        for component in path.split('/').filter(|s| !s.is_empty()) {
+            node = node.children.entry(component.to_string()).or_default();
+        }
+        node.is_whiteout = true;
+    }
+
+    /// Remove a whiteout path from the cache
+    ///
+    /// Note: This only unmarks the exact path, not ancestors or children.
+    /// It also doesn't prune empty nodes (minor memory overhead, but safe).
+    pub fn remove(&self, path: &str) {
+        let mut root = self.root.write().unwrap();
+        let mut node = &mut *root;
+
+        for component in path.split('/').filter(|s| !s.is_empty()) {
+            match node.children.get_mut(component) {
+                Some(child) => node = child,
+                None => return, // Path not in trie, nothing to remove
+            }
+        }
+        node.is_whiteout = false;
+    }
+
+    /// Get all whiteout names that are direct children of a directory path.
+    ///
+    /// This is used by readdir to filter out deleted entries.
+    pub fn get_child_whiteouts(&self, dir_path: &str) -> HashSet<String> {
+        let root = self.root.read().unwrap();
+        let mut node = &*root;
+
+        // Navigate to the directory node
+        for component in dir_path.split('/').filter(|s| !s.is_empty()) {
+            match node.children.get(component) {
+                Some(child) => node = child,
+                None => return HashSet::new(), // Directory not in trie
+            }
+        }
+
+        // Collect children that are whiteouts
+        node.children
+            .iter()
+            .filter(|(_, child)| child.is_whiteout)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Clear all entries from the cache
+    pub fn clear(&self) {
+        let mut root = self.root.write().unwrap();
+        root.children.clear();
+        root.is_whiteout = false;
+    }
+}
 
 /// A normalized path that is guaranteed to start with /
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -74,6 +177,8 @@ pub struct OverlayFS {
     base: Arc<dyn FileSystem>,
     /// Writable delta layer (must be AgentFS for whiteout storage)
     delta: AgentFS,
+    /// In-memory cache for whiteout lookups (replaces N db queries with O(depth) trie lookup)
+    whiteout_cache: WhiteoutCache,
 }
 
 /// An open file handle for OverlayFS.
@@ -224,7 +329,36 @@ impl File for OverlayFile {
 impl OverlayFS {
     /// Create a new overlay filesystem
     pub fn new(base: Arc<dyn FileSystem>, delta: AgentFS) -> Self {
-        Self { base, delta }
+        Self {
+            base,
+            delta,
+            whiteout_cache: WhiteoutCache::new(),
+        }
+    }
+
+    /// Load all whiteouts from the database into the in-memory cache.
+    ///
+    /// This is called during init() to populate the cache. The cache is then
+    /// kept in sync via create_whiteout() and remove_whiteout().
+    async fn load_whiteouts_into_cache(&self) -> Result<()> {
+        let conn = self.delta.get_connection();
+
+        // Query all whiteouts from the database
+        let result = conn.query("SELECT path FROM fs_whiteout", ()).await;
+
+        // Handle case where table doesn't exist yet (fresh database)
+        let mut rows = match result {
+            Ok(rows) => rows,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to load
+        };
+
+        while let Some(row) = rows.next().await? {
+            if let Ok(Value::Text(path)) = row.get_value(0) {
+                self.whiteout_cache.insert(&path);
+            }
+        }
+
+        Ok(())
     }
 
     /// Initialize the overlay filesystem schema in a database.
@@ -288,7 +422,10 @@ impl OverlayFS {
     /// base layer represents. This is stored in the delta database so that
     /// tools like `agentfs diff` can determine what files were modified.
     pub async fn init(&self, base_path: &str) -> Result<()> {
-        Self::init_schema(&self.delta.get_connection(), base_path).await
+        Self::init_schema(&self.delta.get_connection(), base_path).await?;
+        // Load existing whiteouts into the in-memory cache
+        self.load_whiteouts_into_cache().await?;
+        Ok(())
     }
 
     /// Extract the parent path from a normalized path
@@ -330,41 +467,10 @@ impl OverlayFS {
     ///
     /// This also checks parent directories - if /foo is whiteout,
     /// then /foo/bar is also considered deleted.
-    async fn is_whiteout(&self, path: &NormalizedPath) -> Result<bool> {
-        let conn = self.delta.get_connection();
-
-        // Check the path itself and all parent paths
-        let mut check_path = path.0.clone();
-        loop {
-            let result = conn
-                .query(
-                    "SELECT 1 FROM fs_whiteout WHERE path = ?",
-                    (check_path.as_str(),),
-                )
-                .await;
-
-            // Handle case where fs_whiteout table doesn't exist
-            let mut rows = match result {
-                Ok(rows) => rows,
-                Err(_) => return Ok(false), // Table doesn't exist, no whiteouts
-            };
-
-            if rows.next().await?.is_some() {
-                return Ok(true);
-            }
-
-            // Check parent directory
-            if let Some(parent_end) = check_path.rfind('/') {
-                if parent_end == 0 {
-                    // We've reached root
-                    break;
-                }
-                check_path = check_path[..parent_end].to_string();
-            } else {
-                break;
-            }
-        }
-        Ok(false)
+    ///
+    /// Uses the in-memory cache for O(depth) lookup instead of N database queries.
+    fn is_whiteout(&self, path: &NormalizedPath) -> bool {
+        self.whiteout_cache.has_whiteout_ancestor(&path.0)
     }
 
     /// Create a whiteout for a path (marks it as deleted from base)
@@ -380,6 +486,9 @@ impl OverlayFS {
             (normalized.as_str(), parent.as_str(), now),
         )
         .await?;
+
+        // Update in-memory cache
+        self.whiteout_cache.insert(&normalized);
         Ok(())
     }
 
@@ -393,34 +502,18 @@ impl OverlayFS {
             (normalized.as_str(),),
         )
         .await?;
+
+        // Update in-memory cache
+        self.whiteout_cache.remove(&normalized);
         Ok(())
     }
 
     /// Get all whiteouts that are direct children of a directory
-    async fn get_child_whiteouts(&self, dir_path: &str) -> Result<HashSet<String>> {
+    ///
+    /// Uses the in-memory cache for O(1) lookup instead of database query.
+    fn get_child_whiteouts(&self, dir_path: &str) -> HashSet<String> {
         let normalized = self.normalize_path(dir_path);
-        let conn = self.delta.get_connection();
-        let mut whiteouts = HashSet::new();
-
-        // Use parent_path index for O(1) lookup instead of LIKE which compiles regex
-        let mut rows = conn
-            .query(
-                "SELECT path FROM fs_whiteout WHERE parent_path = ?",
-                (normalized.as_str(),),
-            )
-            .await?;
-
-        while let Some(row) = rows.next().await? {
-            if let Ok(Value::Text(p)) = row.get_value(0) {
-                // Extract the filename from the path
-                if let Some(name) = p.rsplit('/').next() {
-                    if !name.is_empty() {
-                        whiteouts.insert(name.to_string());
-                    }
-                }
-            }
-        }
-        Ok(whiteouts)
+        self.whiteout_cache.get_child_whiteouts(&normalized)
     }
 
     /// Ensure parent directories exist in delta layer
@@ -480,7 +573,7 @@ impl OverlayFS {
             let current_normalized = NormalizedPath::from_normalized(current.clone());
 
             // Check for whiteout
-            if self.is_whiteout(&current_normalized).await? {
+            if self.is_whiteout(&current_normalized) {
                 return Ok(false);
             }
 
@@ -560,7 +653,7 @@ impl FileSystem for OverlayFS {
         let normalized = self.normalize_path(path);
 
         // Check for whiteout first
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             return Ok(None);
         }
 
@@ -601,7 +694,7 @@ impl FileSystem for OverlayFS {
     async fn lstat(&self, path: &str) -> Result<Option<Stats>> {
         let normalized = self.normalize_path(path);
 
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             return Ok(None);
         }
 
@@ -647,7 +740,7 @@ impl FileSystem for OverlayFS {
             return Ok(None);
         }
 
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             return Ok(None);
         }
 
@@ -677,12 +770,12 @@ impl FileSystem for OverlayFS {
         let normalized = self.normalize_path(path);
 
         // Check for whiteout on directory itself
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             return Ok(None);
         }
 
         // Get whiteouts for children
-        let child_whiteouts = self.get_child_whiteouts(&normalized).await?;
+        let child_whiteouts = self.get_child_whiteouts(&normalized);
 
         let mut entries = HashSet::new();
 
@@ -717,12 +810,12 @@ impl FileSystem for OverlayFS {
         let normalized = self.normalize_path(path);
 
         // Check for whiteout on directory itself
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             return Ok(None);
         }
 
         // Get whiteouts for children
-        let child_whiteouts = self.get_child_whiteouts(&normalized).await?;
+        let child_whiteouts = self.get_child_whiteouts(&normalized);
 
         // Use a HashMap to merge entries, with delta taking precedence
         let mut entries_map = std::collections::HashMap::new();
@@ -773,7 +866,7 @@ impl FileSystem for OverlayFS {
         let normalized = self.normalize_path(path);
 
         // Check if already exists (in either layer, not whiteout)
-        if !self.is_whiteout(&normalized).await?
+        if !self.is_whiteout(&normalized)
             && (self.delta.stat(&normalized).await?.is_some()
                 || self.base.stat(&normalized).await?.is_some())
         {
@@ -814,7 +907,7 @@ impl FileSystem for OverlayFS {
                 for child in base_children {
                     let child_path =
                         NormalizedPath::from_normalized(format!("{}/{}", normalized, child));
-                    if !self.is_whiteout(&child_path).await? {
+                    if !self.is_whiteout(&child_path) {
                         return Err(FsError::NotEmpty.into());
                     }
                 }
@@ -835,7 +928,7 @@ impl FileSystem for OverlayFS {
         }
 
         // Check if it exists in base (and not already whiteout) - use lstat to not follow symlinks
-        let exists_in_base = if self.is_whiteout(&normalized).await? {
+        let exists_in_base = if self.is_whiteout(&normalized) {
             false
         } else {
             self.base.lstat(&normalized).await?.is_some()
@@ -855,7 +948,7 @@ impl FileSystem for OverlayFS {
         let normalized = self.normalize_path(path);
 
         // Check if whited-out
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             return Err(FsError::NotFound.into());
         }
 
@@ -964,7 +1057,7 @@ impl FileSystem for OverlayFS {
         let new_normalized = self.normalize_path(newpath);
 
         // Check if source is whited out
-        if self.is_whiteout(&old_normalized).await? {
+        if self.is_whiteout(&old_normalized) {
             return Err(FsError::NotFound.into());
         }
 
@@ -1010,7 +1103,7 @@ impl FileSystem for OverlayFS {
     async fn readlink(&self, path: &str) -> Result<Option<String>> {
         let normalized = self.normalize_path(path);
 
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             return Ok(None);
         }
 
@@ -1032,7 +1125,7 @@ impl FileSystem for OverlayFS {
         let normalized = self.normalize_path(path);
 
         // Check for whiteout
-        if self.is_whiteout(&normalized).await? {
+        if self.is_whiteout(&normalized) {
             anyhow::bail!("File not found (whiteout): {}", path);
         }
 
