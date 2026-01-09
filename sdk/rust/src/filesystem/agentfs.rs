@@ -599,13 +599,11 @@ impl AgentFS {
     /// This is more efficient than `resolve_path` when you already have the parent inode,
     /// as it avoids re-resolving all parent path components.
     async fn lookup_child(&self, parent_ino: i64, name: &str) -> Result<Option<i64>> {
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query(
-                "SELECT ino FROM fs_dentry WHERE parent_ino = ? AND name = ?",
-                (parent_ino, name),
-            )
+            .prepare_cached("SELECT ino FROM fs_dentry WHERE parent_ino = ? AND name = ?")
             .await?;
+        let mut rows = stmt.query((parent_ino, name)).await?;
 
         let mut found_ino = None;
         let mut row_count = 0;
@@ -624,10 +622,11 @@ impl AgentFS {
 
     /// Get link count for an inode
     async fn get_link_count(&self, ino: i64) -> Result<u32> {
-        let mut rows = self
+        let mut stmt = self
             .conn
-            .query("SELECT nlink FROM fs_inode WHERE ino = ?", (ino,))
+            .prepare_cached("SELECT nlink FROM fs_inode WHERE ino = ?")
             .await?;
+        let mut rows = stmt.query((ino,)).await?;
 
         if let Some(row) = rows.next().await? {
             let nlink = row
@@ -711,13 +710,11 @@ impl AgentFS {
             }
 
             // Cache miss - query database
-            let mut rows = self
+            let mut stmt = self
                 .conn
-                .query(
-                    "SELECT ino FROM fs_dentry WHERE parent_ino = ? AND name = ?",
-                    (current_ino, component.as_str()),
-                )
+                .prepare_cached("SELECT ino FROM fs_dentry WHERE parent_ino = ? AND name = ?")
                 .await?;
+            let mut rows = stmt.query((current_ino, component.as_str())).await?;
 
             let mut found_row = None;
             let mut row_count = 0;
