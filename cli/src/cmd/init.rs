@@ -24,6 +24,9 @@ pub async fn open_agentfs(
     if let Ok(auth_token) = std::env::var("TURSO_DB_AUTH_TOKEN") {
         builder = builder.with_auth_token(auth_token);
     }
+    if let Ok(encryption_key) = std::env::var("TURSO_REMOTE_ENCRYPTION_KEY") {
+        builder = builder.with_remote_encryption_key(encryption_key);
+    }
     let db = builder.build().await?;
     let conn = db.connect().await?;
     let agent = AgentFS::open_with(conn)
@@ -41,6 +44,9 @@ pub async fn create_agentfs(
             turso::sync::Builder::new_remote(&options.db_path()?).with_remote_url(remote_url);
         if let Ok(auth_token) = std::env::var("TURSO_DB_AUTH_TOKEN") {
             builder = builder.with_auth_token(auth_token);
+        }
+        if let Ok(encryption_key) = std::env::var("TURSO_REMOTE_ENCRYPTION_KEY") {
+            builder = builder.with_remote_encryption_key(encryption_key);
         }
         let mut partial_sync = PartialSyncOpts {
             bootstrap_strategy: Some(PartialBootstrapStrategy::Prefix { length: 128 * 1024 }),
