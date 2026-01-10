@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.3] - 2026-01-10
+
+### Added
+
+- `agentfs ps` command to list active sessions.
+- `agentfs prune mounts` command.
+
+### Changed
+
+- `~/.cache`, `~/.gemini`, `~/.amp` added to default read-write allow list in `agentfs run`.
+- Group paths by parent directory in `agentfs run` welcome banner.
+
+### Performance
+
+- Rust SDK: Switch to prepared statement caching.
+
+### Fixed
+
+- Rust SDK: Return ENOENT instead of EIO for file not found errors.
+
 ## [0.5.2] - 2026-01-09
 
 ### Fixed
@@ -219,6 +239,7 @@
 - Cross-platform builds (Linux, macOS).
 - Example agent implementations.
 
+[0.5.3]: https://github.com/tursodatabase/agentfs/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/tursodatabase/agentfs/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/tursodatabase/agentfs/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tursodatabase/agentfs/compare/v0.4.1...v0.5.0
