@@ -216,7 +216,11 @@ impl File for AgentFSFile {
 
         let chunk_size = self.chunk_size as u64;
 
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        self.conn
+            .prepare_cached("BEGIN IMMEDIATE")
+            .await?
+            .execute(())
+            .await?;
 
         let result: Result<()> = async {
             if new_size == 0 {
@@ -277,19 +281,40 @@ impl File for AgentFSFile {
         .await;
 
         if result.is_err() {
-            let _ = self.conn.execute("ROLLBACK", ()).await;
+            let _ = self
+                .conn
+                .prepare_cached("ROLLBACK")
+                .await?
+                .execute(())
+                .await;
             return result;
         }
 
-        self.conn.execute("COMMIT", ()).await?;
+        self.conn
+            .prepare_cached("COMMIT")
+            .await?
+            .execute(())
+            .await?;
         Ok(())
     }
 
     async fn fsync(&self) -> Result<()> {
-        self.conn.execute("PRAGMA synchronous = FULL", ()).await?;
-        self.conn.execute("BEGIN", ()).await?;
-        self.conn.execute("COMMIT", ()).await?;
-        self.conn.execute("PRAGMA synchronous = OFF", ()).await?;
+        self.conn
+            .prepare_cached("PRAGMA synchronous = FULL")
+            .await?
+            .execute(())
+            .await?;
+        self.conn.prepare_cached("BEGIN").await?.execute(()).await?;
+        self.conn
+            .prepare_cached("COMMIT")
+            .await?
+            .execute(())
+            .await?;
+        self.conn
+            .prepare_cached("PRAGMA synchronous = OFF")
+            .await?
+            .execute(())
+            .await?;
         Ok(())
     }
 
@@ -920,7 +945,11 @@ impl AgentFS {
 
         let name = components.last().unwrap();
 
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        self.conn
+            .prepare_cached("BEGIN IMMEDIATE")
+            .await?
+            .execute(())
+            .await?;
 
         let result: Result<()> = async {
             // Check if file exists (single query using parent_ino we already have)
@@ -999,11 +1028,20 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn.execute("COMMIT", ()).await?;
+                self.conn
+                    .prepare_cached("COMMIT")
+                    .await?
+                    .execute(())
+                    .await?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = self
+                    .conn
+                    .prepare_cached("ROLLBACK")
+                    .await?
+                    .execute(())
+                    .await;
                 Err(e)
             }
         }
@@ -1051,7 +1089,11 @@ impl AgentFS {
             .prepare_cached("INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)")
             .await?;
 
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        self.conn
+            .prepare_cached("BEGIN IMMEDIATE")
+            .await?
+            .execute(())
+            .await?;
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
         let file_mode = S_IFREG | (mode & 0o7777);
@@ -1070,7 +1112,11 @@ impl AgentFS {
             .execute((name.as_str(), parent_ino, ino))
             .await?;
 
-        self.conn.execute("COMMIT", ()).await?;
+        self.conn
+            .prepare_cached("COMMIT")
+            .await?
+            .execute(())
+            .await?;
 
         self.dentry_cache.insert(parent_ino, name, ino);
 
@@ -1195,7 +1241,11 @@ impl AgentFS {
 
         let name = components.last().unwrap();
 
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        self.conn
+            .prepare_cached("BEGIN IMMEDIATE")
+            .await?
+            .execute(())
+            .await?;
 
         let result: Result<()> = async {
             // Get or create the inode
@@ -1258,7 +1308,9 @@ impl AgentFS {
             if data.is_empty() {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
                 self.conn
-                    .execute("UPDATE fs_inode SET mtime = ? WHERE ino = ?", (now, ino))
+                    .prepare_cached("UPDATE fs_inode SET mtime = ? WHERE ino = ?")
+                    .await?
+                    .execute((now, ino))
                     .await?;
                 return Ok(());
             }
@@ -1362,11 +1414,20 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn.execute("COMMIT", ()).await?;
+                self.conn
+                    .prepare_cached("COMMIT")
+                    .await?
+                    .execute(())
+                    .await?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = self
+                    .conn
+                    .prepare_cached("ROLLBACK")
+                    .await?
+                    .execute(())
+                    .await;
                 Err(e)
             }
         }
@@ -1398,7 +1459,11 @@ impl AgentFS {
 
         let chunk_size = self.chunk_size as u64;
 
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        self.conn
+            .prepare_cached("BEGIN IMMEDIATE")
+            .await?
+            .execute(())
+            .await?;
 
         let result: Result<()> = async {
             if new_size == 0 {
@@ -1519,11 +1584,20 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn.execute("COMMIT", ()).await?;
+                self.conn
+                    .prepare_cached("COMMIT")
+                    .await?
+                    .execute(())
+                    .await?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = self
+                    .conn
+                    .prepare_cached("ROLLBACK")
+                    .await?
+                    .execute(())
+                    .await;
                 Err(e)
             }
         }
@@ -2078,7 +2152,11 @@ impl AgentFS {
         let src_name = src_name.clone();
         let dst_name = dst_name.clone();
 
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        self.conn
+            .prepare_cached("BEGIN IMMEDIATE")
+            .await?
+            .execute(())
+            .await?;
 
         let result: Result<()> = async {
             // Check if destination exists (inside transaction for atomicity)
@@ -2183,7 +2261,11 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn.execute("COMMIT", ()).await?;
+                self.conn
+                    .prepare_cached("COMMIT")
+                    .await?
+                    .execute(())
+                    .await?;
 
                 // Invalidate cache for source and destination
                 self.dentry_cache.remove(src_parent_ino, &src_name);
@@ -2195,7 +2277,12 @@ impl AgentFS {
                 Ok(())
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = self
+                    .conn
+                    .prepare_cached("ROLLBACK")
+                    .await?
+                    .execute(())
+                    .await;
                 Err(e)
             }
         }
@@ -2248,10 +2335,22 @@ impl AgentFS {
     ///
     /// Note: The path parameter is ignored since all data is in a single database.
     pub async fn fsync(&self, _path: &str) -> Result<()> {
-        self.conn.execute("PRAGMA synchronous = FULL", ()).await?;
-        self.conn.execute("BEGIN", ()).await?;
-        self.conn.execute("COMMIT", ()).await?;
-        self.conn.execute("PRAGMA synchronous = OFF", ()).await?;
+        self.conn
+            .prepare_cached("PRAGMA synchronous = FULL")
+            .await?
+            .execute(())
+            .await?;
+        self.conn.prepare_cached("BEGIN").await?.execute(()).await?;
+        self.conn
+            .prepare_cached("COMMIT")
+            .await?
+            .execute(())
+            .await?;
+        self.conn
+            .prepare_cached("PRAGMA synchronous = OFF")
+            .await?
+            .execute(())
+            .await?;
         Ok(())
     }
 
