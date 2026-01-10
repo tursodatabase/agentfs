@@ -56,6 +56,7 @@ const SKIP_MOUNT_PREFIXES: &[&str] = &["/proc", "/sys", "/dev", "/tmp"];
 /// These are common application config/cache directories that many programs need.
 const DEFAULT_ALLOWED_DIRS: &[&str] = &[
     ".amp",         // Amp config
+    ".cache",       // XDG cache directory (corepack, pip, etc.)
     ".claude",      // Claude Code config
     ".claude.json", // Claude Code config file
     ".codex",       // OpenAI Codex config
