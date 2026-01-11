@@ -26,6 +26,9 @@ agentfs init [OPTIONS] [ID]
 **Options:**
 - `--force` - Overwrite existing agent filesystem
 - `--base <PATH>` - Base directory for overlay filesystem (copy-on-write)
+- `--git <URL>` - Git repository URL to use as the base filesystem
+- `--branch <NAME>` - Git branch to checkout (only with `--git`)
+- `--depth <N>` - Shallow clone depth for faster cloning (only with `--git`)
 - `--sync-remote-url <URL>` - Remote Turso database URL for sync
 - `--sync-partial-prefetch` - Enable prefetching for partial sync
 - `--sync-partial-segment-size <SIZE>` - Segment size for partial sync

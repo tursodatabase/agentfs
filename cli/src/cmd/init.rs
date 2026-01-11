@@ -7,6 +7,119 @@ use turso::sync::{PartialBootstrapStrategy, PartialSyncOpts};
 
 use crate::parser::SyncCommandOptions;
 
+/// Directory containing cloned git repositories
+pub fn repos_dir() -> PathBuf {
+    agentfs_dir().join("repos")
+}
+
+/// Sanitize a repository name for use as a directory name
+fn sanitize_repo_name(repo_url: &str) -> AnyhowResult<String> {
+    // Remove .git suffix if present
+    let repo_url = repo_url.strip_suffix(".git").unwrap_or(repo_url);
+    let name = repo_url
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Invalid repository URL: {}", repo_url))?;
+
+    let name = name.strip_prefix('.').unwrap_or(name);
+
+    if name.is_empty() {
+        anyhow::bail!("Could not extract repository name from: {}", repo_url);
+    }
+
+    // Sanitize: keep only alphanumeric, hyphens, underscores, and dots
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    Ok(sanitized)
+}
+
+/// Clone a git repository to the repos directory
+/// Returns the path to the cloned repository
+fn clone_repository(
+    repo_url: &str,
+    repo_name: &str,
+    branch: Option<&str>,
+    depth: Option<usize>,
+    force: bool,
+) -> AnyhowResult<PathBuf> {
+    let repos_dir = repos_dir();
+
+    if !repos_dir.exists() {
+        std::fs::create_dir_all(&repos_dir).context("Failed to create repos directory")?;
+    }
+
+    let clone_path = repos_dir.join(repo_name);
+
+    // Check if repository already exists
+    if clone_path.exists() {
+        if !force {
+            anyhow::bail!(
+                "Directory '{}' already exists. Use --force to overwrite.",
+                clone_path.display()
+            );
+        }
+
+        // Remove existing directory
+        eprintln!("Removing existing directory: {}", clone_path.display());
+        std::fs::remove_dir_all(&clone_path)
+            .context("Failed to remove existing repository directory")?;
+    }
+
+    eprintln!("Cloning repository: {}", repo_url);
+
+    let mut fetch_options = git2::FetchOptions::new();
+    let mut callbacks = git2::RemoteCallbacks::new();
+
+    callbacks.credentials(|_url, username_from_url, allowed| {
+        match allowed {
+            // SSH key authentication
+            t if t.contains(git2::CredentialType::SSH_KEY) => {
+                git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+            }
+
+            // Username/password
+            t if t.contains(git2::CredentialType::USER_PASS_PLAINTEXT) => git2::Cred::default(),
+
+            // Default authentication (Kerberos, NTLM, etc.)
+            t if t.contains(git2::CredentialType::DEFAULT) => git2::Cred::default(),
+
+            _ => Err(git2::Error::from_str(
+                "no supported authentication available",
+            )),
+        }
+    });
+
+    fetch_options.remote_callbacks(callbacks);
+
+    if let Some(depth) = depth {
+        fetch_options.depth(depth as i32);
+    }
+
+    let mut builder = git2::build::RepoBuilder::new();
+    builder.fetch_options(fetch_options);
+
+    if let Some(branch_name) = branch {
+        builder.branch(branch_name);
+    }
+
+    builder
+        .clone(repo_url, &clone_path)
+        .with_context(|| format!("Failed to clone repository: {}", repo_url))?;
+
+    eprintln!("Cloned to: {}", clone_path.display());
+
+    Ok(clone_path)
+}
+
 pub async fn open_agentfs(
     options: AgentFSOptions,
 ) -> anyhow::Result<(Option<turso::sync::Database>, AgentFS)> {
@@ -88,15 +201,34 @@ pub async fn init_database(
     sync_options: SyncCommandOptions,
     force: bool,
     base: Option<PathBuf>,
+    git: Option<String>,
+    branch: Option<String>,
+    depth: Option<usize>,
 ) -> AnyhowResult<()> {
-    // Generate ID if not provided
-    let id = id.unwrap_or_else(|| {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        format!("agent-{}", timestamp)
-    });
+    // Validate that --base and --git are not used together
+    if base.is_some() && git.is_some() {
+        anyhow::bail!("Cannot use both --base and --git options. Use --git to clone a repository as the base.");
+    }
+
+    // Handle git repository cloning (if --git is provided)
+    let (id, base) = if let Some(repo_url) = git {
+        let repo_name = sanitize_repo_name(&repo_url)?;
+        let id = id.unwrap_or_else(|| repo_name.clone());
+        let base = clone_repository(&repo_url, &repo_name, branch.as_deref(), depth, force)?;
+
+        (id, Some(base))
+    } else {
+        // Generate ID if not provided (when not using --git)
+        let id = id.unwrap_or_else(|| {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            format!("agent-{}", timestamp)
+        });
+
+        (id, base)
+    };
 
     // Validate agent ID for safety
     if !AgentFSOptions::validate_agent_id(&id) {
