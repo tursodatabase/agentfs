@@ -83,21 +83,26 @@ dependencies = [
  "clap 4.5.54",
  "clap_complete",
  "dirs",
- "fuser",
  "libc",
+ "log",
+ "memchr",
  "nfsserve",
+ "nix 0.29.0",
+ "page_size",
  "parking_lot",
  "reverie",
  "reverie-process",
  "reverie-ptrace",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "turso",
  "uuid",
+ "zerocopy",
 ]
 
 [[package]]
@@ -901,21 +906,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "fuser"
-version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53274f494609e77794b627b1a3cddfe45d675a6b2e9ba9c0fdc8d8eee2184369"
-dependencies = [
- "libc",
- "log",
- "memchr",
- "nix 0.29.0",
- "page_size",
- "smallvec",
- "zerocopy",
 ]
 
 [[package]]

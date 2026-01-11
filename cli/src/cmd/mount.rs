@@ -1,13 +1,19 @@
-use agentfs_sdk::{get_mounts, AgentFSOptions, FileSystem, HostFS, Mount, OverlayFS};
+use agentfs_sdk::{get_mounts, Mount};
 use anyhow::Result;
 use std::{
     io::{self, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::Arc,
 };
+
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use agentfs_sdk::{AgentFSOptions, FileSystem, HostFS, OverlayFS};
 use turso::value::Value;
 
+#[cfg(target_os = "linux")]
 use crate::{cmd::init::open_agentfs, fuse::FuseMountOptions};
 
 /// Arguments for the mount command.
@@ -30,21 +36,8 @@ pub struct MountArgs {
 }
 
 /// Mount the agent filesystem using FUSE.
+#[cfg(target_os = "linux")]
 pub fn mount(args: MountArgs) -> Result<()> {
-    if !supports_fuse() {
-        #[cfg(target_os = "macos")]
-        {
-            anyhow::bail!(
-                "macFUSE is not installed. Please install it from https://osxfuse.github.io/ \n\
-                 or via Homebrew: brew install --cask macfuse"
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            anyhow::bail!("FUSE is not available on this system");
-        }
-    }
-
     let opts = AgentFSOptions::resolve(&args.id_or_path)?;
 
     let fsname = format!(
@@ -140,7 +133,17 @@ pub fn mount(args: MountArgs) -> Result<()> {
     }
 }
 
+/// Mount the agent filesystem using FUSE (macOS - not supported).
+#[cfg(target_os = "macos")]
+pub fn mount(_args: MountArgs) -> Result<()> {
+    anyhow::bail!(
+        "FUSE mounting is not supported on macOS in this version.\n\
+         Use `agentfs nfs` to mount via NFS instead."
+    );
+}
+
 /// Check if a path is a mountpoint by comparing device IDs
+#[cfg(target_os = "linux")]
 fn is_mounted(path: &std::path::Path) -> bool {
     let path_meta = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -159,34 +162,6 @@ fn is_mounted(path: &std::path::Path) -> bool {
 
     // Different device IDs means it's a mountpoint
     path_meta.dev() != parent_meta.dev()
-}
-
-/// Check if macOS system supports FUSE.
-///
-/// The `libfuse` dynamic library is weakly linked so that users who don't have
-/// macFUSE installed can still run the other commands.
-#[cfg(target_os = "macos")]
-fn supports_fuse() -> bool {
-    for lib_name in &[
-        c"/usr/local/lib/libfuse.2.dylib",
-        c"/usr/local/lib/libfuse.dylib",
-    ] {
-        let handle = unsafe { libc::dlopen(lib_name.as_ptr(), libc::RTLD_LAZY) };
-        if !handle.is_null() {
-            unsafe { libc::dlclose(handle) };
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if Linux system supports FUSE.
-///
-/// The `fuser` crate does not even need `libfuse` so technically it always support FUSE.
-/// Of course, if FUSE is disabled in the kernel, we'll get an error, but that's life.
-#[cfg(target_os = "linux")]
-fn supports_fuse() -> bool {
-    true
 }
 
 /// List all currently mounted agentfs filesystems
