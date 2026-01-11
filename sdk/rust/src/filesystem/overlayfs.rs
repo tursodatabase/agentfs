@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -34,15 +34,20 @@ pub struct WhiteoutCache {
 ///
 /// This avoids repeated `delta.stat()` calls in `ensure_parent_dirs()` when
 /// creating many files in the same directory tree (e.g., npm install).
+///
+/// Uses `BTreeSet` instead of `HashSet` for efficient prefix-based removal:
+/// - `remove()` is O(log n + k) where k is the number of children
+/// - With `HashSet::retain()`, it was O(n) scanning all entries
 #[derive(Default, Debug)]
 struct DeltaDirCache {
-    /// Set of normalized paths known to exist as directories in delta
-    dirs: RwLock<HashSet<String>>,
+    /// Set of normalized paths known to exist as directories in delta.
+    /// BTreeSet allows efficient range queries for prefix-based child removal.
+    dirs: RwLock<BTreeSet<String>>,
 }
 
 impl DeltaDirCache {
     fn new() -> Self {
-        let mut dirs = HashSet::new();
+        let mut dirs = BTreeSet::new();
         dirs.insert("/".to_string()); // Root always exists
         Self {
             dirs: RwLock::new(dirs),
@@ -60,12 +65,29 @@ impl DeltaDirCache {
     }
 
     /// Remove a directory from the cache (called on remove())
+    ///
+    /// Uses BTreeSet range queries for O(log n + k) complexity where k is
+    /// the number of children, instead of O(n) with HashSet::retain().
     fn remove(&self, path: &str) {
         let mut dirs = self.dirs.write().unwrap();
         dirs.remove(path);
-        // Also remove any children (prefix match)
+
+        // Remove children using efficient range iteration.
+        // BTreeSet is sorted, so all children with prefix "/path/" are contiguous.
         let prefix = format!("{}/", path);
-        dirs.retain(|p| !p.starts_with(&prefix));
+
+        // Collect children in the range [prefix, prefix_end) where prefix_end
+        // is the first string that doesn't start with prefix.
+        // Since '0' > '/' in ASCII, "path/0" is after all "path/..." entries.
+        let children: Vec<_> = dirs
+            .range(prefix.clone()..)
+            .take_while(|p| p.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        for child in children {
+            dirs.remove(&child);
+        }
     }
 }
 
