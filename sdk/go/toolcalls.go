@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"time"
 
@@ -258,5 +259,133 @@ func (tc *ToolCalls) Get(id int) (toolCall ToolCall, err error) {
 		&toolCall.CompletedAt,
 		&toolCall.DurationMs,
 	)
+	return
+}
+
+func (tc *ToolCalls) GetByName(name string, limit *int) (toolCalls []ToolCall, err error) {
+	ctx := context.Background()
+	var limitClause string
+	switch limit {
+	case nil:
+	default:
+		limitClause = fmt.Sprintf("LIMIT %d", *limit)
+	}
+	stmt, err := tc.db.PrepareContext(ctx, fmt.Sprintf(`
+	SELECT * FROM tool_calls
+      WHERE name = ?
+      ORDER BY started_at DESC
+      %s
+	`, limitClause))
+	if err != nil {
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	rows, err := stmt.QueryContext(ctx, name)
+	if err != nil {
+		return
+	}
+	results := []ToolCall{}
+	for rows.Next() {
+		var toolCall ToolCall
+		err = rows.Scan(
+			&toolCall.Id,
+			&toolCall.Name,
+			&toolCall.Parameters,
+			&toolCall.Error,
+			&toolCall.Status,
+			&toolCall.StartedAt,
+			&toolCall.CompletedAt,
+			&toolCall.DurationMs,
+		)
+		if err != nil {
+			return
+		}
+		results = append(results, toolCall)
+	}
+	toolCalls = results
+	return
+}
+
+func (tc *ToolCalls) GetRecent(since int, limit *int) (toolCalls []ToolCall, err error) {
+	ctx := context.Background()
+	var limitClause string
+	switch limit {
+	case nil:
+	default:
+		limitClause = fmt.Sprintf("LIMIT %d", *limit)
+	}
+	stmt, err := tc.db.PrepareContext(ctx, fmt.Sprintf(`
+	SSELECT * FROM tool_calls
+      WHERE started_at > ?
+      ORDER BY started_at DESC
+      %s
+	`, limitClause))
+	if err != nil {
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	rows, err := stmt.QueryContext(ctx, since)
+	if err != nil {
+		return
+	}
+	results := []ToolCall{}
+	for rows.Next() {
+		var toolCall ToolCall
+		err = rows.Scan(
+			&toolCall.Id,
+			&toolCall.Name,
+			&toolCall.Parameters,
+			&toolCall.Error,
+			&toolCall.Status,
+			&toolCall.StartedAt,
+			&toolCall.CompletedAt,
+			&toolCall.DurationMs,
+		)
+		if err != nil {
+			return
+		}
+		results = append(results, toolCall)
+	}
+	toolCalls = results
+	return
+}
+
+func (tc *ToolCalls) GetStats() (toolCallStats []ToolCallStats, err error) {
+	ctx := context.Background()
+	stmt, err := tc.db.PrepareContext(ctx, `
+      SELECT
+        name,
+        COUNT(*) as total_calls,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successful,
+        SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failed,
+        AVG(duration_ms) as avg_duration_ms
+      FROM tool_calls
+      WHERE status != 'pending'
+      GROUP BY name
+      ORDER BY total_calls DESC
+    `)
+	if err != nil {
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	rows, err := stmt.QueryContext(ctx)
+	if err != nil {
+		return
+	}
+	results := []ToolCallStats{}
+	for rows.Next() {
+		var result ToolCallStats
+		err = rows.Scan(
+			&result.Name,
+			&result.TotalCalls,
+			&result.Successful,
+			&result.Failed,
+			&result.AvgDurationMs,
+		)
+		if err != nil {
+			return
+		}
+	}
+	toolCallStats = results
 	return
 }
