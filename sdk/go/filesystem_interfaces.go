@@ -29,15 +29,15 @@ type DataStats struct {
 	Ctime int
 }
 
-func (s *DataStats) IsFile() bool {
+func (s DataStats) IsFile() bool {
 	return s.Mode&S_IFMT == S_IFREG
 }
 
-func (s *DataStats) IsDirectory() bool {
+func (s DataStats) IsDirectory() bool {
 	return s.Mode&S_IFMT == S_IFDIR
 }
 
-func (s *DataStats) IsSymbolicLink() bool {
+func (s DataStats) IsSymbolicLink() bool {
 	return s.Mode&S_IFMT == S_IFLNK
 }
 
@@ -89,7 +89,7 @@ type FileHandle interface {
 	/**
 	 * Get file statistics.
 	 */
-	Fstat() error
+	Fstat() (Stats, error)
 }
 
 type RmOptions struct {
