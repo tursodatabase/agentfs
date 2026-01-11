@@ -26,10 +26,15 @@ fn main() {
             id,
             force,
             base,
+            git,
+            branch,
+            depth,
             sync,
         } => {
             let rt = get_runtime();
-            if let Err(e) = rt.block_on(cmd::init::init_database(id, sync, force, base)) {
+            if let Err(e) = rt.block_on(cmd::init::init_database(
+                id, sync, force, base, git, branch, depth,
+            )) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
