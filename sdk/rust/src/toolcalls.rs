@@ -1,11 +1,11 @@
+use crate::connection_pool::ConnectionPool;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use turso::{Builder, Connection, Value};
+use turso::{Builder, Value};
 
 /// Status of a tool call
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,62 +68,58 @@ pub struct ToolCallStats {
 /// Tool calls tracker backed by SQLite
 #[derive(Clone)]
 pub struct ToolCalls {
-    conn: Arc<Connection>,
+    pool: ConnectionPool,
 }
 
 impl ToolCalls {
     /// Create a new tool calls tracker
     pub async fn new(db_path: &str) -> Result<Self> {
         let db = Builder::new_local(db_path).build().await?;
-        let conn = db.connect()?;
-        let tc = Self {
-            conn: Arc::new(conn),
-        };
+        let pool = ConnectionPool::new(db);
+        let tc = Self { pool };
         tc.initialize().await?;
         Ok(tc)
     }
 
-    /// Create a tool calls tracker from an existing connection
-    pub async fn from_connection(conn: Arc<Connection>) -> Result<Self> {
-        let tc = Self { conn };
+    /// Create a tool calls tracker from a connection pool
+    pub async fn from_pool(pool: ConnectionPool) -> Result<Self> {
+        let tc = Self { pool };
         tc.initialize().await?;
         Ok(tc)
     }
 
     /// Initialize the database schema
     async fn initialize(&self) -> Result<()> {
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS tool_calls (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    parameters TEXT,
-                    result TEXT,
-                    error TEXT,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    started_at INTEGER NOT NULL,
-                    completed_at INTEGER,
-                    duration_ms INTEGER
-                )",
-                (),
-            )
-            .await?;
+        let conn = self.pool.get_conn().await?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS tool_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                parameters TEXT,
+                result TEXT,
+                error TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                duration_ms INTEGER
+            )",
+            (),
+        )
+        .await?;
 
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_tool_calls_name
-                ON tool_calls(name)",
-                (),
-            )
-            .await?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_name
+            ON tool_calls(name)",
+            (),
+        )
+        .await?;
 
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_tool_calls_started_at
-                ON tool_calls(started_at)",
-                (),
-            )
-            .await?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_calls_started_at
+            ON tool_calls(started_at)",
+            (),
+        )
+        .await?;
 
         Ok(())
     }
@@ -131,11 +127,11 @@ impl ToolCalls {
     /// Start a new tool call and mark it as pending
     /// Returns the ID of the created tool call record
     pub async fn start(&self, name: &str, parameters: Option<serde_json::Value>) -> Result<i64> {
+        let conn = self.pool.get_conn().await?;
         let serialized_params = parameters.map(|p| serde_json::to_string(&p)).transpose()?;
         let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare(
                 "INSERT INTO tool_calls (name, parameters, status, started_at)
                 VALUES (?, ?, 'pending', ?) RETURNING id",
@@ -155,12 +151,12 @@ impl ToolCalls {
 
     /// Mark a tool call as successful
     pub async fn success(&self, id: i64, result: Option<serde_json::Value>) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let serialized_result = result.map(|r| serde_json::to_string(&r)).transpose()?;
         let completed_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         // Get the started_at time to calculate duration
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query("SELECT started_at FROM tool_calls WHERE id = ?", (id,))
             .await?;
 
@@ -175,19 +171,18 @@ impl ToolCalls {
 
         let duration_ms = (completed_at - started_at) * 1000;
 
-        self.conn
-            .execute(
-                "UPDATE tool_calls
-                SET result = ?, status = 'success', completed_at = ?, duration_ms = ?
-                WHERE id = ?",
-                (
-                    serialized_result.as_deref().unwrap_or(""),
-                    completed_at,
-                    duration_ms,
-                    id,
-                ),
-            )
-            .await?;
+        conn.execute(
+            "UPDATE tool_calls
+            SET result = ?, status = 'success', completed_at = ?, duration_ms = ?
+            WHERE id = ?",
+            (
+                serialized_result.as_deref().unwrap_or(""),
+                completed_at,
+                duration_ms,
+                id,
+            ),
+        )
+        .await?;
 
         Ok(())
     }
@@ -204,12 +199,13 @@ impl ToolCalls {
         result: Option<serde_json::Value>,
         error: Option<&str>,
     ) -> Result<i64> {
+        let conn = self.pool.get_conn().await?;
         let serialized_params = parameters.map(|p| serde_json::to_string(&p)).transpose()?;
         let serialized_result = result.map(|r| serde_json::to_string(&r)).transpose()?;
         let duration_ms = (completed_at - started_at) * 1000;
         let status = if error.is_some() { "error" } else { "success" };
 
-        let mut stmt = self.conn
+        let mut stmt = conn
             .prepare(
                 "INSERT INTO tool_calls (name, parameters, result, error, status, started_at, completed_at, duration_ms)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
@@ -238,11 +234,11 @@ impl ToolCalls {
 
     /// Mark a tool call as failed
     pub async fn error(&self, id: i64, error: &str) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let completed_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         // Get the started_at time to calculate duration
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query("SELECT started_at FROM tool_calls WHERE id = ?", (id,))
             .await?;
 
@@ -257,22 +253,21 @@ impl ToolCalls {
 
         let duration_ms = (completed_at - started_at) * 1000;
 
-        self.conn
-            .execute(
-                "UPDATE tool_calls
-                SET error = ?, status = 'error', completed_at = ?, duration_ms = ?
-                WHERE id = ?",
-                (error, completed_at, duration_ms, id),
-            )
-            .await?;
+        conn.execute(
+            "UPDATE tool_calls
+            SET error = ?, status = 'error', completed_at = ?, duration_ms = ?
+            WHERE id = ?",
+            (error, completed_at, duration_ms, id),
+        )
+        .await?;
 
         Ok(())
     }
 
     /// Get a tool call by ID
     pub async fn get(&self, id: i64) -> Result<Option<ToolCall>> {
-        let mut rows = self
-            .conn
+        let conn = self.pool.get_conn().await?;
+        let mut rows = conn
             .query(
                 "SELECT id, name, parameters, result, error, status, started_at, completed_at, duration_ms
                 FROM tool_calls WHERE id = ?",
@@ -281,7 +276,7 @@ impl ToolCalls {
             .await?;
 
         if let Some(row) = rows.next().await? {
-            Ok(Some(self.row_to_tool_call(&row)?))
+            Ok(Some(Self::row_to_tool_call(&row)?))
         } else {
             Ok(None)
         }
@@ -289,9 +284,9 @@ impl ToolCalls {
 
     /// Get recent tool calls with optional limit
     pub async fn recent(&self, limit: Option<i64>) -> Result<Vec<ToolCall>> {
+        let conn = self.pool.get_conn().await?;
         let limit = limit.unwrap_or(100);
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT id, name, parameters, result, error, status, started_at, completed_at, duration_ms
                 FROM tool_calls
@@ -303,7 +298,7 @@ impl ToolCalls {
 
         let mut calls = Vec::new();
         while let Some(row) = rows.next().await? {
-            calls.push(self.row_to_tool_call(&row)?);
+            calls.push(Self::row_to_tool_call(&row)?);
         }
 
         Ok(calls)
@@ -311,8 +306,8 @@ impl ToolCalls {
 
     /// Get statistics for a specific tool
     pub async fn stats_for(&self, name: &str) -> Result<Option<ToolCallStats>> {
-        let mut rows = self
-            .conn
+        let conn = self.pool.get_conn().await?;
+        let mut rows = conn
             .query(
                 "SELECT
                     name,
@@ -328,7 +323,7 @@ impl ToolCalls {
             .await?;
 
         if let Some(row) = rows.next().await? {
-            Ok(Some(self.row_to_stats(&row)?))
+            Ok(Some(Self::row_to_stats(&row)?))
         } else {
             Ok(None)
         }
@@ -336,8 +331,8 @@ impl ToolCalls {
 
     /// Get statistics for all tools
     pub async fn stats(&self) -> Result<Vec<ToolCallStats>> {
-        let mut rows = self
-            .conn
+        let conn = self.pool.get_conn().await?;
+        let mut rows = conn
             .query(
                 "SELECT
                     name,
@@ -354,13 +349,13 @@ impl ToolCalls {
 
         let mut stats = Vec::new();
         while let Some(row) = rows.next().await? {
-            stats.push(self.row_to_stats(&row)?);
+            stats.push(Self::row_to_stats(&row)?);
         }
 
         Ok(stats)
     }
 
-    fn row_to_tool_call(&self, row: &turso::Row) -> Result<ToolCall> {
+    fn row_to_tool_call(row: &turso::Row) -> Result<ToolCall> {
         let id = row
             .get_value(0)
             .ok()
@@ -450,7 +445,7 @@ impl ToolCalls {
         })
     }
 
-    fn row_to_stats(&self, row: &turso::Row) -> Result<ToolCallStats> {
+    fn row_to_stats(row: &turso::Row) -> Result<ToolCallStats> {
         let name = row
             .get_value(0)
             .ok()

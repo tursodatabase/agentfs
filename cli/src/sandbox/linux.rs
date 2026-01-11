@@ -226,7 +226,7 @@ pub async fn run_cmd(
     // Start FUSE in a separate thread
     let fuse_handle = std::thread::spawn(move || {
         let rt = crate::get_runtime();
-        crate::fuse::mount(overlay, fuse_opts, rt)
+        crate::fuse::mount(overlay, fuse_opts, &rt)
     });
 
     // Wait for FUSE mount to be ready

@@ -43,9 +43,8 @@ base64 = "0.22"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Linux-only dependencies for FUSE and NFS functionality
+# Linux-only dependencies for FUSE and sandbox functionality
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.15", default-features = false, features = ["abi-7-29"] }
 uuid = { version = "1", features = ["v4"] }
 # NFS server for userspace filesystem (used by `agentfs run` and `agentfs serve nfs`)
 nfsserve = "0.10"
@@ -55,6 +54,13 @@ agentfs-sandbox = { path = "../sandbox", optional = true }
 reverie = { git = "https://github.com/facebookexperimental/reverie", optional = true }
 reverie-ptrace = { git = "https://github.com/facebookexperimental/reverie", optional = true }
 reverie-process = { git = "https://github.com/facebookexperimental/reverie", optional = true }
+# Vendored fuser dependencies (pure-Rust FUSE implementation)
+log = "0.4"
+memchr = "2.7"
+page_size = "0.6"
+smallvec = "1.6"
+zerocopy = { version = "0.8", features = ["derive"] }
+nix = { version = "0.29", features = ["fs", "user"] }
 
 # macOS dependencies for NFS functionality (no FUSE - uses nfsserve instead)
 [target.'cfg(target_os = "macos")'.dependencies]

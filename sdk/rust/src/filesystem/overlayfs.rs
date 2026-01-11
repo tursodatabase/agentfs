@@ -400,7 +400,7 @@ impl OverlayFS {
     /// This is called during init() to populate the cache. The cache is then
     /// kept in sync via create_whiteout() and remove_whiteout().
     async fn load_whiteouts_into_cache(&self) -> Result<()> {
-        let conn = self.delta.get_connection();
+        let conn = self.delta.get_conn().await?;
 
         // Query all whiteouts from the database
         let result = conn.prepare_cached("SELECT path FROM fs_whiteout").await;
@@ -483,7 +483,10 @@ impl OverlayFS {
     /// base layer represents. This is stored in the delta database so that
     /// tools like `agentfs diff` can determine what files were modified.
     pub async fn init(&self, base_path: &str) -> Result<()> {
-        Self::init_schema(&self.delta.get_connection(), base_path).await?;
+        {
+            let conn = self.delta.get_conn().await?;
+            Self::init_schema(&conn, base_path).await?;
+        } // Drop conn before getting another
         // Load existing whiteouts into the in-memory cache
         self.load_whiteouts_into_cache().await?;
         Ok(())
@@ -538,7 +541,7 @@ impl OverlayFS {
     async fn create_whiteout(&self, path: &str) -> Result<()> {
         let normalized = self.normalize_path(path);
         let parent = Self::parent_path(&normalized);
-        let conn = self.delta.get_connection();
+        let conn = self.delta.get_conn().await?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         let mut stmt = conn
@@ -567,7 +570,7 @@ impl OverlayFS {
             return Ok(());
         }
 
-        let conn = self.delta.get_connection();
+        let conn = self.delta.get_conn().await?;
 
         let mut stmt = conn
             .prepare_cached("DELETE FROM fs_whiteout WHERE path = ?")
@@ -682,7 +685,7 @@ impl OverlayFS {
     /// This records that a delta inode originated from a base inode,
     /// so stat() can return the original inode number (like Linux overlayfs).
     async fn add_origin_mapping(&self, delta_ino: i64, base_ino: i64) -> Result<()> {
-        let conn = self.delta.get_connection();
+        let conn = self.delta.get_conn().await?;
         let mut stmt = conn
             .prepare_cached("INSERT OR REPLACE INTO fs_origin (delta_ino, base_ino) VALUES (?, ?)")
             .await?;
@@ -692,7 +695,7 @@ impl OverlayFS {
 
     /// Get the origin (base) inode for a delta inode, if it was copied up.
     async fn get_origin_inode(&self, delta_ino: i64) -> Result<Option<i64>> {
-        let conn = self.delta.get_connection();
+        let conn = self.delta.get_conn().await?;
         let result = conn
             .prepare_cached("SELECT base_ino FROM fs_origin WHERE delta_ino = ?")
             .await;
@@ -717,7 +720,7 @@ impl OverlayFS {
     ///
     /// Called when a file is deleted from the delta layer to clean up stale mappings.
     async fn remove_origin_mapping(&self, delta_ino: i64) -> Result<()> {
-        let conn = self.delta.get_connection();
+        let conn = self.delta.get_conn().await?;
         let result = conn
             .execute("DELETE FROM fs_origin WHERE delta_ino = ?", (delta_ino,))
             .await;

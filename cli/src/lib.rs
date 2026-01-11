@@ -8,6 +8,9 @@ pub mod daemon;
 #[cfg(target_os = "linux")]
 pub mod fuse;
 
+#[cfg(target_os = "linux")]
+pub mod fuser;
+
 #[cfg(unix)]
 pub mod nfs;
 

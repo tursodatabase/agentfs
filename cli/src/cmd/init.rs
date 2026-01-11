@@ -25,8 +25,7 @@ pub async fn open_agentfs(
         builder = builder.with_auth_token(auth_token);
     }
     let db = builder.build().await?;
-    let conn = db.connect().await?;
-    let agent = AgentFS::open_with(conn)
+    let agent = AgentFS::open_with_sync_db(db.clone())
         .await
         .context("Failed to open synced database")?;
     Ok((Some(db), agent))
@@ -68,8 +67,7 @@ pub async fn create_agentfs(
             builder = builder.with_partial_sync_opts_experimental(partial_sync);
         }
         let db = builder.build().await?;
-        let conn = db.connect().await?;
-        let agent = AgentFS::open_with(conn)
+        let agent = AgentFS::open_with_sync_db(db.clone())
             .await
             .context("Failed to initialize synced database")?;
         Ok((Some(db), agent))
@@ -155,7 +153,8 @@ pub async fn init_database(
             .to_string();
 
         // Use SDK's OverlayFS::init_schema to ensure schema consistency
-        OverlayFS::init_schema(&agent.get_connection(), &base_path_str)
+        let conn = agent.get_conn().await?;
+        OverlayFS::init_schema(&conn, &base_path_str)
             .await
             .context("Failed to initialize overlay schema")?;
 

@@ -11,6 +11,7 @@ use super::{
     BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, DEFAULT_DIR_MODE,
     DEFAULT_FILE_MODE, S_IFLNK, S_IFMT, S_IFREG,
 };
+use crate::connection_pool::ConnectionPool;
 
 const ROOT_INO: i64 = 1;
 const DEFAULT_CHUNK_SIZE: usize = 4096;
@@ -64,7 +65,7 @@ impl DentryCache {
 /// A filesystem backed by SQLite
 #[derive(Clone)]
 pub struct AgentFS {
-    conn: Arc<Connection>,
+    pool: ConnectionPool,
     chunk_size: usize,
     /// Cache for directory entry lookups (shared across clones)
     dentry_cache: Arc<DentryCache>,
@@ -75,7 +76,7 @@ pub struct AgentFS {
 /// This struct holds the inode number resolved at open time, allowing
 /// efficient read/write/fsync operations without path lookups.
 pub struct AgentFSFile {
-    conn: Arc<Connection>,
+    pool: ConnectionPool,
     ino: i64,
     chunk_size: usize,
 }
@@ -83,12 +84,12 @@ pub struct AgentFSFile {
 #[async_trait]
 impl File for AgentFSFile {
     async fn pread(&self, offset: u64, size: u64) -> Result<Vec<u8>> {
+        let conn = self.pool.get_conn().await?;
         let chunk_size = self.chunk_size as u64;
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index")
             .await?;
         let mut rows = stmt
@@ -162,9 +163,10 @@ impl File for AgentFSFile {
             return Ok(());
         }
 
+        let conn = self.pool.get_conn().await?;
+
         // Get current file size
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((self.ino,)).await?;
@@ -180,17 +182,18 @@ impl File for AgentFSFile {
         // If writing beyond current size, extend with zeros first
         if offset > current_size {
             let zeros = vec![0u8; (offset - current_size) as usize];
-            self.write_data_at_offset(current_size, &zeros).await?;
+            self.write_data_at_offset_with_conn(&conn, current_size, &zeros)
+                .await?;
         }
 
         // Write the actual data
-        self.write_data_at_offset(offset, data).await?;
+        self.write_data_at_offset_with_conn(&conn, offset, data)
+            .await?;
 
         // Update file size and mtime
         let new_size = std::cmp::max(current_size, offset + data.len() as u64);
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
             .await?;
         stmt.execute((new_size as i64, now, self.ino)).await?;
@@ -199,9 +202,10 @@ impl File for AgentFSFile {
     }
 
     async fn truncate(&self, new_size: u64) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
+
         // Get current size
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((self.ino,)).await?;
@@ -216,8 +220,7 @@ impl File for AgentFSFile {
 
         let chunk_size = self.chunk_size as u64;
 
-        self.conn
-            .prepare_cached("BEGIN IMMEDIATE")
+        conn.prepare_cached("BEGIN IMMEDIATE")
             .await?
             .execute(())
             .await?;
@@ -225,8 +228,7 @@ impl File for AgentFSFile {
         let result: Result<()> = async {
             if new_size == 0 {
                 // Special case: truncate to zero - just delete all chunks
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                     .await?;
                 stmt.execute((self.ino,)).await?;
@@ -235,18 +237,16 @@ impl File for AgentFSFile {
                 let last_chunk_idx = (new_size - 1) / chunk_size;
 
                 // Delete all chunks beyond the last one we need
-                self.conn
-                    .execute(
-                        "DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?",
-                        (self.ino, last_chunk_idx as i64),
-                    )
-                    .await?;
+                conn.execute(
+                    "DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?",
+                    (self.ino, last_chunk_idx as i64),
+                )
+                .await?;
 
                 // Truncate the last chunk if needed
                 let offset_in_chunk = (new_size % chunk_size) as usize;
                 if offset_in_chunk > 0 {
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = conn
                         .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                         .await?;
                     let mut rows = stmt.query((self.ino, last_chunk_idx as i64)).await?;
@@ -255,8 +255,7 @@ impl File for AgentFSFile {
                         if let Ok(Value::Blob(mut chunk_data)) = row.get_value(0) {
                             if chunk_data.len() > offset_in_chunk {
                                 chunk_data.truncate(offset_in_chunk);
-                                let mut stmt = self
-                                    .conn
+                                let mut stmt = conn
                                     .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
                                     .await?;
                                 stmt.execute((Value::Blob(chunk_data), self.ino, last_chunk_idx as i64)).await?;
@@ -270,8 +269,7 @@ impl File for AgentFSFile {
 
             // Update the inode size and mtime
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
                 .await?;
             stmt.execute((new_size as i64, now, self.ino)).await?;
@@ -281,8 +279,7 @@ impl File for AgentFSFile {
         .await;
 
         if result.is_err() {
-            let _ = self
-                .conn
+            let _ = conn
                 .prepare_cached("ROLLBACK")
                 .await?
                 .execute(())
@@ -290,8 +287,7 @@ impl File for AgentFSFile {
             return result;
         }
 
-        self.conn
-            .prepare_cached("COMMIT")
+        conn.prepare_cached("COMMIT")
             .await?
             .execute(())
             .await?;
@@ -299,19 +295,17 @@ impl File for AgentFSFile {
     }
 
     async fn fsync(&self) -> Result<()> {
-        self.conn
-            .prepare_cached("PRAGMA synchronous = FULL")
+        let conn = self.pool.get_conn().await?;
+        conn.prepare_cached("PRAGMA synchronous = FULL")
             .await?
             .execute(())
             .await?;
-        self.conn.prepare_cached("BEGIN").await?.execute(()).await?;
-        self.conn
-            .prepare_cached("COMMIT")
+        conn.prepare_cached("BEGIN").await?.execute(()).await?;
+        conn.prepare_cached("COMMIT")
             .await?
             .execute(())
             .await?;
-        self.conn
-            .prepare_cached("PRAGMA synchronous = OFF")
+        conn.prepare_cached("PRAGMA synchronous = OFF")
             .await?
             .execute(())
             .await?;
@@ -319,8 +313,8 @@ impl File for AgentFSFile {
     }
 
     async fn fstat(&self) -> Result<Stats> {
-        let mut stmt = self
-            .conn
+        let conn = self.pool.get_conn().await?;
+        let mut stmt = conn
             .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((self.ino,)).await?;
@@ -335,7 +329,13 @@ impl File for AgentFSFile {
 
 impl AgentFSFile {
     /// Write data at a specific offset, handling chunk boundaries.
-    async fn write_data_at_offset(&self, offset: u64, data: &[u8]) -> Result<()> {
+    /// Uses a provided connection to allow reuse within a transaction.
+    async fn write_data_at_offset_with_conn(
+        &self,
+        conn: &Connection,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
         let chunk_size = self.chunk_size as u64;
         let mut written = 0usize;
 
@@ -350,8 +350,7 @@ impl AgentFSFile {
             let to_write = std::cmp::min(remaining_in_chunk, remaining_data);
 
             // Get existing chunk data (if any)
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                 .await?;
             let mut rows = stmt.query((self.ino, chunk_index)).await?;
@@ -381,8 +380,7 @@ impl AgentFSFile {
                 .copy_from_slice(&data[written..written + to_write]);
 
             // Save chunk
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached(
                     "INSERT OR REPLACE INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
                 )
@@ -401,12 +399,13 @@ impl AgentFS {
     /// Create a new filesystem
     pub async fn new(db_path: &str) -> Result<Self> {
         let db = Builder::new_local(db_path).build().await?;
-        let conn = Arc::new(db.connect()?);
-        Self::from_connection(conn).await
+        Self::from_pool(ConnectionPool::new(db)).await
     }
 
-    /// Create a filesystem from an existing connection
-    pub async fn from_connection(conn: Arc<Connection>) -> Result<Self> {
+    /// Create a filesystem from a connection pool
+    pub async fn from_pool(pool: ConnectionPool) -> Result<Self> {
+        let conn = pool.get_conn().await?;
+
         // Initialize schema first
         Self::initialize_schema(&conn).await?;
 
@@ -421,7 +420,7 @@ impl AgentFS {
         let chunk_size = Self::read_chunk_size(&conn).await?;
 
         let fs = Self {
-            conn,
+            pool,
             chunk_size,
             dentry_cache: Arc::new(DentryCache::new(DENTRY_CACHE_MAX_SIZE)),
         };
@@ -433,13 +432,18 @@ impl AgentFS {
         self.chunk_size
     }
 
-    /// Get the underlying database connection
-    pub fn get_connection(&self) -> Arc<Connection> {
-        self.conn.clone()
+    /// Get a database connection from the pool
+    pub async fn get_conn(&self) -> anyhow::Result<crate::connection_pool::PooledConnection> {
+        self.pool.get_conn().await
+    }
+
+    /// Get the connection pool
+    pub fn get_pool(&self) -> ConnectionPool {
+        self.pool.clone()
     }
 
     /// Initialize the database schema
-    async fn initialize_schema(conn: &Connection) -> Result<()> {
+    pub async fn initialize_schema(conn: &Connection) -> Result<()> {
         // Create config table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS fs_config (
@@ -616,13 +620,17 @@ impl AgentFS {
             .collect()
     }
 
-    /// Look up a child entry by parent inode and name.
+    /// Look up a child entry by parent inode and name using a provided connection.
     ///
     /// This is more efficient than `resolve_path` when you already have the parent inode,
     /// as it avoids re-resolving all parent path components.
-    async fn lookup_child(&self, parent_ino: i64, name: &str) -> Result<Option<i64>> {
-        let mut rows = self
-            .conn
+    async fn lookup_child(
+        &self,
+        conn: &Connection,
+        parent_ino: i64,
+        name: &str,
+    ) -> Result<Option<i64>> {
+        let mut rows = conn
             .query(
                 "SELECT ino FROM fs_dentry WHERE parent_ino = ? AND name = ?",
                 (parent_ino, name),
@@ -645,9 +653,8 @@ impl AgentFS {
     }
 
     /// Get link count for an inode
-    async fn get_link_count(&self, ino: i64) -> Result<u32> {
-        let mut stmt = self
-            .conn
+    async fn get_link_count(&self, conn: &Connection, ino: i64) -> Result<u32> {
+        let mut stmt = conn
             .prepare_cached("SELECT nlink FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
@@ -720,6 +727,16 @@ impl AgentFS {
 
     /// Resolve a path to an inode number
     async fn resolve_path(&self, path: &str) -> Result<Option<i64>> {
+        let conn = self.pool.get_conn().await?;
+        self.resolve_path_with_conn(&conn, path).await
+    }
+
+    /// Resolve a path to an inode number using a provided connection
+    async fn resolve_path_with_conn(
+        &self,
+        conn: &Connection,
+        path: &str,
+    ) -> Result<Option<i64>> {
         let components = self.split_path(path);
         if components.is_empty() {
             return Ok(Some(ROOT_INO));
@@ -734,8 +751,7 @@ impl AgentFS {
             }
 
             // Cache miss - query database
-            let mut statement = self
-                .conn
+            let mut statement = conn
                 .prepare_cached("SELECT ino FROM fs_dentry WHERE parent_ino = ? AND name = ?")
                 .await?;
             let mut rows = statement.query((current_ino, component.as_str())).await?;
@@ -772,14 +788,14 @@ impl AgentFS {
 
     /// Get file statistics without following symlinks
     pub async fn lstat(&self, path: &str) -> Result<Option<Stats>> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
-        let ino = match self.resolve_path(&path).await? {
+        let ino = match self.resolve_path_with_conn(&conn, &path).await? {
             Some(ino) => ino,
             None => return Ok(None),
         };
 
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
                 (ino,),
@@ -796,6 +812,7 @@ impl AgentFS {
 
     /// Get file statistics, following symlinks
     pub async fn stat(&self, path: &str) -> Result<Option<Stats>> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
 
         // Follow symlinks with a maximum depth to prevent infinite loops
@@ -803,13 +820,12 @@ impl AgentFS {
         let max_symlink_depth = 40; // Standard limit for symlink following
 
         for _ in 0..max_symlink_depth {
-            let ino = match self.resolve_path(&current_path).await? {
+            let ino = match self.resolve_path_with_conn(&conn, &current_path).await? {
                 Some(ino) => ino,
                 None => return Ok(None),
             };
 
-            let mut rows = self
-                .conn
+            let mut rows = conn
                 .query(
                     "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
                     (ino,),
@@ -827,7 +843,7 @@ impl AgentFS {
                 if (mode & S_IFMT) == S_IFLNK {
                     // Read the symlink target
                     let target = self
-                        .readlink(&current_path)
+                        .readlink_with_conn(&conn, &current_path)
                         .await?
                         .ok_or_else(|| anyhow::anyhow!("Symlink has no target"))?;
 
@@ -854,16 +870,79 @@ impl AgentFS {
         }
 
         // Too many symlinks
-        anyhow::bail!("Too many levels of symbolic links")
+        return Err(FsError::SymlinkLoop.into())
+    }
+
+    /// Get file statistics, following symlinks (using provided connection)
+    async fn stat_with_conn(&self, conn: &Connection, path: &str) -> Result<Option<Stats>> {
+        let path = self.normalize_path(path);
+
+        // Follow symlinks with a maximum depth to prevent infinite loops
+        let mut current_path = path;
+        let max_symlink_depth = 40; // Standard limit for symlink following
+
+        for _ in 0..max_symlink_depth {
+            let ino = match self.resolve_path_with_conn(conn, &current_path).await? {
+                Some(ino) => ino,
+                None => return Ok(None),
+            };
+
+            let mut rows = conn
+                .query(
+                    "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
+                    (ino,),
+                )
+                .await?;
+
+            if let Some(row) = rows.next().await? {
+                let mode = row
+                    .get_value(1)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32;
+
+                // Check if this is a symlink
+                if (mode & S_IFMT) == S_IFLNK {
+                    // Read the symlink target
+                    let target = self
+                        .readlink_with_conn(conn, &current_path)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("Symlink has no target"))?;
+
+                    // Resolve target path (handle both absolute and relative paths)
+                    current_path = if target.starts_with('/') {
+                        target
+                    } else {
+                        // Relative path - resolve relative to the symlink's directory
+                        let base_path = Path::new(&current_path);
+                        let parent = base_path.parent().unwrap_or(Path::new("/"));
+                        let joined = parent.join(&target);
+                        joined.to_string_lossy().into_owned()
+                    };
+                    current_path = self.normalize_path(&current_path);
+                    continue; // Follow the symlink
+                }
+
+                // Not a symlink, return the stats
+                let stats = Self::build_stats_from_row(&row)?;
+                return Ok(Some(stats));
+            } else {
+                return Ok(None);
+            }
+        }
+
+        // Too many symlinks
+        return Err(FsError::SymlinkLoop.into())
     }
 
     /// Create a directory
     pub async fn mkdir(&self, path: &str) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
         let components = self.split_path(&path);
 
         if components.is_empty() {
-            anyhow::bail!("Cannot create root directory");
+            return Err(FsError::RootOperation.into());
         }
 
         let parent_path = if components.len() == 1 {
@@ -873,21 +952,20 @@ impl AgentFS {
         };
 
         let parent_ino = self
-            .resolve_path(&parent_path)
+            .resolve_path_with_conn(&conn, &parent_path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         let name = components.last().unwrap();
 
         // Check if already exists (single query using parent_ino we already have)
-        if self.lookup_child(parent_ino, name).await?.is_some() {
-            anyhow::bail!("Directory already exists");
+        if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+            return Err(FsError::AlreadyExists.into());
         }
 
         // Create inode
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare(
                 "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
                 VALUES (?, 0, 0, 0, ?, ?, ?) RETURNING ino",
@@ -904,15 +982,13 @@ impl AgentFS {
             .ok_or_else(|| anyhow::anyhow!("Failed to get inode"))?;
 
         // Create directory entry
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)")
             .await?;
         stmt.execute((name.as_str(), parent_ino, ino)).await?;
 
         // Increment link count
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
             .await?;
         stmt.execute((ino,)).await?;
@@ -925,11 +1001,12 @@ impl AgentFS {
 
     /// Write data to a file
     pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
         let components = self.split_path(&path);
 
         if components.is_empty() {
-            anyhow::bail!("Cannot write to root directory");
+            return Err(FsError::RootOperation.into());
         }
 
         let parent_path = if components.len() == 1 {
@@ -939,24 +1016,22 @@ impl AgentFS {
         };
 
         let parent_ino = self
-            .resolve_path(&parent_path)
+            .resolve_path_with_conn(&conn, &parent_path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         let name = components.last().unwrap();
 
-        self.conn
-            .prepare_cached("BEGIN IMMEDIATE")
+        conn.prepare_cached("BEGIN IMMEDIATE")
             .await?
             .execute(())
             .await?;
 
         let result: Result<()> = async {
             // Check if file exists (single query using parent_ino we already have)
-            let ino = if let Some(ino) = self.lookup_child(parent_ino, name).await? {
+            let ino = if let Some(ino) = self.lookup_child(&conn, parent_ino, name).await? {
                 // Delete existing data
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                     .await?;
                 stmt.execute((ino,)).await?;
@@ -964,8 +1039,7 @@ impl AgentFS {
             } else {
                 // Create new inode
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare(
                         "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
                         VALUES (?, 0, 0, ?, ?, ?, ?) RETURNING ino",
@@ -982,8 +1056,7 @@ impl AgentFS {
                     .ok_or_else(|| anyhow::anyhow!("Failed to get inode"))?;
 
                 // Create directory entry
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached(
                         "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
                     )
@@ -991,8 +1064,7 @@ impl AgentFS {
                 stmt.execute((name.as_str(), parent_ino, ino)).await?;
 
                 // Increment link count
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
                     .await?;
                 stmt.execute((ino,)).await?;
@@ -1005,18 +1077,16 @@ impl AgentFS {
 
             // Write data in chunks
             for (chunk_index, chunk) in data.chunks(self.chunk_size).enumerate() {
-                self.conn
-                    .execute(
-                        "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                        (ino, chunk_index as i64, chunk),
-                    )
-                    .await?;
+                conn.execute(
+                    "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
+                    (ino, chunk_index as i64, chunk),
+                )
+                .await?;
             }
 
             // Update mode (to regular file), size and mtime
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("UPDATE fs_inode SET mode = ?, size = ?, mtime = ? WHERE ino = ?")
                 .await?;
             stmt.execute((DEFAULT_FILE_MODE as i64, data.len() as i64, now, ino))
@@ -1028,16 +1098,14 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn
-                    .prepare_cached("COMMIT")
+                conn.prepare_cached("COMMIT")
                     .await?
                     .execute(())
                     .await?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self
-                    .conn
+                let _ = conn
                     .prepare_cached("ROLLBACK")
                     .await?
                     .execute(())
@@ -1053,11 +1121,12 @@ impl AgentFS {
     /// dentry creation, and file handle opening in a single operation.
     /// Returns both Stats and an open file handle.
     pub async fn create_file(&self, path: &str, mode: u32) -> Result<(Stats, BoxedFile)> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
         let components = self.split_path(&path);
 
         if components.is_empty() {
-            anyhow::bail!("Cannot create root directory");
+            return Err(FsError::RootOperation.into());
         }
 
         let parent_path = match components.len() {
@@ -1066,31 +1135,28 @@ impl AgentFS {
         };
 
         let parent_ino = self
-            .resolve_path(&parent_path)
+            .resolve_path_with_conn(&conn, &parent_path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         let name = components.last().unwrap();
 
-        if self.lookup_child(parent_ino, name).await?.is_some() {
+        if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
             return Err(FsError::AlreadyExists.into());
         }
 
         // Prepare statements before starting the transaction
-        let mut inode_stmt = self
-            .conn
+        let mut inode_stmt = conn
             .prepare_cached(
                 "INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime)
                  VALUES (?, 1, 0, 0, 0, ?, ?, ?) RETURNING ino",
             )
             .await?;
-        let mut dentry_stmt = self
-            .conn
+        let mut dentry_stmt = conn
             .prepare_cached("INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)")
             .await?;
 
-        self.conn
-            .prepare_cached("BEGIN IMMEDIATE")
+        conn.prepare_cached("BEGIN IMMEDIATE")
             .await?
             .execute(())
             .await?;
@@ -1112,8 +1178,7 @@ impl AgentFS {
             .execute((name.as_str(), parent_ino, ino))
             .await?;
 
-        self.conn
-            .prepare_cached("COMMIT")
+        conn.prepare_cached("COMMIT")
             .await?
             .execute(())
             .await?;
@@ -1133,7 +1198,7 @@ impl AgentFS {
         };
 
         let file: BoxedFile = Arc::new(AgentFSFile {
-            conn: self.conn.clone(),
+            pool: self.pool.clone(),
             ino,
             chunk_size: self.chunk_size,
         });
@@ -1143,13 +1208,13 @@ impl AgentFS {
 
     /// Read data from a file
     pub async fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        let ino = match self.resolve_path(path).await? {
+        let conn = self.pool.get_conn().await?;
+        let ino = match self.resolve_path_with_conn(&conn, path).await? {
             Some(ino) => ino,
             None => return Ok(None),
         };
 
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT data FROM fs_data WHERE ino = ? ORDER BY chunk_index",
                 (ino,),
@@ -1173,7 +1238,8 @@ impl AgentFS {
     ///
     /// Returns `Ok(None)` if the file does not exist.
     pub async fn pread(&self, path: &str, offset: u64, size: u64) -> Result<Option<Vec<u8>>> {
-        let ino = match self.resolve_path(path).await? {
+        let conn = self.pool.get_conn().await?;
+        let ino = match self.resolve_path_with_conn(&conn, path).await? {
             Some(ino) => ino,
             None => return Ok(None),
         };
@@ -1183,8 +1249,7 @@ impl AgentFS {
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index",
                 (ino, start_chunk as i64, end_chunk as i64),
@@ -1221,11 +1286,12 @@ impl AgentFS {
     /// If the offset is beyond the current file size, the file is extended with zeros.
     /// If the file does not exist, it will be created.
     pub async fn pwrite(&self, path: &str, offset: u64, data: &[u8]) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
         let components = self.split_path(&path);
 
         if components.is_empty() {
-            anyhow::bail!("Cannot write to root directory");
+            return Err(FsError::RootOperation.into());
         }
 
         let parent_path = if components.len() == 1 {
@@ -1235,24 +1301,22 @@ impl AgentFS {
         };
 
         let parent_ino = self
-            .resolve_path(&parent_path)
+            .resolve_path_with_conn(&conn, &parent_path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         let name = components.last().unwrap();
 
-        self.conn
-            .prepare_cached("BEGIN IMMEDIATE")
+        conn.prepare_cached("BEGIN IMMEDIATE")
             .await?
             .execute(())
             .await?;
 
         let result: Result<()> = async {
             // Get or create the inode
-            let (ino, current_size) = if let Some(ino) = self.resolve_path(&path).await? {
+            let (ino, current_size) = if let Some(ino) = self.resolve_path_with_conn(&conn, &path).await? {
                 // Get current file size
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
                     .await?;
                 let mut rows = stmt.query((ino,)).await?;
@@ -1268,8 +1332,7 @@ impl AgentFS {
             } else {
                 // Create new inode
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare(
                         "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
                         VALUES (?, 0, 0, 0, ?, ?, ?) RETURNING ino",
@@ -1286,8 +1349,7 @@ impl AgentFS {
                     .ok_or_else(|| anyhow::anyhow!("Failed to get inode"))?;
 
                 // Create directory entry
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached(
                         "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
                     )
@@ -1295,8 +1357,7 @@ impl AgentFS {
                 stmt.execute((name.as_str(), parent_ino, ino)).await?;
 
                 // Increment link count
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
                     .await?;
                 stmt.execute((ino,)).await?;
@@ -1307,8 +1368,7 @@ impl AgentFS {
             // Handle empty writes - just update mtime
             if data.is_empty() {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-                self.conn
-                    .prepare_cached("UPDATE fs_inode SET mtime = ? WHERE ino = ?")
+                conn.prepare_cached("UPDATE fs_inode SET mtime = ? WHERE ino = ?")
                     .await?
                     .execute((now, ino))
                     .await?;
@@ -1346,8 +1406,7 @@ impl AgentFS {
                 // Read existing chunk if we need to preserve some data
                 let needs_read = data_start > 0 || data_end < chunk_size as usize;
                 let mut chunk_data = if needs_read {
-                    let mut rows = self
-                        .conn
+                    let mut rows = conn
                         .query(
                             "SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?",
                             (ino, chunk_idx as i64),
@@ -1385,25 +1444,22 @@ impl AgentFS {
                 };
 
                 // Write the chunk - delete existing then insert
-                self.conn
-                    .execute(
-                        "DELETE FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                        (ino, chunk_idx as i64),
-                    )
-                    .await?;
-                self.conn
-                    .execute(
-                        "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                        (ino, chunk_idx as i64, &chunk_data[..actual_len]),
-                    )
-                    .await?;
+                conn.execute(
+                    "DELETE FROM fs_data WHERE ino = ? AND chunk_index = ?",
+                    (ino, chunk_idx as i64),
+                )
+                .await?;
+                conn.execute(
+                    "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
+                    (ino, chunk_idx as i64, &chunk_data[..actual_len]),
+                )
+                .await?;
             }
 
             // Update size and mtime
             let new_size = std::cmp::max(current_size, write_end);
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
                 .await?;
             stmt.execute((new_size as i64, now, ino)).await?;
@@ -1414,16 +1470,14 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn
-                    .prepare_cached("COMMIT")
+                conn.prepare_cached("COMMIT")
                     .await?
                     .execute(())
                     .await?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self
-                    .conn
+                let _ = conn
                     .prepare_cached("ROLLBACK")
                     .await?
                     .execute(())
@@ -1439,12 +1493,12 @@ impl AgentFS {
     /// - Shrinking: deletes chunks beyond new size, truncates the last chunk if needed
     /// - Extending: pads with zeros up to the new size
     pub async fn truncate(&self, path: &str, new_size: u64) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
-        let ino = self.resolve_path(&path).await?.ok_or(FsError::NotFound)?;
+        let ino = self.resolve_path_with_conn(&conn, &path).await?.ok_or(FsError::NotFound)?;
 
         // Get current size
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT size FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
@@ -1459,8 +1513,7 @@ impl AgentFS {
 
         let chunk_size = self.chunk_size as u64;
 
-        self.conn
-            .prepare_cached("BEGIN IMMEDIATE")
+        conn.prepare_cached("BEGIN IMMEDIATE")
             .await?
             .execute(())
             .await?;
@@ -1468,8 +1521,7 @@ impl AgentFS {
         let result: Result<()> = async {
             if new_size == 0 {
                 // Special case: truncate to zero - just delete all chunks
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                     .await?;
                 stmt.execute((ino,)).await?;
@@ -1478,12 +1530,11 @@ impl AgentFS {
                 let last_chunk_idx = (new_size - 1) / chunk_size;
 
                 // Delete all chunks beyond the last one we need
-                self.conn
-                    .execute(
-                        "DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?",
-                        (ino, last_chunk_idx as i64),
-                    )
-                    .await?;
+                conn.execute(
+                    "DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?",
+                    (ino, last_chunk_idx as i64),
+                )
+                .await?;
 
                 // Calculate where in the last chunk the file should end
                 let end_in_last_chunk = ((new_size - 1) % chunk_size) + 1;
@@ -1491,8 +1542,7 @@ impl AgentFS {
                 // If the last chunk needs to be truncated (not a full chunk),
                 // read it, truncate, and rewrite
                 if end_in_last_chunk < chunk_size {
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = conn
                         .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                         .await?;
                     let mut rows = stmt.query((ino, last_chunk_idx as i64)).await?;
@@ -1501,8 +1551,7 @@ impl AgentFS {
                         if let Ok(Value::Blob(chunk_data)) = row.get_value(0) {
                             if chunk_data.len() > end_in_last_chunk as usize {
                                 let truncated = &chunk_data[..end_in_last_chunk as usize];
-                                let mut stmt = self
-                                    .conn
+                                let mut stmt = conn
                                     .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
                                     .await?;
                                 stmt.execute((truncated, ino, last_chunk_idx as i64)).await?;
@@ -1521,8 +1570,7 @@ impl AgentFS {
 
                 // Pad the last existing chunk with zeros if it's not full
                 if let Some(last_idx) = last_existing_chunk {
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = conn
                         .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
                         .await?;
                     let mut rows = stmt.query((ino, last_idx as i64)).await?;
@@ -1541,8 +1589,7 @@ impl AgentFS {
                             if needed_len > current_chunk_len {
                                 let mut padded = chunk_data.clone();
                                 padded.resize(needed_len, 0);
-                                let mut stmt = self
-                                    .conn
+                                let mut stmt = conn
                                     .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
                                     .await?;
                                 stmt.execute((&padded[..], ino, last_idx as i64)).await?;
@@ -1560,20 +1607,18 @@ impl AgentFS {
                         chunk_size as usize
                     };
                     let zeros = vec![0u8; chunk_len];
-                    self.conn
-                        .execute(
-                            "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                            (ino, chunk_idx as i64, &zeros[..]),
-                        )
-                        .await?;
+                    conn.execute(
+                        "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
+                        (ino, chunk_idx as i64, &zeros[..]),
+                    )
+                    .await?;
                 }
             }
             // else: new_size == current_size, nothing to do for data
 
             // Update size and mtime
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
                 .await?;
             stmt.execute((new_size as i64, now, ino)).await?;
@@ -1584,16 +1629,14 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn
-                    .prepare_cached("COMMIT")
+                conn.prepare_cached("COMMIT")
                     .await?
                     .execute(())
                     .await?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self
-                    .conn
+                let _ = conn
                     .prepare_cached("ROLLBACK")
                     .await?
                     .execute(())
@@ -1605,13 +1648,13 @@ impl AgentFS {
 
     /// List directory contents
     pub async fn readdir(&self, path: &str) -> Result<Option<Vec<String>>> {
-        let ino = match self.resolve_path(path).await? {
+        let conn = self.pool.get_conn().await?;
+        let ino = match self.resolve_path_with_conn(&conn, path).await? {
             Some(ino) => ino,
             None => return Ok(None),
         };
 
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT name FROM fs_dentry WHERE parent_ino = ? ORDER BY name",
                 (ino,),
@@ -1643,14 +1686,14 @@ impl AgentFS {
     ///
     /// Returns entries with their stats in a single JOIN query, avoiding N+1 queries.
     pub async fn readdir_plus(&self, path: &str) -> Result<Option<Vec<DirEntry>>> {
-        let ino = match self.resolve_path(path).await? {
+        let conn = self.pool.get_conn().await?;
+        let ino = match self.resolve_path_with_conn(&conn, path).await? {
             Some(ino) => ino,
             None => return Ok(None),
         };
 
         // Single JOIN query to get all entry names and their stats (including link count)
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime
                  FROM fs_dentry d
@@ -1739,11 +1782,12 @@ impl AgentFS {
 
     /// Create a symbolic link
     pub async fn symlink(&self, target: &str, linkpath: &str) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let linkpath = self.normalize_path(linkpath);
         let components = self.split_path(&linkpath);
 
         if components.is_empty() {
-            anyhow::bail!("Cannot create symlink at root");
+            return Err(FsError::RootOperation.into());
         }
 
         // Get parent directory
@@ -1754,15 +1798,15 @@ impl AgentFS {
         };
 
         let parent_ino = self
-            .resolve_path(&parent_path)
+            .resolve_path_with_conn(&conn, &parent_path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         let name = components.last().unwrap();
 
         // Check if entry already exists (single query using parent_ino we already have)
-        if self.lookup_child(parent_ino, name).await?.is_some() {
-            anyhow::bail!("Path already exists");
+        if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+            return Err(FsError::AlreadyExists.into());
         }
 
         // Create inode for symlink
@@ -1774,8 +1818,7 @@ impl AgentFS {
         let mode = S_IFLNK | 0o777; // Symlinks typically have 777 permissions
         let size = target.len() as i64;
 
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare(
                 "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
                  VALUES (?, 0, 0, ?, ?, ?, ?) RETURNING ino",
@@ -1791,28 +1834,25 @@ impl AgentFS {
             .unwrap_or(0);
 
         // Store symlink target
-        self.conn
-            .execute(
-                "INSERT INTO fs_symlink (ino, target) VALUES (?, ?)",
-                (ino, target),
-            )
-            .await?;
+        conn.execute(
+            "INSERT INTO fs_symlink (ino, target) VALUES (?, ?)",
+            (ino, target),
+        )
+        .await?;
 
         // Create directory entry
-        self.conn
-            .execute(
-                "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
-                (name.as_str(), parent_ino, ino),
-            )
-            .await?;
+        conn.execute(
+            "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
+            (name.as_str(), parent_ino, ino),
+        )
+        .await?;
 
         // Increment link count
-        self.conn
-            .execute(
-                "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?",
-                (ino,),
-            )
-            .await?;
+        conn.execute(
+            "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?",
+            (ino,),
+        )
+        .await?;
 
         // Populate dentry cache
         self.dentry_cache.insert(parent_ino, name, ino);
@@ -1826,23 +1866,23 @@ impl AgentFS {
     /// Both paths will share the same file data and metadata (except for the name).
     /// The link count (nlink) of the inode is incremented.
     pub async fn link(&self, oldpath: &str, newpath: &str) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let oldpath = self.normalize_path(oldpath);
         let newpath = self.normalize_path(newpath);
         let components = self.split_path(&newpath);
 
         if components.is_empty() {
-            anyhow::bail!("Cannot create hard link at root");
+            return Err(FsError::RootOperation.into());
         }
 
         // Resolve old path to get its inode
         let ino = self
-            .resolve_path(&oldpath)
+            .resolve_path_with_conn(&conn, &oldpath)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Source path does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         // Check if source is a directory (hard links to directories are not allowed)
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query("SELECT mode FROM fs_inode WHERE ino = ?", (ino,))
             .await?;
 
@@ -1854,7 +1894,7 @@ impl AgentFS {
                 .unwrap_or(0) as u32;
 
             if (mode & S_IFMT) == super::S_IFDIR {
-                anyhow::bail!("Cannot create hard link to directory");
+                return Err(FsError::IsADirectory.into());
             }
         } else {
             return Err(FsError::NotFound.into());
@@ -1868,32 +1908,30 @@ impl AgentFS {
         };
 
         let parent_ino = self
-            .resolve_path(&parent_path)
+            .resolve_path_with_conn(&conn, &parent_path)
             .await?
             .ok_or(FsError::NotFound)?;
 
         let name = components.last().unwrap();
 
         // Check if new path already exists (single query using parent_ino we already have)
-        if self.lookup_child(parent_ino, name).await?.is_some() {
-            anyhow::bail!("Path already exists");
+        if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+            return Err(FsError::AlreadyExists.into());
         }
 
         // Create directory entry pointing to the same inode
-        self.conn
-            .execute(
-                "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
-                (name.as_str(), parent_ino, ino),
-            )
-            .await?;
+        conn.execute(
+            "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
+            (name.as_str(), parent_ino, ino),
+        )
+        .await?;
 
         // Increment link count
-        self.conn
-            .execute(
-                "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?",
-                (ino,),
-            )
-            .await?;
+        conn.execute(
+            "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?",
+            (ino,),
+        )
+        .await?;
 
         // Populate dentry cache
         self.dentry_cache.insert(parent_ino, name, ino);
@@ -1903,16 +1941,25 @@ impl AgentFS {
 
     /// Read the target of a symbolic link
     pub async fn readlink(&self, path: &str) -> Result<Option<String>> {
+        let conn = self.pool.get_conn().await?;
+        self.readlink_with_conn(&conn, path).await
+    }
+
+    /// Read the target of a symbolic link using a provided connection
+    async fn readlink_with_conn(
+        &self,
+        conn: &Connection,
+        path: &str,
+    ) -> Result<Option<String>> {
         let path = self.normalize_path(path);
 
-        let ino = match self.resolve_path(&path).await? {
+        let ino = match self.resolve_path_with_conn(conn, &path).await? {
             Some(ino) => ino,
             None => return Ok(None),
         };
 
         // Check if it's a symlink by querying the inode
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query("SELECT mode FROM fs_inode WHERE ino = ?", (ino,))
             .await?;
 
@@ -1925,15 +1972,14 @@ impl AgentFS {
 
             // Check if it's a symlink
             if (mode & S_IFMT) != S_IFLNK {
-                anyhow::bail!("Not a symbolic link");
+                return Err(FsError::NotASymlink.into());
             }
         } else {
             return Ok(None);
         }
 
         // Read target from fs_symlink table
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query("SELECT target FROM fs_symlink WHERE ino = ?", (ino,))
             .await?;
 
@@ -1954,25 +2000,25 @@ impl AgentFS {
 
     /// Remove a file or empty directory
     pub async fn remove(&self, path: &str) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
         let components = self.split_path(&path);
 
         if components.is_empty() {
-            anyhow::bail!("Cannot remove root directory");
+            return Err(FsError::RootOperation.into());
         }
 
         let ino = self
-            .resolve_path(&path)
+            .resolve_path_with_conn(&conn, &path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Path does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         if ino == ROOT_INO {
-            anyhow::bail!("Cannot remove root directory");
+            return Err(FsError::RootOperation.into());
         }
 
         // Check if directory is empty
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT COUNT(*) FROM fs_dentry WHERE parent_ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
@@ -1984,7 +2030,7 @@ impl AgentFS {
                 .and_then(|v| v.as_integer().copied())
                 .unwrap_or(0);
             if count > 0 {
-                anyhow::bail!("Directory not empty");
+                return Err(FsError::NotEmpty.into());
             }
         }
 
@@ -1996,15 +2042,14 @@ impl AgentFS {
         };
 
         let parent_ino = self
-            .resolve_path(&parent_path)
+            .resolve_path_with_conn(&conn, &parent_path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Parent directory does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         let name = components.last().unwrap();
 
         // Delete the specific directory entry (not all entries pointing to this inode)
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("DELETE FROM fs_dentry WHERE parent_ino = ? AND name = ?")
             .await?;
         stmt.execute((parent_ino, name.as_str())).await?;
@@ -2013,33 +2058,29 @@ impl AgentFS {
         self.dentry_cache.remove(parent_ino, name);
 
         // Decrement link count
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?")
             .await?;
         stmt.execute((ino,)).await?;
 
         // Check if this was the last link to the inode
-        let link_count = self.get_link_count(ino).await?;
+        let link_count = self.get_link_count(&conn, ino).await?;
         if link_count == 0 {
             // Manually handle cascading deletes since we don't use foreign keys
             // Delete data blocks
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                 .await?;
             stmt.execute((ino,)).await?;
 
             // Delete symlink if exists
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("DELETE FROM fs_symlink WHERE ino = ?")
                 .await?;
             stmt.execute((ino,)).await?;
 
             // Delete inode
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("DELETE FROM fs_inode WHERE ino = ?")
                 .await?;
             stmt.execute((ino,)).await?;
@@ -2052,16 +2093,16 @@ impl AgentFS {
     ///
     /// Only modifies the permission bits (lower 12 bits), preserving the file type.
     pub async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let path = self.normalize_path(path);
 
         let ino = self
-            .resolve_path(&path)
+            .resolve_path_with_conn(&conn, &path)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Path does not exist"))?;
+            .ok_or(FsError::NotFound)?;
 
         // Get current mode to preserve file type bits
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT mode FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
@@ -2078,8 +2119,7 @@ impl AgentFS {
         // Preserve file type bits (upper bits), replace permission bits (lower 12 bits)
         let new_mode = (current_mode & S_IFMT) | (mode & 0o7777);
 
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("UPDATE fs_inode SET mode = ? WHERE ino = ?")
             .await?;
         stmt.execute((new_mode as i64, ino)).await?;
@@ -2091,6 +2131,7 @@ impl AgentFS {
     ///
     /// This operation is atomic - either all changes succeed or none do.
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let conn = self.pool.get_conn().await?;
         let from_path = self.normalize_path(from);
         let to_path = self.normalize_path(to);
 
@@ -2101,12 +2142,12 @@ impl AgentFS {
 
         // Get source inode
         let src_ino = self
-            .resolve_path(&from_path)
+            .resolve_path_with_conn(&conn, &from_path)
             .await?
             .ok_or(FsError::NotFound)?;
 
         // Get source stats to check if it's a directory
-        let src_stats = self.stat(&from_path).await?.ok_or(FsError::NotFound)?;
+        let src_stats = self.stat_with_conn(&conn, &from_path).await?.ok_or(FsError::NotFound)?;
 
         // Prevent renaming a directory into its own subtree (would create a cycle)
         if src_stats.is_directory() {
@@ -2128,7 +2169,7 @@ impl AgentFS {
             )
         };
         let src_parent_ino = self
-            .resolve_path(&src_parent_path)
+            .resolve_path_with_conn(&conn, &src_parent_path)
             .await?
             .ok_or(FsError::NotFound)?;
 
@@ -2144,7 +2185,7 @@ impl AgentFS {
             format!("/{}", to_components[..to_components.len() - 1].join("/"))
         };
         let dst_parent_ino = self
-            .resolve_path(&dst_parent_path)
+            .resolve_path_with_conn(&conn, &dst_parent_path)
             .await?
             .ok_or(FsError::NotFound)?;
 
@@ -2152,16 +2193,15 @@ impl AgentFS {
         let src_name = src_name.clone();
         let dst_name = dst_name.clone();
 
-        self.conn
-            .prepare_cached("BEGIN IMMEDIATE")
+        conn.prepare_cached("BEGIN IMMEDIATE")
             .await?
             .execute(())
             .await?;
 
         let result: Result<()> = async {
             // Check if destination exists (inside transaction for atomicity)
-            if let Some(dst_ino) = self.resolve_path(&to_path).await? {
-                let dst_stats = self.stat(&to_path).await?.ok_or(FsError::NotFound)?;
+            if let Some(dst_ino) = self.resolve_path_with_conn(&conn, &to_path).await? {
+                let dst_stats = self.stat_with_conn(&conn, &to_path).await?.ok_or(FsError::NotFound)?;
 
                 // Can't replace directory with non-directory
                 if dst_stats.is_directory() && !src_stats.is_directory() {
@@ -2175,8 +2215,7 @@ impl AgentFS {
 
                 // If destination is directory, it must be empty
                 if dst_stats.is_directory() {
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = conn
                         .prepare_cached("SELECT COUNT(*) FROM fs_dentry WHERE parent_ino = ?")
                         .await?;
                     let mut rows = stmt.query((dst_ino,)).await?;
@@ -2194,34 +2233,29 @@ impl AgentFS {
                 }
 
                 // Remove destination entry
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("DELETE FROM fs_dentry WHERE parent_ino = ? AND name = ?")
                     .await?;
                 stmt.execute((dst_parent_ino, dst_name.as_str())).await?;
 
                 // Decrement link count
-                let mut stmt = self
-                    .conn
+                let mut stmt = conn
                     .prepare_cached("UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?")
                     .await?;
                 stmt.execute((dst_ino,)).await?;
 
                 // Clean up destination inode if no more links
-                let link_count = self.get_link_count(dst_ino).await?;
+                let link_count = self.get_link_count(&conn, dst_ino).await?;
                 if link_count == 0 {
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = conn
                         .prepare_cached("DELETE FROM fs_data WHERE ino = ?")
                         .await?;
                     stmt.execute((dst_ino,)).await?;
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = conn
                         .prepare_cached("DELETE FROM fs_symlink WHERE ino = ?")
                         .await?;
                     stmt.execute((dst_ino,)).await?;
-                    let mut stmt = self
-                        .conn
+                    let mut stmt = conn
                         .prepare_cached("DELETE FROM fs_inode WHERE ino = ?")
                         .await?;
                     stmt.execute((dst_ino,)).await?;
@@ -2229,8 +2263,7 @@ impl AgentFS {
             }
 
             // Update the dentry: change parent and/or name
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached(
                     "UPDATE fs_dentry SET parent_ino = ?, name = ? WHERE parent_ino = ? AND name = ?",
                 )
@@ -2249,8 +2282,7 @@ impl AgentFS {
                 .unwrap_or_default()
                 .as_secs() as i64;
 
-            let mut stmt = self
-                .conn
+            let mut stmt = conn
                 .prepare_cached("UPDATE fs_inode SET ctime = ? WHERE ino = ?")
                 .await?;
             stmt.execute((now, src_ino)).await?;
@@ -2261,8 +2293,7 @@ impl AgentFS {
 
         match result {
             Ok(()) => {
-                self.conn
-                    .prepare_cached("COMMIT")
+                conn.prepare_cached("COMMIT")
                     .await?
                     .execute(())
                     .await?;
@@ -2277,8 +2308,7 @@ impl AgentFS {
                 Ok(())
             }
             Err(e) => {
-                let _ = self
-                    .conn
+                let _ = conn
                     .prepare_cached("ROLLBACK")
                     .await?
                     .execute(())
@@ -2292,9 +2322,9 @@ impl AgentFS {
     ///
     /// Returns the total number of inodes and bytes used by file contents.
     pub async fn statfs(&self) -> Result<FilesystemStats> {
+        let conn = self.pool.get_conn().await?;
         // Count total inodes
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT COUNT(*) FROM fs_inode")
             .await?;
         let mut rows = stmt.query(()).await?;
@@ -2309,8 +2339,7 @@ impl AgentFS {
         };
 
         // Sum total bytes used (from file sizes in inodes)
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare_cached("SELECT COALESCE(SUM(size), 0) FROM fs_inode")
             .await?;
         let mut rows = stmt.query(()).await?;
@@ -2335,19 +2364,17 @@ impl AgentFS {
     ///
     /// Note: The path parameter is ignored since all data is in a single database.
     pub async fn fsync(&self, _path: &str) -> Result<()> {
-        self.conn
-            .prepare_cached("PRAGMA synchronous = FULL")
+        let conn = self.pool.get_conn().await?;
+        conn.prepare_cached("PRAGMA synchronous = FULL")
             .await?
             .execute(())
             .await?;
-        self.conn.prepare_cached("BEGIN").await?.execute(()).await?;
-        self.conn
-            .prepare_cached("COMMIT")
+        conn.prepare_cached("BEGIN").await?.execute(()).await?;
+        conn.prepare_cached("COMMIT")
             .await?
             .execute(())
             .await?;
-        self.conn
-            .prepare_cached("PRAGMA synchronous = OFF")
+        conn.prepare_cached("PRAGMA synchronous = OFF")
             .await?
             .execute(())
             .await?;
@@ -2363,7 +2390,7 @@ impl AgentFS {
         let ino = self.resolve_path(&path).await?.ok_or(FsError::NotFound)?;
 
         Ok(Arc::new(AgentFSFile {
-            conn: self.conn.clone(),
+            pool: self.pool.clone(),
             ino,
             chunk_size: self.chunk_size,
         }))
@@ -2372,8 +2399,8 @@ impl AgentFS {
     /// Get the number of chunks for a given inode (for testing)
     #[cfg(test)]
     async fn get_chunk_count(&self, ino: i64) -> Result<i64> {
-        let mut rows = self
-            .conn
+        let conn = self.pool.get_conn().await?;
+        let mut rows = conn
             .query("SELECT COUNT(*) FROM fs_data WHERE ino = ?", (ino,))
             .await?;
 
@@ -2765,8 +2792,8 @@ mod tests {
         let (fs, _dir) = create_test_fs().await?;
 
         // Query fs_config table directly
-        let mut rows = fs
-            .conn
+        let conn = fs.pool.get_conn().await?;
+        let mut rows = conn
             .query("SELECT value FROM fs_config WHERE key = 'chunk_size'", ())
             .await?;
 
@@ -2799,8 +2826,8 @@ mod tests {
         let ino = fs.resolve_path("/unique.txt").await?.unwrap();
 
         // Try to insert a duplicate chunk - should fail due to PRIMARY KEY constraint
-        let result = fs
-            .conn
+        let conn = fs.pool.get_conn().await?;
+        let result = conn
             .execute(
                 "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, 0, ?)",
                 (ino, vec![1u8; 10]),
@@ -2825,8 +2852,8 @@ mod tests {
         let ino = fs.resolve_path("/ordered.bin").await?.unwrap();
 
         // Query chunks in order
-        let mut rows = fs
-            .conn
+        let conn = fs.pool.get_conn().await?;
+        let mut rows = conn
             .query(
                 "SELECT chunk_index FROM fs_data WHERE ino = ? ORDER BY chunk_index",
                 (ino,),
@@ -2866,8 +2893,8 @@ mod tests {
         fs.remove("/deleteme.txt").await?;
 
         // Verify all chunks are gone
-        let mut rows = fs
-            .conn
+        let conn = fs.pool.get_conn().await?;
+        let mut rows = conn
             .query("SELECT COUNT(*) FROM fs_data WHERE ino = ?", (ino,))
             .await?;
 

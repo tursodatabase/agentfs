@@ -43,9 +43,8 @@ pub async fn show_timeline(
     let agent_options = AgentFSOptions::resolve(id_or_path)?;
 
     let (_, agentfs) = open_agentfs(agent_options).await?;
-    let conn = agentfs.get_connection();
 
-    let toolcalls = ToolCalls::from_connection(conn)
+    let toolcalls = ToolCalls::from_pool(agentfs.get_pool())
         .await
         .context("Failed to create tool calls tracker")?;
 

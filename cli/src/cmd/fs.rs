@@ -21,7 +21,7 @@ pub async fn ls_filesystem(
     eprintln!("Using agent: {}", id_or_path);
 
     let (_, agentfs) = open_agentfs(options).await?;
-    let conn = agentfs.get_connection();
+    let conn = agentfs.get_conn().await?;
 
     if path != "/" {
         anyhow::bail!("Only root directory (/) is currently supported");
