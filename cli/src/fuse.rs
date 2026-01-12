@@ -25,11 +25,13 @@ use tokio::runtime::Runtime;
 /// Convert an SDK error to an errno code for FUSE replies.
 ///
 /// If the error is a filesystem-specific FsError, returns the appropriate
-/// errno code (ENOENT, EEXIST, ENOTDIR, etc.). Otherwise falls back to EIO.
+/// errno code (ENOENT, EEXIST, ENOTDIR, etc.). Database busy errors return
+/// EAGAIN to signal the caller should retry. Otherwise falls back to EIO.
 fn error_to_errno(e: &SdkError) -> i32 {
     match e {
         SdkError::Fs(fs_err) => fs_err.to_errno(),
         SdkError::Io(io_err) => io_err.raw_os_error().unwrap_or(libc::EIO),
+        SdkError::Database(turso::Error::Busy(_)) => libc::EAGAIN,
         _ => libc::EIO,
     }
 }
