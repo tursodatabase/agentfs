@@ -40,6 +40,28 @@ pub async fn run(
 
     let session = setup_run_directory(session_id, allow, no_default_allows, &cwd, &home)?;
 
+    // Check if we're joining an existing session
+    if is_mountpoint(&session.mountpoint) {
+        if is_mount_healthy(&session.mountpoint) {
+            // Join existing healthy session
+            eprintln!("Joining existing session: {}", session.session_id);
+            eprintln!();
+            let exit_code = run_in_existing_session(&session, command, args)?;
+            std::process::exit(exit_code);
+        } else {
+            // Clean up stale mount before proceeding
+            eprintln!("Cleaning up stale NFS mount...");
+            if let Err(e) = unmount(&session.mountpoint) {
+                eprintln!("Warning: Failed to unmount stale mount: {}", e);
+                // Try force unmount as last resort
+                let _ = Command::new("/sbin/umount")
+                    .arg("-f")
+                    .arg(&session.mountpoint)
+                    .status();
+            }
+        }
+    }
+
     // Initialize the AgentFS database
     let db_path_str = session
         .db_path
@@ -230,6 +252,36 @@ fn setup_run_directory(
     })
 }
 
+/// Check if a path is a mountpoint by comparing device IDs with parent.
+fn is_mountpoint(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let path_meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("/"),
+    };
+
+    let parent_meta = match std::fs::metadata(parent) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    // Different device IDs means it's a mountpoint
+    path_meta.dev() != parent_meta.dev()
+}
+
+/// Check if a mount is healthy (not stale).
+///
+/// Stale NFS mounts will fail when trying to access them.
+fn is_mount_healthy(mountpoint: &Path) -> bool {
+    std::fs::read_dir(mountpoint).is_ok()
+}
+
 /// Find an available TCP port starting from the given port.
 fn find_available_port(start_port: u32) -> Result<u32> {
     for port in start_port..start_port + 100 {
@@ -349,6 +401,58 @@ fn run_command_in_mount(session: &RunSession, command: PathBuf, args: Vec<String
         // Bash prompt
         .env("PS1", "🤖 \\u@\\h:\\w\\$ ")
         // Zsh: use custom ZDOTDIR to override prompt
+        .env("ZDOTDIR", session.run_dir.join("zsh"));
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to execute command: {}", command.display()))?;
+
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Run a command in an existing session's NFS mount.
+///
+/// This is used when joining an existing session that already has an NFS mount active.
+/// We don't need to start a new NFS server, just run the command in the existing mount.
+#[cfg(target_os = "macos")]
+fn run_in_existing_session(session: &RunSession, command: PathBuf, args: Vec<String>) -> Result<i32> {
+    // Generate the Sandbox profile
+    let config = SandboxConfig {
+        mountpoint: session.mountpoint.clone(),
+        allow_paths: session.allow_paths.clone(),
+        allow_read_paths: Vec::new(),
+        allow_network: true,
+        session_id: session.session_id.clone(),
+    };
+    let profile = generate_sandbox_profile(&config);
+
+    // Wrap the command with sandbox-exec
+    let mut cmd = Command::new("sandbox-exec");
+    cmd.arg("-p")
+        .arg(&profile)
+        .arg(&command)
+        .args(&args)
+        .current_dir(&session.mountpoint)
+        .env("AGENTFS", "1")
+        .env("AGENTFS_SANDBOX", "macos-sandbox")
+        .env("PS1", "🤖 \\w\\$ ")
+        .env("ZDOTDIR", session.run_dir.join("zsh"));
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to execute command: {}", command.display()))?;
+
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Run a command in an existing session's NFS mount (Linux version).
+#[cfg(target_os = "linux")]
+fn run_in_existing_session(session: &RunSession, command: PathBuf, args: Vec<String>) -> Result<i32> {
+    let mut cmd = Command::new(&command);
+    cmd.args(&args)
+        .current_dir(&session.mountpoint)
+        .env("AGENTFS", "1")
+        .env("PS1", "🤖 \\u@\\h:\\w\\$ ")
         .env("ZDOTDIR", session.run_dir.join("zsh"));
 
     let status = cmd
