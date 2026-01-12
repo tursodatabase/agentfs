@@ -49,6 +49,18 @@ pub enum Command {
         #[arg(long)]
         base: Option<PathBuf>,
 
+        /// Git repository URL or path to cloned repository for overlay filesystem
+        #[arg(long)]
+        git: Option<String>,
+
+        /// Git branch to checkout (only with --git)
+        #[arg(long, requires = "git")]
+        branch: Option<String>,
+
+        /// Shallow clone depth (only with --git)
+        #[arg(long, requires = "git")]
+        depth: Option<usize>,
+
         #[command(flatten)]
         sync: SyncCommandOptions,
     },
