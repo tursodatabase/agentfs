@@ -241,7 +241,8 @@ impl ReplyStatx {
     /// The mask parameter indicates which fields were requested.
     pub fn statx(self, ttl: &Duration, attr: &FileAttr, mask: u32) {
         let statx_attr = ll::reply::StatxAttr::from_file_attr(attr, mask);
-        self.reply.send_ll(&ll::Response::new_statx(ttl, &statx_attr));
+        self.reply
+            .send_ll(&ll::Response::new_statx(ttl, &statx_attr));
     }
 
     /// Reply to a request with the given error code

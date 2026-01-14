@@ -31,14 +31,14 @@ pub use ll::TimeOrNow;
 pub use mnt::mount_options::MountOption;
 pub use notify::{Notifier, PollHandle};
 pub use reply::ReplyPoll;
+#[cfg(feature = "abi-7-39")]
+pub use reply::ReplyStatx;
 pub use reply::ReplyXattr;
 pub use reply::{Reply, ReplyAttr, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen};
 pub use reply::{
     ReplyBmap, ReplyCreate, ReplyDirectory, ReplyDirectoryPlus, ReplyIoctl, ReplyLock, ReplyLseek,
     ReplyStatfs, ReplyWrite,
 };
-#[cfg(feature = "abi-7-39")]
-pub use reply::ReplyStatx;
 pub use request::Request;
 pub use session::{BackgroundSession, Session, SessionACL, SessionUnmounter};
 
