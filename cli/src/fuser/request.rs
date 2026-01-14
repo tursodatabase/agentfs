@@ -577,6 +577,17 @@ impl<'a> Request<'a> {
                     self.reply(),
                 );
             }
+            #[cfg(feature = "abi-7-39")]
+            ll::Operation::Statx(x) => {
+                se.filesystem.statx(
+                    self,
+                    self.request.nodeid().into(),
+                    x.file_handle().map(std::convert::Into::into),
+                    x.flags(),
+                    x.mask(),
+                    self.reply(),
+                );
+            }
             #[cfg(target_os = "macos")]
             ll::Operation::SetVolName(x) => {
                 se.filesystem.setvolname(self, x.name(), self.reply());

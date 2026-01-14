@@ -262,6 +262,19 @@ impl<'a> Response<'a> {
         Self::from_struct(&r)
     }
 
+    /// Create a statx response (FUSE ABI 7.39+)
+    #[cfg(feature = "abi-7-39")]
+    pub(crate) fn new_statx(ttl: &Duration, statx: &StatxAttr) -> Self {
+        let r = abi::fuse_statx_out {
+            attr_valid: ttl.as_secs(),
+            attr_valid_nsec: ttl.subsec_nanos(),
+            flags: 0,
+            spare: [0; 2],
+            stat: statx.stat,
+        };
+        Self::from_struct(&r)
+    }
+
     pub(crate) fn from_struct<T: IntoBytes + Immutable + ?Sized>(data: &T) -> Self {
         Self::Data(SmallVec::from_slice(data.as_bytes()))
     }
@@ -344,6 +357,82 @@ impl From<super::super::FileAttr> for Attr {
     fn from(attr: super::super::FileAttr) -> Self {
         Self {
             attr: fuse_attr_from_attr(&attr),
+        }
+    }
+}
+
+/// Statx attributes wrapper (FUSE ABI 7.39+)
+#[cfg(feature = "abi-7-39")]
+#[derive(Debug, Clone, Copy)]
+pub struct StatxAttr {
+    pub(crate) stat: abi::fuse_statx,
+}
+
+#[cfg(feature = "abi-7-39")]
+impl StatxAttr {
+    /// Create a new StatxAttr from FileAttr
+    pub fn from_file_attr(attr: &super::super::FileAttr, mask: u32) -> Self {
+        use abi::consts::*;
+
+        let (atime_secs, atime_nanos) = time_from_system_time(&attr.atime);
+        let (mtime_secs, mtime_nanos) = time_from_system_time(&attr.mtime);
+        let (ctime_secs, ctime_nanos) = time_from_system_time(&attr.ctime);
+        let (btime_secs, btime_nanos) = time_from_system_time(&attr.crtime);
+
+        // Build the mask of which fields we're returning
+        let returned_mask = STATX_TYPE
+            | STATX_MODE
+            | STATX_NLINK
+            | STATX_UID
+            | STATX_GID
+            | STATX_ATIME
+            | STATX_MTIME
+            | STATX_CTIME
+            | STATX_INO
+            | STATX_SIZE
+            | STATX_BLOCKS
+            | STATX_BTIME;
+
+        Self {
+            stat: abi::fuse_statx {
+                mask: mask & returned_mask,
+                blksize: attr.blksize,
+                attributes: 0,
+                nlink: attr.nlink,
+                uid: attr.uid,
+                gid: attr.gid,
+                mode: mode_from_kind_and_perm(attr.kind, attr.perm) as u16,
+                __spare0: [0; 1],
+                ino: attr.ino,
+                size: attr.size,
+                blocks: attr.blocks,
+                attributes_mask: 0,
+                atime: abi::fuse_sx_time {
+                    tv_sec: atime_secs,
+                    tv_nsec: atime_nanos,
+                    __reserved: 0,
+                },
+                btime: abi::fuse_sx_time {
+                    tv_sec: btime_secs,
+                    tv_nsec: btime_nanos,
+                    __reserved: 0,
+                },
+                ctime: abi::fuse_sx_time {
+                    tv_sec: ctime_secs,
+                    tv_nsec: ctime_nanos,
+                    __reserved: 0,
+                },
+                mtime: abi::fuse_sx_time {
+                    tv_sec: mtime_secs,
+                    tv_nsec: mtime_nanos,
+                    __reserved: 0,
+                },
+                rdev_major: (attr.rdev >> 8) & 0xfff,
+                rdev_minor: attr.rdev & 0xff,
+                dev_major: 0,
+                dev_minor: 0,
+                __spare2: [0; 14],
+            },
         }
     }
 }
