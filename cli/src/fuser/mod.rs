@@ -66,11 +66,7 @@ mod session;
 const INIT_FLAGS: u64 = FUSE_ASYNC_READ | FUSE_BIG_WRITES;
 
 const fn default_init_flags(#[allow(unused_variables)] capabilities: u64) -> u64 {
-    let mut flags = INIT_FLAGS;
-    if capabilities & FUSE_MAX_PAGES != 0 {
-        flags |= FUSE_MAX_PAGES;
-    }
-    flags
+    INIT_FLAGS
 }
 
 /// File types
