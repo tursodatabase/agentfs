@@ -223,10 +223,9 @@ pub async fn run_cmd(
         gid: Some(gid),
     };
 
-    // Start FUSE in a separate thread
-    let fuse_handle = std::thread::spawn(move || {
-        let rt = crate::get_runtime();
-        crate::fuse::mount(overlay, fuse_opts, rt)
+    // Start FUSE as an async task
+    let fuse_handle = tokio::spawn(async move {
+        crate::fuse::mount(overlay, fuse_opts).await
     });
 
     // Wait for FUSE mount to be ready
@@ -909,7 +908,7 @@ fn run_parent(
     child_pid: i32,
     cwd_fd: std::fs::File,
     fuse_mountpoint: &Path,
-    _fuse_handle: std::thread::JoinHandle<anyhow::Result<()>>,
+    _fuse_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
     db_path: &Path,
     session_id: &str,
 ) -> ! {

@@ -9,6 +9,7 @@ use crate::fuser::{
 };
 use agentfs_sdk::error::Error as SdkError;
 use agentfs_sdk::{BoxedFile, FileSystem, Stats};
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::{
     collections::HashMap,
@@ -20,7 +21,6 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::runtime::Runtime;
 
 /// Convert an SDK error to an errno code for FUSE replies.
 ///
@@ -33,6 +33,7 @@ fn error_to_errno(e: &SdkError) -> i32 {
         SdkError::Fs(fs_err) => fs_err.to_errno(),
         SdkError::Io(io_err) => io_err.raw_os_error().unwrap_or(libc::EIO),
         SdkError::Database(turso::Error::Busy(_)) => libc::EAGAIN,
+        SdkError::Database(turso::Error::BusySnapshot(_)) => libc::EAGAIN,
         SdkError::ConnectionPoolTimeout => libc::EAGAIN,
         _ => libc::EIO,
     }
@@ -67,10 +68,9 @@ struct OpenFile {
 
 struct AgentFSFuse {
     fs: Arc<dyn FileSystem>,
-    runtime: Runtime,
-    path_cache: Arc<Mutex<HashMap<u64, String>>>,
+    path_cache: Mutex<HashMap<u64, String>>,
     /// Maps file handle -> open file state
-    open_files: Arc<Mutex<HashMap<u64, OpenFile>>>,
+    open_files: Mutex<HashMap<u64, OpenFile>>,
     /// Next file handle to allocate
     next_fh: AtomicU64,
     /// User ID to report for all files (set at mount time)
@@ -86,6 +86,7 @@ struct AgentFSFuse {
     mountpoint_path: String,
 }
 
+#[async_trait]
 impl Filesystem for AgentFSFuse {
     /// Initialize the filesystem and enable performance optimizations.
     ///
@@ -99,7 +100,7 @@ impl Filesystem for AgentFSFuse {
     ///   for symlink resolution.
     /// - No opendir support: skips opendir/releasedir calls since we don't track
     ///   directory handles, reducing round-trips for directory operations.
-    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> Result<(), libc::c_int> {
+    async fn init(&self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), libc::c_int> {
         let _ = config.add_capabilities(
             FUSE_ASYNC_READ
                 | FUSE_WRITEBACK_CACHE
@@ -118,20 +119,15 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Resolves `name` under the directory identified by `parent` inode, stats the
     /// resulting path, and caches the inode-to-path mapping on success.
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+    async fn lookup(&self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let Some(path) = self.lookup_path(parent, name) else {
             reply.error(libc::ENOENT);
             return;
         };
-        let fs = self.fs.clone();
-        let (result, path) = self.runtime.block_on(async move {
-            let result = fs.lstat(&path).await;
-            (result, path)
-        });
-        match result {
+        match self.fs.lstat(&path).await {
             Ok(Some(stats)) => {
                 let attr = fillattr(&stats, self.uid, self.gid);
-                self.add_path(attr.ino, path);
+                self.path_cache.lock().insert(attr.ino, path);
                 reply.entry(&TTL, &attr, 0);
             }
             Ok(None) => reply.error(libc::ENOENT),
@@ -143,16 +139,13 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Returns metadata (size, permissions, timestamps, etc.) for the file or
     /// directory identified by `ino`. Root inode (1) is handled specially.
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+    async fn getattr(&self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let Some(path) = self.get_path(ino) else {
             reply.error(libc::ENOENT);
             return;
         };
 
-        let fs = self.fs.clone();
-        let result = self.runtime.block_on(async move { fs.lstat(&path).await });
-
-        match result {
+        match self.fs.lstat(&path).await {
             Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
             Ok(None) => reply.error(libc::ENOENT),
             Err(e) => reply.error(error_to_errno(&e)),
@@ -163,18 +156,13 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Returns the path that the symlink points to. This is called by operations
     /// like `ls -l` to display symlink targets.
-    fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+    async fn readlink(&self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
         let Some(path) = self.get_path(ino) else {
             reply.error(libc::ENOENT);
             return;
         };
 
-        let fs = self.fs.clone();
-        let result = self
-            .runtime
-            .block_on(async move { fs.readlink(&path).await });
-
-        match result {
+        match self.fs.readlink(&path).await {
             Ok(Some(target)) => reply.data(target.as_bytes()),
             Ok(None) => reply.error(libc::ENOENT),
             Err(e) => reply.error(error_to_errno(&e)),
@@ -185,9 +173,9 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Currently `size` changes (truncate) and `mode` changes (chmod) are supported.
     /// Other attribute changes (uid, gid, timestamps) are accepted but ignored.
-    fn setattr(
-        &mut self,
-        _req: &Request,
+    async fn setattr(
+        &self,
+        _req: &Request<'_>,
         ino: u64,
         mode: Option<u32>,
         _uid: Option<u32>,
@@ -210,12 +198,7 @@ impl Filesystem for AgentFSFuse {
                 return;
             };
 
-            let fs = self.fs.clone();
-            let result = self
-                .runtime
-                .block_on(async move { fs.chmod(&path, new_mode).await });
-
-            if let Err(e) = result {
+            if let Err(e) = self.fs.chmod(&path, new_mode).await {
                 reply.error(error_to_errno(&e));
                 return;
             }
@@ -231,8 +214,7 @@ impl Filesystem for AgentFSFuse {
                 };
 
                 if let Some(file) = file {
-                    self.runtime
-                        .block_on(async move { file.truncate(new_size).await })
+                    file.truncate(new_size).await
                 } else {
                     reply.error(libc::EBADF);
                     return;
@@ -244,11 +226,14 @@ impl Filesystem for AgentFSFuse {
                     return;
                 };
 
-                let fs = self.fs.clone();
-                self.runtime.block_on(async move {
-                    let file = fs.open(&path).await?;
-                    file.truncate(new_size).await
-                })
+                let file = match self.fs.open(&path).await {
+                    Ok(file) => file,
+                    Err(e) => {
+                        reply.error(error_to_errno(&e));
+                        return;
+                    }
+                };
+                file.truncate(new_size).await
             };
 
             if let Err(e) = result {
@@ -263,10 +248,7 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let fs = self.fs.clone();
-        let result = self.runtime.block_on(async move { fs.stat(&path).await });
-
-        match result {
+        match self.fs.stat(&path).await {
             Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
             Ok(None) => reply.error(libc::ENOENT),
             Err(e) => reply.error(error_to_errno(&e)),
@@ -284,9 +266,9 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Uses readdir_plus to fetch entries with stats in a single query,
     /// avoiding N+1 database queries.
-    fn readdir(
-        &mut self,
-        _req: &Request,
+    async fn readdir(
+        &self,
+        _req: &Request<'_>,
         ino: u64,
         _fh: u64,
         offset: i64,
@@ -297,13 +279,7 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let fs = self.fs.clone();
-        let (entries_result, path) = self.runtime.block_on(async move {
-            let result = fs.readdir_plus(&path).await;
-            (result, path)
-        });
-
-        let entries = match entries_result {
+        let entries = match self.fs.readdir_plus(&path).await {
             Ok(Some(entries)) => entries,
             Ok(None) => {
                 reply.error(libc::ENOENT);
@@ -334,11 +310,7 @@ impl Filesystem for AgentFSFuse {
             if parent_path == "/" {
                 1
             } else {
-                let fs = self.fs.clone();
-                match self
-                    .runtime
-                    .block_on(async move { fs.stat(&parent_path).await })
-                {
+                match self.fs.stat(&parent_path).await {
                     Ok(Some(stats)) => stats.ino as u64,
                     _ => 1, // Fallback to root if parent lookup fails
                 }
@@ -383,9 +355,9 @@ impl Filesystem for AgentFSFuse {
     /// This is an optimized version that returns both directory entries and
     /// their attributes in a single call, reducing kernel/userspace round trips.
     /// Uses readdir_plus to fetch entries with stats in a single database query.
-    fn readdirplus(
-        &mut self,
-        _req: &Request,
+    async fn readdirplus(
+        &self,
+        _req: &Request<'_>,
         ino: u64,
         _fh: u64,
         offset: i64,
@@ -396,13 +368,7 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let fs = self.fs.clone();
-        let (entries_result, path) = self.runtime.block_on(async move {
-            let result = fs.readdir_plus(&path).await;
-            (result, path)
-        });
-
-        let entries = match entries_result {
+        let entries = match self.fs.readdir_plus(&path).await {
             Ok(Some(entries)) => entries,
             Ok(None) => {
                 reply.error(libc::ENOENT);
@@ -415,13 +381,7 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Get current directory stats for "."
-        let fs = self.fs.clone();
-        let path_for_stat = path.clone();
-        let dir_stats = self
-            .runtime
-            .block_on(async move { fs.stat(&path_for_stat).await })
-            .ok()
-            .flatten();
+        let dir_stats = self.fs.stat(&path).await.ok().flatten();
 
         // Determine parent inode and stats for ".." entry
         let (parent_ino, parent_stats) = if ino == 1 {
@@ -440,20 +400,10 @@ impl Filesystem for AgentFSFuse {
                 .unwrap_or_else(|| "/".to_string());
 
             if parent_path == "/" {
-                let fs = self.fs.clone();
-                let parent_stats = self
-                    .runtime
-                    .block_on(async move { fs.stat(&parent_path).await })
-                    .ok()
-                    .flatten();
+                let parent_stats = self.fs.stat(&parent_path).await.ok().flatten();
                 (1u64, parent_stats)
             } else {
-                let fs = self.fs.clone();
-                let parent_stats = self
-                    .runtime
-                    .block_on(async move { fs.stat(&parent_path).await })
-                    .ok()
-                    .flatten();
+                let parent_stats = self.fs.stat(&parent_path).await.ok().flatten();
                 let parent_ino = parent_stats.as_ref().map(|s| s.ino as u64).unwrap_or(1);
                 (parent_ino, parent_stats)
             }
@@ -523,9 +473,9 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Creates a directory at `name` under `parent`, then stats it to return
     /// proper attributes and cache the inode mapping.
-    fn mkdir(
-        &mut self,
-        _req: &Request,
+    async fn mkdir(
+        &self,
+        _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
         _mode: u32,
@@ -537,25 +487,13 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let fs = self.fs.clone();
-        let (result, path) = self.runtime.block_on(async move {
-            let result = fs.mkdir(&path).await;
-            (result, path)
-        });
-
-        if let Err(e) = result {
+        if let Err(e) = self.fs.mkdir(&path).await {
             reply.error(error_to_errno(&e));
             return;
         }
 
         // Get the new directory's stats
-        let fs = self.fs.clone();
-        let (stat_result, path) = self.runtime.block_on(async move {
-            let result = fs.stat(&path).await;
-            (result, path)
-        });
-
-        match stat_result {
+        match self.fs.stat(&path).await {
             Ok(Some(stats)) => {
                 let attr = fillattr(&stats, self.uid, self.gid);
                 self.add_path(attr.ino, path);
@@ -574,20 +512,14 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Verifies the target is a directory and is empty before removal.
     /// Returns `ENOTDIR` if not a directory, `ENOTEMPTY` if not empty.
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+    async fn rmdir(&self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let Some(path) = self.lookup_path(parent, name) else {
             reply.error(libc::ENOENT);
             return;
         };
 
         // Verify target is a directory
-        let fs = self.fs.clone();
-        let (stat_result, path) = self.runtime.block_on(async move {
-            let result = fs.lstat(&path).await;
-            (result, path)
-        });
-
-        let stats = match stat_result {
+        let stats = match self.fs.lstat(&path).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 reply.error(libc::ENOENT);
@@ -605,13 +537,7 @@ impl Filesystem for AgentFSFuse {
         }
 
         // Verify directory is empty
-        let fs = self.fs.clone();
-        let (readdir_result, path) = self.runtime.block_on(async move {
-            let result = fs.readdir(&path).await;
-            (result, path)
-        });
-
-        match readdir_result {
+        match self.fs.readdir(&path).await {
             Ok(Some(entries)) if !entries.is_empty() => {
                 reply.error(libc::ENOTEMPTY);
                 return;
@@ -629,10 +555,7 @@ impl Filesystem for AgentFSFuse {
 
         // Remove the directory
         let ino = stats.ino as u64;
-        let fs = self.fs.clone();
-        let result = self.runtime.block_on(async move { fs.remove(&path).await });
-
-        match result {
+        match self.fs.remove(&path).await {
             Ok(()) => {
                 self.drop_path(ino);
                 reply.ok();
@@ -649,9 +572,9 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Creates an empty file at `name` under `parent`, allocates a file handle,
     /// and returns both the file attributes and handle for immediate use.
-    fn create(
-        &mut self,
-        _req: &Request,
+    async fn create(
+        &self,
+        _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
         mode: u32,
@@ -665,13 +588,7 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Create file with mode, get stats and file handle in one operation
-        let fs = self.fs.clone();
-        let path_for_create = path.clone();
-        let result = self
-            .runtime
-            .block_on(async move { fs.create_file(&path_for_create, mode).await });
-
-        match result {
+        match self.fs.create_file(&path, mode).await {
             Ok((stats, file)) => {
                 let attr = fillattr(&stats, self.uid, self.gid);
                 self.add_path(attr.ino, path);
@@ -690,9 +607,9 @@ impl Filesystem for AgentFSFuse {
     /// Creates a symbolic link.
     ///
     /// Creates a symlink at `name` under `parent` pointing to `link`.
-    fn symlink(
-        &mut self,
-        _req: &Request,
+    async fn symlink(
+        &self,
+        _req: &Request<'_>,
         parent: u64,
         link_name: &OsStr,
         target: &Path,
@@ -708,26 +625,13 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let fs = self.fs.clone();
-        let target_owned = target_str.to_string();
-        let (result, path) = self.runtime.block_on(async move {
-            let result = fs.symlink(&target_owned, &path).await;
-            (result, path)
-        });
-
-        if let Err(e) = result {
+        if let Err(e) = self.fs.symlink(target_str, &path).await {
             reply.error(error_to_errno(&e));
             return;
         }
 
         // Get the new symlink's stats
-        let fs = self.fs.clone();
-        let (stat_result, path) = self.runtime.block_on(async move {
-            let result = fs.lstat(&path).await;
-            (result, path)
-        });
-
-        match stat_result {
+        match self.fs.lstat(&path).await {
             Ok(Some(stats)) => {
                 let attr = fillattr(&stats, self.uid, self.gid);
                 self.add_path(attr.ino, path);
@@ -746,9 +650,9 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Creates a new directory entry `newname` under `newparent` that refers to the
     /// same inode as `ino`. The link count of the inode is incremented.
-    fn link(
-        &mut self,
-        _req: &Request,
+    async fn link(
+        &self,
+        _req: &Request<'_>,
         ino: u64,
         newparent: u64,
         newname: &OsStr,
@@ -766,25 +670,13 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
-        let fs = self.fs.clone();
-        let (result, newpath) = self.runtime.block_on(async move {
-            let result = fs.link(&oldpath, &newpath).await;
-            (result, newpath)
-        });
-
-        if let Err(e) = result {
+        if let Err(e) = self.fs.link(&oldpath, &newpath).await {
             reply.error(error_to_errno(&e));
             return;
         }
 
         // Get the new link's stats
-        let fs = self.fs.clone();
-        let (stat_result, newpath) = self.runtime.block_on(async move {
-            let result = fs.lstat(&newpath).await;
-            (result, newpath)
-        });
-
-        match stat_result {
+        match self.fs.lstat(&newpath).await {
             Ok(Some(stats)) => {
                 let attr = fillattr(&stats, self.uid, self.gid);
                 self.add_path(attr.ino, newpath);
@@ -802,27 +694,21 @@ impl Filesystem for AgentFSFuse {
     /// Removes a file (unlinks it from the directory).
     ///
     /// Gets the file's inode before removal to clean up the path cache.
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+    async fn unlink(&self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let Some(path) = self.lookup_path(parent, name) else {
             reply.error(libc::ENOENT);
             return;
         };
 
         // Get inode before removing so we can uncache
-        let fs = self.fs.clone();
-        let (stat_result, path) = self.runtime.block_on(async move {
-            let result = fs.lstat(&path).await;
-            (result, path)
-        });
-
-        let stats = match &stat_result {
+        let stats = match self.fs.lstat(&path).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 reply.error(libc::ENOENT);
                 return;
             }
             Err(e) => {
-                reply.error(error_to_errno(e));
+                reply.error(error_to_errno(&e));
                 return;
             }
         };
@@ -835,8 +721,7 @@ impl Filesystem for AgentFSFuse {
         let ino = stats.ino as u64;
         let nlink = stats.nlink;
 
-        let fs = self.fs.clone();
-        let result = self.runtime.block_on(async move { fs.remove(&path).await });
+        let result = self.fs.remove(&path).await;
 
         match result {
             Ok(()) => {
@@ -856,9 +741,9 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Moves `name` from `parent` to `newname` under `newparent`. Updates the
     /// path cache accordingly, removing any replaced destination entry.
-    fn rename(
-        &mut self,
-        _req: &Request,
+    async fn rename(
+        &self,
+        _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
         newparent: u64,
@@ -877,31 +762,13 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Get source inode before rename so we can update cache
-        let fs = self.fs.clone();
-        let (src_stat, from_path) = self.runtime.block_on(async move {
-            let result = fs.stat(&from_path).await;
-            (result, from_path)
-        });
-
-        let src_ino = src_stat.ok().flatten().map(|s| s.ino as u64);
+        let src_ino = self.fs.stat(&from_path).await.ok().flatten().map(|s| s.ino as u64);
 
         // Check if destination exists and get its inode for cache cleanup
-        let fs = self.fs.clone();
-        let (dst_stat, to_path) = self.runtime.block_on(async move {
-            let result = fs.stat(&to_path).await;
-            (result, to_path)
-        });
-
-        let dst_ino = dst_stat.ok().flatten().map(|s| s.ino as u64);
+        let dst_ino = self.fs.stat(&to_path).await.ok().flatten().map(|s| s.ino as u64);
 
         // Perform the rename
-        let fs = self.fs.clone();
-        let (result, to_path) = self.runtime.block_on(async move {
-            let result = fs.rename(&from_path, &to_path).await;
-            (result, to_path)
-        });
-
-        match result {
+        match self.fs.rename(&from_path, &to_path).await {
             Ok(()) => {
                 // Update path cache: remove old path, add new path
                 if let Some(ino) = src_ino {
@@ -925,19 +792,13 @@ impl Filesystem for AgentFSFuse {
     /// Opens a file for reading or writing.
     ///
     /// Allocates a file handle and opens the file in the filesystem layer.
-    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+    async fn open(&self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         let Some(path) = self.get_path(ino) else {
             reply.error(libc::ENOENT);
             return;
         };
 
-        let fs = self.fs.clone();
-        let path_clone = path.clone();
-        let result = self
-            .runtime
-            .block_on(async move { fs.open(&path_clone).await });
-
-        match result {
+        match self.fs.open(&path).await {
             Ok(file) => {
                 let fh = self.alloc_fh();
                 self.open_files.lock().insert(fh, OpenFile { file });
@@ -948,9 +809,9 @@ impl Filesystem for AgentFSFuse {
     }
 
     /// Reads data using the file handle.
-    fn read(
-        &mut self,
-        _req: &Request,
+    async fn read(
+        &self,
+        _req: &Request<'_>,
         _ino: u64,
         fh: u64,
         offset: i64,
@@ -968,20 +829,16 @@ impl Filesystem for AgentFSFuse {
             open_file.file.clone()
         };
 
-        let result = self
-            .runtime
-            .block_on(async move { file.pread(offset as u64, size as u64).await });
-
-        match result {
+        match file.pread(offset as u64, size as u64).await {
             Ok(data) => reply.data(&data),
             Err(e) => reply.error(error_to_errno(&e)),
         }
     }
 
     /// Writes data using the file handle.
-    fn write(
-        &mut self,
-        _req: &Request,
+    async fn write(
+        &self,
+        _req: &Request<'_>,
         _ino: u64,
         fh: u64,
         offset: i64,
@@ -1001,12 +858,7 @@ impl Filesystem for AgentFSFuse {
         };
 
         let data_len = data.len();
-        let data_vec = data.to_vec();
-        let result = self
-            .runtime
-            .block_on(async move { file.pwrite(offset as u64, &data_vec).await });
-
-        match result {
+        match file.pwrite(offset as u64, data).await {
             Ok(()) => reply.written(data_len as u32),
             Err(e) => reply.error(error_to_errno(&e)),
         }
@@ -1015,7 +867,7 @@ impl Filesystem for AgentFSFuse {
     /// Flushes data to the backend storage.
     ///
     /// Since writes go directly to the database, this is a no-op.
-    fn flush(&mut self, _req: &Request, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    async fn flush(&self, _req: &Request<'_>, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         let open_files = self.open_files.lock();
         if open_files.contains_key(&fh) {
             reply.ok();
@@ -1028,7 +880,7 @@ impl Filesystem for AgentFSFuse {
     ///
     /// This now uses the file handle's fsync which knows which layer(s) the
     /// file exists in, avoiding errors when a file only exists in one layer.
-    fn fsync(&mut self, _req: &Request, _ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
+    async fn fsync(&self, _req: &Request<'_>, _ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
         let file = {
             let open_files = self.open_files.lock();
             match open_files.get(&fh) {
@@ -1040,9 +892,7 @@ impl Filesystem for AgentFSFuse {
             }
         };
 
-        let result = self.runtime.block_on(async move { file.fsync().await });
-
-        match result {
+        match file.fsync().await {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(error_to_errno(&e)),
         }
@@ -1052,9 +902,9 @@ impl Filesystem for AgentFSFuse {
     ///
     /// Removes the file handle from the open files table.
     /// Since writes go directly to the database, no flushing is needed.
-    fn release(
-        &mut self,
-        _req: &Request,
+    async fn release(
+        &self,
+        _req: &Request<'_>,
         _ino: u64,
         fh: u64,
         _flags: i32,
@@ -1069,15 +919,12 @@ impl Filesystem for AgentFSFuse {
     /// Returns filesystem statistics.
     ///
     /// Queries actual usage from the SDK and reports it to tools like `df`.
-    fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+    async fn statfs(&self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         const BLOCK_SIZE: u64 = 4096;
         const TOTAL_INODES: u64 = 1_000_000; // Virtual limit
         const MAX_NAMELEN: u32 = 255;
 
-        let fs = self.fs.clone();
-        let result = self.runtime.block_on(async move { fs.statfs().await });
-
-        let (used_blocks, used_inodes) = match result {
+        let (used_blocks, used_inodes) = match self.fs.statfs().await {
             Ok(stats) => {
                 let used_blocks = stats.bytes_used.div_ceil(BLOCK_SIZE);
                 (used_blocks, stats.inodes)
@@ -1106,23 +953,18 @@ impl Filesystem for AgentFSFuse {
 impl AgentFSFuse {
     /// Create a new FUSE filesystem adapter wrapping a FileSystem instance.
     ///
-    /// The provided Tokio runtime is used to execute async FileSystem operations
-    /// from within synchronous FUSE callbacks via `block_on`.
-    ///
     /// The uid and gid are used for all file ownership to avoid "dubious ownership"
     /// errors from tools like git that check file ownership.
     fn new(
         fs: Arc<dyn FileSystem>,
-        runtime: Runtime,
         uid: u32,
         gid: u32,
         mountpoint_path: PathBuf,
     ) -> Self {
         Self {
             fs,
-            runtime,
-            path_cache: Arc::new(Mutex::new(HashMap::new())),
-            open_files: Arc::new(Mutex::new(HashMap::new())),
+            path_cache: Mutex::new(HashMap::new()),
+            open_files: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             uid,
             gid,
@@ -1240,17 +1082,16 @@ fn fillattr(stats: &Stats, uid: u32, gid: u32) -> FileAttr {
     }
 }
 
-pub fn mount(
+pub async fn mount(
     fs: Arc<dyn FileSystem>,
     opts: FuseMountOptions,
-    runtime: Runtime,
 ) -> anyhow::Result<()> {
     // Use provided uid/gid or default to current user
     // This avoids "dubious ownership" errors from git and similar tools
     let uid = opts.uid.unwrap_or_else(|| unsafe { libc::getuid() });
     let gid = opts.gid.unwrap_or_else(|| unsafe { libc::getgid() });
 
-    let fs = AgentFSFuse::new(fs, runtime, uid, gid, opts.mountpoint.clone());
+    let fs = AgentFSFuse::new(fs, uid, gid, opts.mountpoint.clone());
 
     fs.add_path(1, "/".to_string());
 
@@ -1262,7 +1103,7 @@ pub fn mount(
         mount_opts.push(MountOption::AllowRoot);
     }
 
-    crate::fuser::mount2(fs, &opts.mountpoint, &mount_opts)?;
+    crate::fuser::mount_async(fs, &opts.mountpoint, &mount_opts).await?;
 
     Ok(())
 }

@@ -75,46 +75,48 @@ pub fn mount(args: MountArgs) -> Result<()> {
 
     let mount = move || {
         let rt = crate::get_runtime();
-        let agentfs = rt.block_on(open_agentfs(opts))?;
+        rt.block_on(async {
+            let agentfs = open_agentfs(opts).await?;
 
-        // Check for overlay configuration
-        let fs: Arc<dyn FileSystem> = rt.block_on(async {
-            let conn = agentfs.get_connection().await?;
+            // Check for overlay configuration
+            let fs: Arc<dyn FileSystem> = {
+                let conn = agentfs.get_connection().await?;
 
-            // Check if fs_overlay_config table exists and has base_path
-            let query = "SELECT value FROM fs_overlay_config WHERE key = 'base_path'";
-            let base_path: Option<String> = match conn.query(query, ()).await {
-                Ok(mut rows) => {
-                    if let Ok(Some(row)) = rows.next().await {
-                        row.get_value(0).ok().and_then(|v| {
-                            if let Value::Text(s) = v {
-                                Some(s.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
+                // Check if fs_overlay_config table exists and has base_path
+                let query = "SELECT value FROM fs_overlay_config WHERE key = 'base_path'";
+                let base_path: Option<String> = match conn.query(query, ()).await {
+                    Ok(mut rows) => {
+                        if let Ok(Some(row)) = rows.next().await {
+                            row.get_value(0).ok().and_then(|v| {
+                                if let Value::Text(s) = v {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        }
                     }
+                    Err(_) => None, // Table doesn't exist or query failed
+                };
+
+                if let Some(base_path) = base_path {
+                    // Create OverlayFS with HostFS base
+                    eprintln!("Using overlay filesystem with base: {}", base_path);
+                    let hostfs = HostFS::new(&base_path)?;
+                    #[cfg(target_family = "unix")]
+                    let hostfs = { hostfs.with_fuse_mountpoint(mountpoint_ino) };
+                    let overlay = OverlayFS::new(Arc::new(hostfs), agentfs.fs);
+                    Arc::new(overlay) as Arc<dyn FileSystem>
+                } else {
+                    // Plain AgentFS
+                    Arc::new(agentfs.fs) as Arc<dyn FileSystem>
                 }
-                Err(_) => None, // Table doesn't exist or query failed
             };
 
-            if let Some(base_path) = base_path {
-                // Create OverlayFS with HostFS base
-                eprintln!("Using overlay filesystem with base: {}", base_path);
-                let hostfs = HostFS::new(&base_path)?;
-                #[cfg(target_family = "unix")]
-                let hostfs = { hostfs.with_fuse_mountpoint(mountpoint_ino) };
-                let overlay = OverlayFS::new(Arc::new(hostfs), agentfs.fs);
-                Ok::<Arc<dyn FileSystem>, anyhow::Error>(Arc::new(overlay))
-            } else {
-                // Plain AgentFS
-                Ok(Arc::new(agentfs.fs) as Arc<dyn FileSystem>)
-            }
-        })?;
-
-        crate::fuse::mount(fs, fuse_opts, rt)
+            crate::fuse::mount(fs, fuse_opts).await
+        })
     };
 
     if args.foreground {

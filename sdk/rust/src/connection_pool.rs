@@ -11,10 +11,13 @@ use turso::{Connection, Database};
 use crate::error::{Error, Result};
 
 /// Maximum number of connections in the pool.
-const MAX_CONNECTIONS: usize = 1;
+const MAX_CONNECTIONS: usize = 2;
 
 /// Default timeout for acquiring a connection from the pool.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// SQLite busy timeout - how long to wait when the database is locked.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Database wrapper that supports both regular and sync databases.
 enum DatabaseType {
@@ -94,10 +97,14 @@ impl ConnectionPool {
 
         let conn = match conn {
             Some(c) => c,
-            None => match &self.inner.db {
-                DatabaseType::Local(db) => db.connect()?,
-                DatabaseType::Sync(db) => db.connect().await?,
-            },
+            None => {
+                let conn = match &self.inner.db {
+                    DatabaseType::Local(db) => db.connect()?,
+                    DatabaseType::Sync(db) => db.connect().await?,
+                };
+                conn.busy_timeout(BUSY_TIMEOUT)?;
+                conn
+            }
         };
 
         Ok(PooledConnection {

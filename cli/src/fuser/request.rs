@@ -10,6 +10,8 @@ use log::{debug, error, warn};
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::channel::ChannelSender;
 use super::ll::Request as _;
@@ -46,14 +48,13 @@ impl<'a> Request<'a> {
         Some(Self { ch, data, request })
     }
 
-    /// Dispatch request to the given filesystem.
-    /// This calls the appropriate filesystem operation method for the
-    /// request and sends back the returned reply to the kernel
-    pub(crate) fn dispatch<FS: Filesystem>(&self, se: &mut Session<FS>) {
+    /// Dispatch request asynchronously to the given filesystem.
+    /// This is the async version that calls async filesystem methods.
+    pub(crate) async fn dispatch_async<FS: Filesystem>(&self, se: &Arc<Session<FS>>) {
         debug!("{}", self.request);
         let unique = self.request.unique();
 
-        let res = match self.dispatch_req(se) {
+        let res = match self.dispatch_req_async(se).await {
             Ok(Some(resp)) => resp,
             Ok(None) => return,
             Err(errno) => self.request.reply_err(errno),
@@ -65,9 +66,10 @@ impl<'a> Request<'a> {
         }
     }
 
-    fn dispatch_req<FS: Filesystem>(
+    /// Async dispatch implementation
+    async fn dispatch_req_async<FS: Filesystem>(
         &self,
-        se: &mut Session<FS>,
+        se: &Arc<Session<FS>>,
     ) -> Result<Option<Response<'_>>, Errno> {
         let op = self.request.operation().map_err(|_| Errno::ENOSYS)?;
         // Implement allow_root & access check for auto_unmount
@@ -79,7 +81,6 @@ impl<'a> Request<'a> {
             #[cfg(feature = "abi-7-21")]
             {
                 match op {
-                    // Only allow operations that the kernel may issue without a uid set
                     ll::Operation::Init(_)
                     | ll::Operation::Destroy(_)
                     | ll::Operation::Read(_)
@@ -100,7 +101,6 @@ impl<'a> Request<'a> {
             #[cfg(not(feature = "abi-7-21"))]
             {
                 match op {
-                    // Only allow operations that the kernel may issue without a uid set
                     ll::Operation::Init(_)
                     | ll::Operation::Destroy(_)
                     | ll::Operation::Read(_)
@@ -119,27 +119,21 @@ impl<'a> Request<'a> {
             }
         }
         match op {
-            // Filesystem initialization
             ll::Operation::Init(x) => {
-                // We don't support ABI versions before 7.6
                 let v = x.version();
                 if v < ll::Version(7, 6) {
                     error!("Unsupported FUSE ABI version {v}");
                     return Err(Errno::EPROTO);
                 }
-                // Remember ABI version supported by kernel
-                se.proto_major = v.major();
-                se.proto_minor = v.minor();
+                se.proto_major.store(v.major(), Ordering::Release);
+                se.proto_minor.store(v.minor(), Ordering::Release);
 
                 let mut config = KernelConfig::new(x.capabilities(), x.max_readahead());
-                // Call filesystem init method and give it a chance to return an error
                 se.filesystem
                     .init(self, &mut config)
+                    .await
                     .map_err(Errno::from_i32)?;
 
-                // Reply with our desired version and settings. If the kernel supports a
-                // larger major version, it'll re-send a matching init message. If it
-                // supports only lower major versions, we replied with an error above.
                 debug!(
                     "INIT response: ABI {}.{}, flags {:#x}, max readahead {}, max write {}",
                     abi::FUSE_KERNEL_VERSION,
@@ -148,28 +142,24 @@ impl<'a> Request<'a> {
                     config.max_readahead,
                     config.max_write
                 );
-                se.initialized = true;
+                se.initialized.store(true, Ordering::Release);
                 return Ok(Some(x.reply(&config)));
             }
-            // Any operation is invalid before initialization
-            _ if !se.initialized => {
+            _ if !se.initialized.load(Ordering::Acquire) => {
                 warn!("Ignoring FUSE operation before init: {}", self.request);
                 return Err(Errno::EIO);
             }
-            // Filesystem destroyed
             ll::Operation::Destroy(x) => {
-                se.filesystem.destroy();
-                se.destroyed = true;
+                se.filesystem.destroy().await;
+                se.destroyed.store(true, Ordering::Release);
                 return Ok(Some(x.reply()));
             }
-            // Any operation is invalid after destroy
-            _ if se.destroyed => {
+            _ if se.destroyed.load(Ordering::Acquire) => {
                 warn!("Ignoring FUSE operation after destroy: {}", self.request);
                 return Err(Errno::EIO);
             }
 
             ll::Operation::Interrupt(_) => {
-                // TODO: handle FUSE_INTERRUPT
                 return Err(Errno::ENOSYS);
             }
 
@@ -179,11 +169,11 @@ impl<'a> Request<'a> {
                     self.request.nodeid().into(),
                     x.name().as_ref(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Forget(x) => {
                 se.filesystem
-                    .forget(self, self.request.nodeid().into(), x.nlookup()); // no reply
+                    .forget(self, self.request.nodeid().into(), x.nlookup()).await;
             }
             ll::Operation::GetAttr(_attr) => {
                 se.filesystem.getattr(
@@ -191,7 +181,7 @@ impl<'a> Request<'a> {
                     self.request.nodeid().into(),
                     _attr.file_handle().map(std::convert::Into::into),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::SetAttr(x) => {
                 se.filesystem.setattr(
@@ -210,11 +200,11 @@ impl<'a> Request<'a> {
                     x.bkuptime(),
                     x.flags(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::ReadLink(_) => {
                 se.filesystem
-                    .readlink(self, self.request.nodeid().into(), self.reply());
+                    .readlink(self, self.request.nodeid().into(), self.reply()).await;
             }
             ll::Operation::MkNod(x) => {
                 se.filesystem.mknod(
@@ -225,7 +215,7 @@ impl<'a> Request<'a> {
                     x.umask(),
                     x.rdev(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::MkDir(x) => {
                 se.filesystem.mkdir(
@@ -235,7 +225,7 @@ impl<'a> Request<'a> {
                     x.mode(),
                     x.umask(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Unlink(x) => {
                 se.filesystem.unlink(
@@ -243,7 +233,7 @@ impl<'a> Request<'a> {
                     self.request.nodeid().into(),
                     x.name().as_ref(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::RmDir(x) => {
                 se.filesystem.rmdir(
@@ -251,7 +241,7 @@ impl<'a> Request<'a> {
                     self.request.nodeid().into(),
                     x.name().as_ref(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::SymLink(x) => {
                 se.filesystem.symlink(
@@ -260,7 +250,7 @@ impl<'a> Request<'a> {
                     x.link_name().as_ref(),
                     Path::new(x.target()),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Rename(x) => {
                 se.filesystem.rename(
@@ -271,7 +261,7 @@ impl<'a> Request<'a> {
                     x.dest().name.as_ref(),
                     0,
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Link(x) => {
                 se.filesystem.link(
@@ -280,11 +270,11 @@ impl<'a> Request<'a> {
                     self.request.nodeid().into(),
                     x.dest().name.as_ref(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Open(x) => {
                 se.filesystem
-                    .open(self, self.request.nodeid().into(), x.flags(), self.reply());
+                    .open(self, self.request.nodeid().into(), x.flags(), self.reply()).await;
             }
             ll::Operation::Read(x) => {
                 se.filesystem.read(
@@ -296,7 +286,7 @@ impl<'a> Request<'a> {
                     x.flags(),
                     x.lock_owner().map(std::convert::Into::into),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Write(x) => {
                 se.filesystem.write(
@@ -309,7 +299,7 @@ impl<'a> Request<'a> {
                     x.flags(),
                     x.lock_owner().map(std::convert::Into::into),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Flush(x) => {
                 se.filesystem.flush(
@@ -318,7 +308,7 @@ impl<'a> Request<'a> {
                     x.file_handle().into(),
                     x.lock_owner().into(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Release(x) => {
                 se.filesystem.release(
@@ -329,7 +319,7 @@ impl<'a> Request<'a> {
                     x.lock_owner().map(std::convert::Into::into),
                     x.flush(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::FSync(x) => {
                 se.filesystem.fsync(
@@ -338,11 +328,11 @@ impl<'a> Request<'a> {
                     x.file_handle().into(),
                     x.fdatasync(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::OpenDir(x) => {
                 se.filesystem
-                    .opendir(self, self.request.nodeid().into(), x.flags(), self.reply());
+                    .opendir(self, self.request.nodeid().into(), x.flags(), self.reply()).await;
             }
             ll::Operation::ReadDir(x) => {
                 se.filesystem.readdir(
@@ -355,7 +345,7 @@ impl<'a> Request<'a> {
                         self.ch.clone(),
                         x.size() as usize,
                     ),
-                );
+                ).await;
             }
             ll::Operation::ReleaseDir(x) => {
                 se.filesystem.releasedir(
@@ -364,7 +354,7 @@ impl<'a> Request<'a> {
                     x.file_handle().into(),
                     x.flags(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::FSyncDir(x) => {
                 se.filesystem.fsyncdir(
@@ -373,11 +363,11 @@ impl<'a> Request<'a> {
                     x.file_handle().into(),
                     x.fdatasync(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::StatFs(_) => {
                 se.filesystem
-                    .statfs(self, self.request.nodeid().into(), self.reply());
+                    .statfs(self, self.request.nodeid().into(), self.reply()).await;
             }
             ll::Operation::SetXAttr(x) => {
                 se.filesystem.setxattr(
@@ -388,7 +378,7 @@ impl<'a> Request<'a> {
                     x.flags(),
                     x.position(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::GetXAttr(x) => {
                 se.filesystem.getxattr(
@@ -397,11 +387,11 @@ impl<'a> Request<'a> {
                     x.name(),
                     x.size_u32(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::ListXAttr(x) => {
                 se.filesystem
-                    .listxattr(self, self.request.nodeid().into(), x.size(), self.reply());
+                    .listxattr(self, self.request.nodeid().into(), x.size(), self.reply()).await;
             }
             ll::Operation::RemoveXAttr(x) => {
                 se.filesystem.removexattr(
@@ -409,11 +399,11 @@ impl<'a> Request<'a> {
                     self.request.nodeid().into(),
                     x.name(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Access(x) => {
                 se.filesystem
-                    .access(self, self.request.nodeid().into(), x.mask(), self.reply());
+                    .access(self, self.request.nodeid().into(), x.mask(), self.reply()).await;
             }
             ll::Operation::Create(x) => {
                 se.filesystem.create(
@@ -424,7 +414,7 @@ impl<'a> Request<'a> {
                     x.umask(),
                     x.flags(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::GetLk(x) => {
                 se.filesystem.getlk(
@@ -437,7 +427,7 @@ impl<'a> Request<'a> {
                     x.lock().typ,
                     x.lock().pid,
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::SetLk(x) => {
                 se.filesystem.setlk(
@@ -451,7 +441,7 @@ impl<'a> Request<'a> {
                     x.lock().pid,
                     false,
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::SetLkW(x) => {
                 se.filesystem.setlk(
@@ -465,7 +455,7 @@ impl<'a> Request<'a> {
                     x.lock().pid,
                     true,
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::BMap(x) => {
                 se.filesystem.bmap(
@@ -474,7 +464,7 @@ impl<'a> Request<'a> {
                     x.block_size(),
                     x.block(),
                     self.reply(),
-                );
+                ).await;
             }
 
             ll::Operation::IoCtl(x) => {
@@ -490,7 +480,7 @@ impl<'a> Request<'a> {
                     x.in_data(),
                     x.out_size(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::Poll(x) => {
                 let ph = PollHandle::new(se.ch.sender(), x.kernel_handle());
@@ -503,14 +493,13 @@ impl<'a> Request<'a> {
                     x.events(),
                     x.flags(),
                     self.reply(),
-                );
+                ).await;
             }
             ll::Operation::NotifyReply(_) => {
-                // TODO: handle FUSE_NOTIFY_REPLY
                 return Err(Errno::ENOSYS);
             }
             ll::Operation::BatchForget(x) => {
-                se.filesystem.batch_forget(self, x.nodes()); // no reply
+                se.filesystem.batch_forget(self, x.nodes()).await;
             }
             #[cfg(feature = "abi-7-19")]
             ll::Operation::FAllocate(x) => {
@@ -522,7 +511,7 @@ impl<'a> Request<'a> {
                     x.len(),
                     x.mode(),
                     self.reply(),
-                );
+                ).await;
             }
             #[cfg(feature = "abi-7-21")]
             ll::Operation::ReadDirPlus(x) => {
@@ -536,7 +525,7 @@ impl<'a> Request<'a> {
                         self.ch.clone(),
                         x.size() as usize,
                     ),
-                );
+                ).await;
             }
             #[cfg(feature = "abi-7-23")]
             ll::Operation::Rename2(x) => {
@@ -548,7 +537,7 @@ impl<'a> Request<'a> {
                     x.to().name.as_ref(),
                     x.flags(),
                     self.reply(),
-                );
+                ).await;
             }
             #[cfg(feature = "abi-7-24")]
             ll::Operation::Lseek(x) => {
@@ -559,7 +548,7 @@ impl<'a> Request<'a> {
                     x.offset(),
                     x.whence(),
                     self.reply(),
-                );
+                ).await;
             }
             #[cfg(feature = "abi-7-28")]
             ll::Operation::CopyFileRange(x) => {
@@ -575,16 +564,16 @@ impl<'a> Request<'a> {
                     x.len(),
                     x.flags().try_into().unwrap(),
                     self.reply(),
-                );
+                ).await;
             }
             #[cfg(target_os = "macos")]
             ll::Operation::SetVolName(x) => {
-                se.filesystem.setvolname(self, x.name(), self.reply());
+                se.filesystem.setvolname(self, x.name(), self.reply()).await;
             }
             #[cfg(target_os = "macos")]
             ll::Operation::GetXTimes(x) => {
                 se.filesystem
-                    .getxtimes(self, x.nodeid().into(), self.reply());
+                    .getxtimes(self, x.nodeid().into(), self.reply()).await;
             }
             #[cfg(target_os = "macos")]
             ll::Operation::Exchange(x) => {
@@ -596,11 +585,10 @@ impl<'a> Request<'a> {
                     x.to().name.as_ref(),
                     x.options(),
                     self.reply(),
-                );
+                ).await;
             }
 
             ll::Operation::CuseInit(_) => {
-                // TODO: handle CUSE_INIT
                 return Err(Errno::ENOSYS);
             }
         }

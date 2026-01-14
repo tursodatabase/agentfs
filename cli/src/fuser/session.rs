@@ -4,27 +4,31 @@
 //! point. A session begins by mounting the filesystem and ends by unmounting it. While the
 //! filesystem is mounted, the session loop receives, dispatches and replies to kernel requests
 //! for filesystem operations under its mount point.
+//!
+//! This implementation uses async I/O for high-performance concurrent request handling.
 
 use libc::{EAGAIN, EINTR, ENODEV, ENOENT};
-use log::{info, warn};
+use log::{debug, info, warn};
 use nix::unistd::geteuid;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use tokio::sync::Semaphore;
 
 use super::ll::fuse_abi as abi;
 use super::request::Request;
 use super::Filesystem;
+use super::KernelConfig;
 use super::MountOption;
-use super::{channel::Channel, mnt::Mount};
+use super::{channel::AsyncChannel, channel::Channel, mnt::Mount};
 use super::{channel::ChannelSender, notify::Notifier};
 
 /// The max size of write requests from the kernel. The absolute minimum is 4k,
 /// FUSE recommends at least 128k, max 16M. The FUSE default is 16M on macOS
-/// and 128k on other systems.
-pub const MAX_WRITE_SIZE: usize = 16 * 1024 * 1024;
+/// and 128k on other systems. We use 128k to minimize buffer allocation overhead.
+pub const MAX_WRITE_SIZE: usize = 128 * 1024;
 
 /// Size of the buffer for reading a request from the kernel. Since the kernel may send
 /// up to `MAX_WRITE_SIZE` bytes in a write request, we use that value plus some extra space.
@@ -42,11 +46,15 @@ pub enum SessionACL {
     Owner,
 }
 
+/// Maximum number of concurrent FUSE requests to process.
+/// Using 1 to serialize all requests and avoid database contention.
+const MAX_CONCURRENT_REQUESTS: usize = 2;
+
 /// The session data structure
 #[derive(Debug)]
 pub struct Session<FS: Filesystem> {
-    /// Filesystem operation implementations
-    pub(crate) filesystem: FS,
+    /// Filesystem operation implementations (Arc for sharing across async tasks)
+    pub(crate) filesystem: Arc<FS>,
     /// Communication channel to the kernel driver
     pub(crate) ch: Channel,
     /// Handle to the mount.  Dropping this unmounts.
@@ -57,13 +65,13 @@ pub struct Session<FS: Filesystem> {
     /// User that launched the fuser process
     pub(crate) session_owner: u32,
     /// FUSE protocol major version
-    pub(crate) proto_major: u32,
+    pub(crate) proto_major: AtomicU32,
     /// FUSE protocol minor version
-    pub(crate) proto_minor: u32,
+    pub(crate) proto_minor: AtomicU32,
     /// True if the filesystem is initialized (init operation done)
-    pub(crate) initialized: bool,
+    pub(crate) initialized: AtomicBool,
     /// True if the filesystem was destroyed (destroy operation done)
-    pub(crate) destroyed: bool,
+    pub(crate) destroyed: AtomicBool,
 }
 
 impl<FS: Filesystem> AsFd for Session<FS> {
@@ -110,15 +118,15 @@ impl<FS: Filesystem> Session<FS> {
         };
 
         Ok(Session {
-            filesystem,
+            filesystem: Arc::new(filesystem),
             ch,
             mount: Arc::new(Mutex::new(Some((mountpoint.to_owned(), mount)))),
             allowed,
             session_owner: geteuid().as_raw(),
-            proto_major: 0,
-            proto_minor: 0,
-            initialized: false,
-            destroyed: false,
+            proto_major: AtomicU32::new(0),
+            proto_minor: AtomicU32::new(0),
+            initialized: AtomicBool::new(false),
+            destroyed: AtomicBool::new(false),
         })
     }
 
@@ -127,52 +135,65 @@ impl<FS: Filesystem> Session<FS> {
     pub fn from_fd(filesystem: FS, fd: OwnedFd, acl: SessionACL) -> Self {
         let ch = Channel::new(Arc::new(fd.into()));
         Session {
-            filesystem,
+            filesystem: Arc::new(filesystem),
             ch,
             mount: Arc::new(Mutex::new(None)),
             allowed: acl,
             session_owner: geteuid().as_raw(),
-            proto_major: 0,
-            proto_minor: 0,
-            initialized: false,
-            destroyed: false,
+            proto_major: AtomicU32::new(0),
+            proto_minor: AtomicU32::new(0),
+            initialized: AtomicBool::new(false),
+            destroyed: AtomicBool::new(false),
         }
     }
 
-    /// Run the session loop that receives kernel requests and dispatches them to method
-    /// calls into the filesystem. This read-dispatch-loop is non-concurrent to prevent
-    /// having multiple buffers (which take up much memory), but the filesystem methods
-    /// may run concurrent by spawning threads.
+    /// Run the async session loop that receives kernel requests and dispatches them
+    /// concurrently to the filesystem implementation.
+    ///
+    /// This uses a semaphore-based backpressure mechanism to limit concurrent requests
+    /// and prevent overwhelming the connection pool.
+    ///
     /// # Errors
     /// Returns any final error when the session comes to an end.
-    pub fn run(&mut self) -> io::Result<()> {
-        // Buffer for receiving requests from the kernel. Only one is allocated and
-        // it is reused immediately after dispatching to conserve memory and allocations.
-        let mut buffer = vec![0; BUFFER_SIZE];
-        let buf = aligned_sub_buf(&mut buffer, std::mem::align_of::<abi::fuse_in_header>());
+    pub async fn run(self: Arc<Self>) -> io::Result<()> {
+        // Create async channel for non-blocking I/O
+        let async_ch = self.ch.to_async()?;
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
+
         loop {
-            // Read the next request from the given channel to kernel driver
-            // The kernel driver makes sure that we get exactly one request per read
-            match self.ch.receive(buf) {
-                Ok(size) => match Request::new(self.ch.sender(), &buf[..size]) {
-                    // Dispatch request
-                    Some(req) => req.dispatch(self),
-                    // Quit loop on illegal request
-                    None => break,
-                },
+            // Read the next request from the kernel driver
+            let (size, buffer) = match async_ch.receive().await {
+                Ok(result) => result,
                 Err(err) => match err.raw_os_error() {
-                    Some(
-                          ENOENT // Operation interrupted. Accordingly to FUSE, this is safe to retry
-                        | EINTR // Interrupted system call, retry
-                        | EAGAIN // Explicitly instructed to try again
-                    ) => continue,
+                    Some(ENOENT | EINTR | EAGAIN) => continue,
                     Some(ENODEV) => break,
-                    // Unhandled error
                     _ => return Err(err),
                 },
-            }
+            };
+
+            // Acquire a permit for backpressure before spawning
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+
+            // Clone what we need for the spawned task
+            let session = self.clone();
+            let sender = async_ch.sender();
+
+            // Spawn an async task to handle this request
+            tokio::spawn(async move {
+                let _permit = permit; // Hold until complete
+                // Parse request with the owned buffer
+                if let Some(req) = Request::new(sender, &buffer[..size]) {
+                    req.dispatch_async(&session).await;
+                }
+            });
         }
+
         Ok(())
+    }
+
+    /// Create an Arc-wrapped session for async operation.
+    pub fn into_arc(self) -> Arc<Self> {
+        Arc::new(self)
     }
 
     /// Unmount the filesystem
@@ -225,9 +246,10 @@ impl<FS: 'static + Filesystem + Send> Session<FS> {
 
 impl<FS: Filesystem> Drop for Session<FS> {
     fn drop(&mut self) {
-        if !self.destroyed {
-            self.filesystem.destroy();
-            self.destroyed = true;
+        if !self.destroyed.load(Ordering::Acquire) {
+            // Note: We can't call async destroy() from drop, so filesystem cleanup
+            // should be handled explicitly before dropping the session.
+            self.destroyed.store(true, Ordering::Release);
         }
 
         if let Some((mountpoint, _mount)) = std::mem::take(&mut *self.mount.lock().unwrap()) {
@@ -239,8 +261,8 @@ impl<FS: Filesystem> Drop for Session<FS> {
 /// The background session data structure
 #[derive(Debug)]
 pub struct BackgroundSession {
-    /// Thread guard of the background session
-    pub guard: JoinHandle<io::Result<()>>,
+    /// Tokio task handle of the background session
+    pub guard: tokio::task::JoinHandle<io::Result<()>>,
     /// Object for creating Notifiers for client use
     sender: ChannelSender,
     /// Ensures the filesystem is unmounted when the session ends
@@ -249,15 +271,15 @@ pub struct BackgroundSession {
 
 impl BackgroundSession {
     /// Create a new background session for the given session by running its
-    /// session loop in a background thread. If the returned handle is dropped,
+    /// session loop as an async task. If the returned handle is dropped,
     /// the filesystem is unmounted and the given session ends.
     pub fn new<FS: Filesystem + Send + 'static>(se: Session<FS>) -> io::Result<BackgroundSession> {
         let sender = se.ch.sender();
         // Take the fuse_session, so that we can unmount it
         let mount = std::mem::take(&mut *se.mount.lock().unwrap()).map(|(_, mount)| mount);
-        let guard = thread::spawn(move || {
-            let mut se = se;
-            se.run()
+        let session = Arc::new(se);
+        let guard = tokio::spawn(async move {
+            session.run().await
         });
         Ok(BackgroundSession {
             guard,
@@ -265,17 +287,18 @@ impl BackgroundSession {
             _mount: mount,
         })
     }
-    /// Unmount the filesystem and join the background thread.
+
+    /// Unmount the filesystem and join the background task.
     /// # Panics
-    /// Panics if the background thread can't be recovered (e.g., because it panicked).
-    pub fn join(self) {
+    /// Panics if the background task can't be recovered (e.g., because it panicked).
+    pub async fn join(self) {
         let Self {
             guard,
             sender: _,
             _mount,
         } = self;
         drop(_mount);
-        guard.join().unwrap().unwrap();
+        guard.await.unwrap().unwrap();
     }
 
     /// Returns an object that can be used to send notifications to the kernel
