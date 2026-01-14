@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use async_trait::async_trait;
+
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -11,7 +12,7 @@ use super::{
     BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, DEFAULT_DIR_MODE,
     DEFAULT_FILE_MODE, S_IFLNK, S_IFMT, S_IFREG,
 };
-use crate::connection_pool::ConnectionPool;
+use crate::connection_pool::{ConnectionPool, PooledConnection};
 
 const ROOT_INO: i64 = 1;
 const DEFAULT_CHUNK_SIZE: usize = 4096;
@@ -89,23 +90,15 @@ impl File for AgentFSFile {
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let mut stmt = conn
-            .prepare_cached("SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index")
-            .await?;
-        let mut rows = stmt
-            .query((self.ino, start_chunk as i64, end_chunk as i64))
-            .await?;
+        let chunks =
+            read_chunks_from_fs_data(&conn, self.ino, start_chunk as i64, end_chunk as i64).await?;
 
         let mut result = Vec::with_capacity(size as usize);
         let start_offset_in_chunk = (offset % chunk_size) as usize;
         let mut next_expected_chunk = start_chunk;
 
-        while let Some(row) = rows.next().await? {
-            let chunk_index = row
-                .get_value(0)
-                .ok()
-                .and_then(|v| v.as_integer().copied())
-                .unwrap_or(0) as u64;
+        for (chunk_index, chunk_data) in chunks {
+            let chunk_index = chunk_index as u64;
 
             // Fill gaps with zeros for sparse files
             while next_expected_chunk < chunk_index && result.len() < size as usize {
@@ -120,7 +113,7 @@ impl File for AgentFSFile {
                 next_expected_chunk += 1;
             }
 
-            if let Ok(Value::Blob(chunk_data)) = row.get_value(1) {
+            {
                 let skip = if chunk_index == start_chunk {
                     start_offset_in_chunk
                 } else {
@@ -253,20 +246,18 @@ impl File for AgentFSFile {
                 // Truncate the last chunk if needed
                 let offset_in_chunk = (new_size % chunk_size) as usize;
                 if offset_in_chunk > 0 {
-                    let mut stmt = conn
-                        .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
-                        .await?;
-                    let mut rows = stmt.query((self.ino, last_chunk_idx as i64)).await?;
-
-                    if let Some(row) = rows.next().await? {
-                        if let Ok(Value::Blob(mut chunk_data)) = row.get_value(0) {
-                            if chunk_data.len() > offset_in_chunk {
-                                chunk_data.truncate(offset_in_chunk);
-                                let mut stmt = conn
-                                    .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
-                                    .await?;
-                                stmt.execute((Value::Blob(chunk_data), self.ino, last_chunk_idx as i64)).await?;
-                            }
+                    if let Some(mut chunk_data) =
+                        read_chunk_from_fs_data(&conn, self.ino, last_chunk_idx as i64).await?
+                    {
+                        if chunk_data.len() > offset_in_chunk {
+                            chunk_data.truncate(offset_in_chunk);
+                            update_chunk_in_fs_data(
+                                &conn,
+                                self.ino,
+                                last_chunk_idx as i64,
+                                &chunk_data,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -340,10 +331,6 @@ impl AgentFSFile {
             return Ok(());
         }
 
-        // get statements only once (in order to avoid heavy clone on every while iteration)
-        let mut select_stmt = conn
-            .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
-            .await?;
         let mut insert_stmt = conn
             .prepare_cached(
                 "INSERT OR REPLACE INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
@@ -362,23 +349,9 @@ impl AgentFSFile {
             let mut chunk_data;
             if to_write != chunk_size as usize {
                 // Get existing chunk data (if any)
-                let mut rows = select_stmt.query((self.ino, chunk_index)).await?;
-
-                chunk_data = if let Some(row) = rows.next().await? {
-                    row.get_value(0)
-                        .ok()
-                        .and_then(|v| {
-                            if let Value::Blob(b) = v {
-                                Some(b)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                select_stmt.reset()?;
+                chunk_data = read_chunk_from_fs_data(conn, self.ino, chunk_index)
+                    .await?
+                    .unwrap_or_default();
 
                 // Extend chunk if needed
                 if chunk_data.len() < offset_in_chunk + to_write {
@@ -392,9 +365,9 @@ impl AgentFSFile {
                 chunk_data = data[written..written + to_write].to_vec();
             }
 
-            // Save chunk
+            let compressed = compress_chunk(&chunk_data);
             insert_stmt
-                .execute((self.ino, chunk_index, Value::Blob(chunk_data)))
+                .execute((self.ino, chunk_index, Value::Blob(compressed)))
                 .await?;
             insert_stmt.reset()?;
 
@@ -1087,11 +1060,7 @@ impl AgentFS {
 
             // Write data in chunks
             for (chunk_index, chunk) in data.chunks(self.chunk_size).enumerate() {
-                conn.execute(
-                    "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                    (ino, chunk_index as i64, chunk),
-                )
-                .await?;
+                write_to_fs_data(&conn, ino, chunk_index as i64, chunk).await?;
             }
 
             // Update mode (to regular file), size and mtime
@@ -1214,18 +1183,12 @@ impl AgentFS {
             None => return Ok(None),
         };
 
-        let mut rows = conn
-            .query(
-                "SELECT data FROM fs_data WHERE ino = ? ORDER BY chunk_index",
-                (ino,),
-            )
-            .await?;
+        // Read all chunks (use a large range to get all)
+        let chunks = read_chunks_from_fs_data(&conn, ino, 0, i64::MAX).await?;
 
         let mut data = Vec::new();
-        while let Some(row) = rows.next().await? {
-            if let Ok(Value::Blob(chunk)) = row.get_value(0) {
-                data.extend_from_slice(&chunk);
-            }
+        for (_chunk_index, chunk) in chunks {
+            data.extend_from_slice(&chunk);
         }
 
         Ok(Some(data))
@@ -1249,30 +1212,24 @@ impl AgentFS {
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let mut rows = conn
-            .query(
-                "SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index",
-                (ino, start_chunk as i64, end_chunk as i64),
-            )
-            .await?;
+        let chunks =
+            read_chunks_from_fs_data(&conn, ino, start_chunk as i64, end_chunk as i64).await?;
 
         let mut result = Vec::with_capacity(size as usize);
         let start_offset_in_chunk = (offset % chunk_size) as usize;
 
-        while let Some(row) = rows.next().await? {
-            if let Ok(Value::Blob(chunk_data)) = row.get_value(1) {
-                let skip = if result.is_empty() {
-                    start_offset_in_chunk
-                } else {
-                    0
-                };
-                if skip >= chunk_data.len() {
-                    continue;
-                }
-                let remaining = size as usize - result.len();
-                let take = std::cmp::min(chunk_data.len() - skip, remaining);
-                result.extend_from_slice(&chunk_data[skip..skip + take]);
+        for (_chunk_index, chunk_data) in chunks {
+            let skip = if result.is_empty() {
+                start_offset_in_chunk
+            } else {
+                0
+            };
+            if skip >= chunk_data.len() {
+                continue;
             }
+            let remaining = size as usize - result.len();
+            let take = std::cmp::min(chunk_data.len() - skip, remaining);
+            result.extend_from_slice(&chunk_data[skip..skip + take]);
         }
 
         Ok(Some(result))
@@ -1407,20 +1364,12 @@ impl AgentFS {
                 // Read existing chunk if we need to preserve some data
                 let needs_read = data_start > 0 || data_end < chunk_size as usize;
                 let mut chunk_data = if needs_read {
-                    let mut rows = conn
-                        .query(
-                            "SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?",
-                            (ino, chunk_idx as i64),
-                        )
-                        .await?;
-                    if let Some(row) = rows.next().await? {
-                        if let Ok(Value::Blob(data)) = row.get_value(0) {
-                            let mut v = data.clone();
-                            v.resize(chunk_size as usize, 0);
-                            v
-                        } else {
-                            vec![0u8; chunk_size as usize]
-                        }
+                    if let Some(existing) =
+                        read_chunk_from_fs_data(&conn, ino, chunk_idx as i64).await?
+                    {
+                        let mut v = existing;
+                        v.resize(chunk_size as usize, 0);
+                        v
                     } else {
                         vec![0u8; chunk_size as usize]
                     }
@@ -1450,11 +1399,7 @@ impl AgentFS {
                     (ino, chunk_idx as i64),
                 )
                 .await?;
-                conn.execute(
-                    "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                    (ino, chunk_idx as i64, &chunk_data[..actual_len]),
-                )
-                .await?;
+                write_to_fs_data(&conn, ino, chunk_idx as i64, &chunk_data[..actual_len]).await?;
             }
 
             // Update size and mtime
@@ -1539,20 +1484,13 @@ impl AgentFS {
                 // If the last chunk needs to be truncated (not a full chunk),
                 // read it, truncate, and rewrite
                 if end_in_last_chunk < chunk_size {
-                    let mut stmt = conn
-                        .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
-                        .await?;
-                    let mut rows = stmt.query((ino, last_chunk_idx as i64)).await?;
-
-                    if let Some(row) = rows.next().await? {
-                        if let Ok(Value::Blob(chunk_data)) = row.get_value(0) {
-                            if chunk_data.len() > end_in_last_chunk as usize {
-                                let truncated = &chunk_data[..end_in_last_chunk as usize];
-                                let mut stmt = conn
-                                    .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
-                                    .await?;
-                                stmt.execute((truncated, ino, last_chunk_idx as i64)).await?;
-                            }
+                    if let Some(chunk_data) =
+                        read_chunk_from_fs_data(&conn, ino, last_chunk_idx as i64).await?
+                    {
+                        if chunk_data.len() > end_in_last_chunk as usize {
+                            let truncated = &chunk_data[..end_in_last_chunk as usize];
+                            update_chunk_in_fs_data(&conn, ino, last_chunk_idx as i64, truncated)
+                                .await?;
                         }
                     }
                 }
@@ -1567,30 +1505,22 @@ impl AgentFS {
 
                 // Pad the last existing chunk with zeros if it's not full
                 if let Some(last_idx) = last_existing_chunk {
-                    let mut stmt = conn
-                        .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
-                        .await?;
-                    let mut rows = stmt.query((ino, last_idx as i64)).await?;
+                    if let Some(chunk_data) =
+                        read_chunk_from_fs_data(&conn, ino, last_idx as i64).await?
+                    {
+                        let current_chunk_len = chunk_data.len();
+                        let needed_len = if last_idx == last_new_chunk {
+                            // Last existing chunk is also the last new chunk
+                            ((new_size - 1) % chunk_size + 1) as usize
+                        } else {
+                            // Need to fill this chunk completely
+                            chunk_size as usize
+                        };
 
-                    if let Some(row) = rows.next().await? {
-                        if let Ok(Value::Blob(chunk_data)) = row.get_value(0) {
-                            let current_chunk_len = chunk_data.len();
-                            let needed_len = if last_idx == last_new_chunk {
-                                // Last existing chunk is also the last new chunk
-                                ((new_size - 1) % chunk_size + 1) as usize
-                            } else {
-                                // Need to fill this chunk completely
-                                chunk_size as usize
-                            };
-
-                            if needed_len > current_chunk_len {
-                                let mut padded = chunk_data.clone();
-                                padded.resize(needed_len, 0);
-                                let mut stmt = conn
-                                    .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
-                                    .await?;
-                                stmt.execute((&padded[..], ino, last_idx as i64)).await?;
-                            }
+                        if needed_len > current_chunk_len {
+                            let mut padded = chunk_data;
+                            padded.resize(needed_len, 0);
+                            update_chunk_in_fs_data(&conn, ino, last_idx as i64, &padded).await?;
                         }
                     }
                 }
@@ -1604,11 +1534,7 @@ impl AgentFS {
                         chunk_size as usize
                     };
                     let zeros = vec![0u8; chunk_len];
-                    conn.execute(
-                        "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)",
-                        (ino, chunk_idx as i64, &zeros[..]),
-                    )
-                    .await?;
+                    write_to_fs_data(&conn, ino, chunk_idx as i64, &zeros[..]).await?;
                 }
             }
             // else: new_size == current_size, nothing to do for data
@@ -2455,6 +2381,112 @@ impl FileSystem for AgentFS {
     async fn create_file(&self, path: &str, mode: u32) -> Result<(Stats, BoxedFile)> {
         AgentFS::create_file(self, path, mode).await
     }
+}
+
+fn compress_chunk(data: &[u8]) -> Vec<u8> {
+    let res = zstd::encode_all(data, 3).unwrap();
+    res
+}
+
+fn decompress_chunk(data: &[u8]) -> Result<Vec<u8>> {
+    zstd::decode_all(data).map_err(|e| Error::Internal(format!("decompress error: {}", e)))
+}
+
+// Trait to abstract over Connection and PooledConnection
+trait ConnectionLike {
+    fn as_connection(&self) -> &Connection;
+}
+
+impl ConnectionLike for Connection {
+    fn as_connection(&self) -> &Connection {
+        self
+    }
+}
+
+impl ConnectionLike for PooledConnection {
+    fn as_connection(&self) -> &Connection {
+        self
+    }
+}
+
+async fn write_to_fs_data<C: ConnectionLike>(
+    conn: &C,
+    ino: i64,
+    chunk_index: i64,
+    chunk: &[u8],
+) -> Result<()> {
+    let compressed = compress_chunk(chunk);
+    let conn = conn.as_connection();
+    let mut write_stmt = conn
+        .prepare_cached("INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)")
+        .await?;
+    let _ = write_stmt
+        .execute((ino, chunk_index as i64, compressed))
+        .await?;
+    Ok(())
+}
+
+async fn update_chunk_in_fs_data<C: ConnectionLike>(
+    conn: &C,
+    ino: i64,
+    chunk_index: i64,
+    chunk: &[u8],
+) -> Result<()> {
+    let compressed = compress_chunk(chunk);
+    let conn = conn.as_connection();
+    let mut update_stmt = conn
+        .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
+        .await?;
+    update_stmt.execute((compressed, ino, chunk_index)).await?;
+    Ok(())
+}
+
+async fn read_chunk_from_fs_data<C: ConnectionLike>(
+    conn: &C,
+    ino: i64,
+    chunk_index: i64,
+) -> Result<Option<Vec<u8>>> {
+    let conn = conn.as_connection();
+    let mut read_stmt = conn
+        .prepare_cached("SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?")
+        .await?;
+    let mut rows = read_stmt.query((ino, chunk_index)).await?;
+
+    if let Some(row) = rows.next().await? {
+        if let Ok(Value::Blob(compressed_data)) = row.get_value(0) {
+            let decompressed = decompress_chunk(&compressed_data)?;
+            return Ok(Some(decompressed));
+        }
+    }
+    Ok(None)
+}
+
+async fn read_chunks_from_fs_data<C: ConnectionLike>(
+    conn: &C,
+    ino: i64,
+    start_chunk: i64,
+    end_chunk: i64,
+) -> Result<Vec<(i64, Vec<u8>)>> {
+    let conn = conn.as_connection();
+    let mut read_stmt = conn
+        .prepare_cached("SELECT chunk_index, data FROM fs_data WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ? ORDER BY chunk_index")
+        .await?;
+    let mut rows = read_stmt.query((ino, start_chunk, end_chunk)).await?;
+
+    let mut chunks = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let chunk_index = row
+            .get_value(0)
+            .ok()
+            .and_then(|v| v.as_integer().copied())
+            .unwrap_or(0);
+
+        if let Ok(Value::Blob(compressed_data)) = row.get_value(1) {
+            let decompressed = decompress_chunk(&compressed_data)?;
+            chunks.push((chunk_index, decompressed));
+        }
+    }
+    Ok(chunks)
 }
 
 #[cfg(test)]
