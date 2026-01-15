@@ -218,6 +218,40 @@ impl ReplyAttr {
 }
 
 ///
+/// Statx Reply (FUSE ABI 7.39+)
+///
+#[cfg(feature = "abi-7-39")]
+#[derive(Debug)]
+pub struct ReplyStatx {
+    reply: ReplyRaw,
+}
+
+#[cfg(feature = "abi-7-39")]
+impl Reply for ReplyStatx {
+    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyStatx {
+        ReplyStatx {
+            reply: Reply::new(unique, sender),
+        }
+    }
+}
+
+#[cfg(feature = "abi-7-39")]
+impl ReplyStatx {
+    /// Reply to a request with the given statx attributes.
+    /// The mask parameter indicates which fields were requested.
+    pub fn statx(self, ttl: &Duration, attr: &FileAttr, mask: u32) {
+        let statx_attr = ll::reply::StatxAttr::from_file_attr(attr, mask);
+        self.reply
+            .send_ll(&ll::Response::new_statx(ttl, &statx_attr));
+    }
+
+    /// Reply to a request with the given error code
+    pub fn error(self, err: c_int) {
+        self.reply.error(err);
+    }
+}
+
+///
 /// XTimes Reply
 ///
 #[cfg(target_os = "macos")]

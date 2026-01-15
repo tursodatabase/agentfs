@@ -220,6 +220,38 @@ pub mod consts {
 
     // The read buffer is required to be at least 8k, but may be much larger
     pub const FUSE_MIN_READ_BUFFER: usize = 8192;
+
+    // statx mask flags (FUSE ABI 7.39+)
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_TYPE: u32 = 0x00000001;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_MODE: u32 = 0x00000002;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_NLINK: u32 = 0x00000004;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_UID: u32 = 0x00000008;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_GID: u32 = 0x00000010;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_ATIME: u32 = 0x00000020;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_MTIME: u32 = 0x00000040;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_CTIME: u32 = 0x00000080;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_INO: u32 = 0x00000100;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_SIZE: u32 = 0x00000200;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_BLOCKS: u32 = 0x00000400;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_BASIC_STATS: u32 = 0x000007ff;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_BTIME: u32 = 0x00000800;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_MNT_ID: u32 = 0x00001000;
+    #[cfg(feature = "abi-7-39")]
+    pub const STATX_ALL: u32 = 0x00000fff;
 }
 
 /// Invalid opcode error.
@@ -280,6 +312,8 @@ pub enum fuse_opcode {
     FUSE_LSEEK = 46,
     #[cfg(feature = "abi-7-28")]
     FUSE_COPY_FILE_RANGE = 47,
+    #[cfg(feature = "abi-7-39")]
+    FUSE_STATX = 52,
 
     #[cfg(target_os = "macos")]
     FUSE_SETVOLNAME = 61,
@@ -346,6 +380,8 @@ impl TryFrom<u32> for fuse_opcode {
             46 => Ok(fuse_opcode::FUSE_LSEEK),
             #[cfg(feature = "abi-7-28")]
             47 => Ok(fuse_opcode::FUSE_COPY_FILE_RANGE),
+            #[cfg(feature = "abi-7-39")]
+            52 => Ok(fuse_opcode::FUSE_STATX),
 
             #[cfg(target_os = "macos")]
             61 => Ok(fuse_opcode::FUSE_SETVOLNAME),
@@ -998,4 +1034,66 @@ pub struct fuse_copy_file_range_in {
     pub off_out: i64,
     pub len: u64,
     pub flags: u64,
+}
+
+/// Statx input structure (FUSE ABI 7.39+)
+#[cfg(feature = "abi-7-39")]
+#[repr(C)]
+#[derive(Debug, FromBytes, KnownLayout, Immutable)]
+pub struct fuse_statx_in {
+    pub getattr_flags: u32,
+    pub reserved: u32,
+    pub fh: u64,
+    pub sx_flags: u32,
+    pub sx_mask: u32,
+}
+
+/// Statx time structure - bit-for-bit compatible with statx(2) ABI
+#[cfg(feature = "abi-7-39")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, IntoBytes, FromBytes, KnownLayout, Immutable)]
+pub struct fuse_sx_time {
+    pub tv_sec: i64,
+    pub tv_nsec: u32,
+    pub __reserved: i32,
+}
+
+/// Statx structure - bit-for-bit compatible with statx(2) ABI
+#[cfg(feature = "abi-7-39")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, IntoBytes, FromBytes, KnownLayout, Immutable)]
+pub struct fuse_statx {
+    pub mask: u32,
+    pub blksize: u32,
+    pub attributes: u64,
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
+    pub __spare0: [u16; 1],
+    pub ino: u64,
+    pub size: u64,
+    pub blocks: u64,
+    pub attributes_mask: u64,
+    pub atime: fuse_sx_time,
+    pub btime: fuse_sx_time,
+    pub ctime: fuse_sx_time,
+    pub mtime: fuse_sx_time,
+    pub rdev_major: u32,
+    pub rdev_minor: u32,
+    pub dev_major: u32,
+    pub dev_minor: u32,
+    pub __spare2: [u64; 14],
+}
+
+/// Statx output structure (FUSE ABI 7.39+)
+#[cfg(feature = "abi-7-39")]
+#[repr(C)]
+#[derive(Debug, IntoBytes, KnownLayout, Immutable)]
+pub struct fuse_statx_out {
+    pub attr_valid: u64,
+    pub attr_valid_nsec: u32,
+    pub flags: u32,
+    pub spare: [u64; 2],
+    pub stat: fuse_statx,
 }
