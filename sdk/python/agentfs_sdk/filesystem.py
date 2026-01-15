@@ -168,6 +168,19 @@ class Filesystem:
         else:
             chunk_size = int(config[0]) if config[0] else DEFAULT_CHUNK_SIZE
 
+        # Check compression mode - Python SDK only supports 'none' for now
+        cursor = await self._db.execute("SELECT value FROM fs_config WHERE key = 'compression'")
+        compression_config = await cursor.fetchone()
+
+        if compression_config:
+            compression_mode = compression_config[0]
+            if compression_mode != "none":
+                raise RuntimeError(
+                    f"Python SDK does not support compression mode '{compression_mode}'. "
+                    "Only 'none' is supported. Please use the Rust CLI or SDK to access "
+                    "databases with compression enabled."
+                )
+
         # Ensure root directory exists
         cursor = await self._db.execute("SELECT ino FROM fs_inode WHERE ino = ?", (self._root_ino,))
         root = await cursor.fetchone()

@@ -303,6 +303,18 @@ export class AgentFS implements FileSystem {
     }
 
     const stmt = this.db.prepare('SELECT ino FROM fs_inode WHERE ino = ?');
+
+    // Check compression mode - TypeScript SDK only supports 'none' for now
+    const compressionStmt = this.db.prepare("SELECT value FROM fs_config WHERE key = 'compression'");
+    const compressionConfig = await compressionStmt.get() as { value: string } | undefined;
+    
+    if (compressionConfig && compressionConfig.value !== 'none') {
+      throw new Error(
+        `TypeScript SDK does not support compression mode '${compressionConfig.value}'. ` +
+        "Only 'none' is supported. Please use the Rust CLI or SDK to access " +
+        "databases with compression enabled."
+      );
+    }
     const root = await stmt.get(this.rootIno);
 
     if (!root) {

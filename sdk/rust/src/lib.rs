@@ -18,8 +18,8 @@ pub use turso::sync::{DatabaseSyncStats, PartialBootstrapStrategy, PartialSyncOp
 #[cfg(unix)]
 pub use filesystem::HostFS;
 pub use filesystem::{
-    BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, OverlayFS, Stats,
-    DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG,
+    agentfs::CompressionMode, BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError,
+    OverlayFS, Stats, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG,
 };
 pub use kvstore::KvStore;
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
@@ -88,7 +88,7 @@ pub struct SyncOptions {
 }
 
 /// Configuration options for opening an AgentFS instance
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AgentFSOptions {
     /// Optional unique identifier for the agent.
     /// - If Some(id): Creates persistent storage at `.agentfs/{id}.db`
@@ -102,6 +102,21 @@ pub struct AgentFSOptions {
     pub base: Option<PathBuf>,
     /// Sync options for remote database synchronization
     pub sync: SyncOptions,
+    /// Compression mode for filesystem data chunks.
+    /// Defaults to Zstd compression if not specified.
+    pub compression: CompressionMode,
+}
+
+impl Default for AgentFSOptions {
+    fn default() -> Self {
+        Self {
+            id: None,
+            path: None,
+            base: None,
+            sync: SyncOptions::default(),
+            compression: CompressionMode::default(),
+        }
+    }
 }
 
 impl AgentFSOptions {
@@ -142,6 +157,7 @@ impl AgentFSOptions {
             path: None,
             base: None,
             sync: SyncOptions::default(),
+            compression: CompressionMode::default(),
         }
     }
 
@@ -152,6 +168,7 @@ impl AgentFSOptions {
             path: None,
             base: None,
             sync: SyncOptions::default(),
+            compression: CompressionMode::default(),
         }
     }
 
@@ -162,6 +179,7 @@ impl AgentFSOptions {
             path: Some(path.into()),
             base: None,
             sync: SyncOptions::default(),
+            compression: CompressionMode::default(),
         }
     }
 
@@ -174,6 +192,12 @@ impl AgentFSOptions {
     /// Set the base directory for overlay filesystem (copy-on-write)
     pub fn with_base(mut self, base: impl Into<PathBuf>) -> Self {
         self.base = Some(base.into());
+        self
+    }
+
+    /// Set the compression mode for filesystem data chunks
+    pub fn with_compression(mut self, compression: CompressionMode) -> Self {
+        self.compression = compression;
         self
     }
 
@@ -307,16 +331,17 @@ impl AgentFS {
             OverlayFS::init_schema(&conn, &base_path_str).await?;
         }
 
-        Self::open_with_pool(pool, sync_db).await
+        Self::open_with_pool(pool, sync_db, options.compression).await
     }
 
     /// Open an AgentFS instance from a connection pool
     pub async fn open_with_pool(
         pool: connection_pool::ConnectionPool,
         sync_db: Option<turso::sync::Database>,
+        compression: CompressionMode,
     ) -> Result<Self> {
         let kv = KvStore::from_pool(pool.clone()).await?;
-        let fs = filesystem::AgentFS::from_pool(pool.clone()).await?;
+        let fs = filesystem::AgentFS::from_pool(pool.clone(), compression).await?;
         let tools = ToolCalls::from_pool(pool.clone()).await?;
 
         Ok(Self {
@@ -331,7 +356,7 @@ impl AgentFS {
     /// Open an AgentFS instance from a sync database
     pub async fn open_with_sync_db(db: turso::sync::Database) -> Result<Self> {
         let pool = connection_pool::ConnectionPool::new_sync(db.clone());
-        Self::open_with_pool(pool, Some(db)).await
+        Self::open_with_pool(pool, Some(db), CompressionMode::default()).await
     }
 
     /// Create a new AgentFS instance (deprecated, use `open` instead)
@@ -345,7 +370,7 @@ impl AgentFS {
     pub async fn new(db_path: &str) -> Result<Self> {
         let db = Builder::new_local(db_path).build().await?;
         let pool = connection_pool::ConnectionPool::new(db);
-        Self::open_with_pool(pool, None).await
+        Self::open_with_pool(pool, None, CompressionMode::default()).await
     }
 
     /// Get a connection from the pool
