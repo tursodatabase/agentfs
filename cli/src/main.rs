@@ -26,10 +26,13 @@ fn main() {
             id,
             force,
             base,
+            compression,
             sync,
         } => {
             let rt = get_runtime();
-            if let Err(e) = rt.block_on(cmd::init::init_database(id, sync, force, base)) {
+            if let Err(e) =
+                rt.block_on(cmd::init::init_database(id, sync, force, base, compression))
+            {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -76,6 +79,7 @@ fn main() {
             experimental_sandbox,
             strace,
             session,
+            compression,
             command,
             args,
         } => {
@@ -87,6 +91,7 @@ fn main() {
                 experimental_sandbox,
                 strace,
                 session,
+                compression,
                 command,
                 args,
             )) {

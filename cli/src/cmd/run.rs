@@ -23,6 +23,7 @@ pub async fn handle_run_command(
     experimental_sandbox: bool,
     strace: bool,
     session: Option<String>,
+    compression: String,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
@@ -32,6 +33,7 @@ pub async fn handle_run_command(
         experimental_sandbox,
         strace,
         session,
+        compression,
         command,
         args,
     )

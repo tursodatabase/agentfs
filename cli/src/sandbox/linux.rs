@@ -145,6 +145,7 @@ pub async fn run_cmd(
     allow: Vec<PathBuf>,
     no_default_allows: bool,
     session_id: Option<String>,
+    compression: String,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
@@ -183,9 +184,20 @@ pub async fn run_cmd(
         .db_path
         .to_str()
         .context("Database path contains non-UTF8 characters")?;
-    let agentfs = AgentFS::open(AgentFSOptions::with_path(db_path_str))
-        .await
-        .context("Failed to create delta AgentFS")?;
+
+    // Parse compression mode
+    let compression_mode =
+        agentfs_sdk::CompressionMode::from_str(&compression).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid compression mode '{}'. Must be 'zstd' or 'none'",
+                compression
+            )
+        })?;
+
+    let agentfs =
+        AgentFS::open(AgentFSOptions::with_path(db_path_str).with_compression(compression_mode))
+            .await
+            .context("Failed to create delta AgentFS")?;
 
     let hostfs = HostFS::new(&fd_path).context("Failed to create HostFS")?;
     #[cfg(target_family = "unix")]

@@ -13,6 +13,7 @@ pub async fn run(
     experimental_sandbox: bool,
     strace: bool,
     session: Option<String>,
+    compression: String,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
@@ -28,7 +29,15 @@ pub async fn run(
         if strace {
             eprintln!("Warning: --strace is only supported with --experimental-sandbox, ignoring");
         }
-        crate::sandbox::linux::run_cmd(allow, no_default_allows, session, command, args).await?;
+        crate::sandbox::linux::run_cmd(
+            allow,
+            no_default_allows,
+            session,
+            compression,
+            command,
+            args,
+        )
+        .await?;
     }
     Ok(())
 }

@@ -9,7 +9,7 @@
 
 #![cfg(unix)]
 
-use agentfs_sdk::{AgentFS, AgentFSOptions, FileSystem, HostFS, OverlayFS};
+use agentfs_sdk::{AgentFS, AgentFSOptions, CompressionMode, FileSystem, HostFS, OverlayFS};
 use anyhow::{Context, Result};
 use nfsserve::tcp::NFSTcp;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ pub async fn run(
     _experimental_sandbox: bool,
     _strace: bool,
     session_id: Option<String>,
+    compression: String,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
@@ -61,9 +62,17 @@ pub async fn run(
         .to_str()
         .context("Database path contains non-UTF8 characters")?;
 
-    let agentfs = AgentFS::open(AgentFSOptions::with_path(db_path_str))
-        .await
-        .context("Failed to create AgentFS")?;
+    let compression_mode = CompressionMode::from_str(&compression).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid compression mode '{}'. Must be 'zstd' or 'none'",
+            compression
+        )
+    })?;
+
+    let agentfs =
+        AgentFS::open(AgentFSOptions::with_path(db_path_str).with_compression(compression_mode))
+            .await
+            .context("Failed to create AgentFS")?;
 
     // Create overlay filesystem with CWD as base
     let base_str = cwd.to_string_lossy().to_string();

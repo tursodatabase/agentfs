@@ -18,6 +18,40 @@ const ROOT_INO: i64 = 1;
 const DEFAULT_CHUNK_SIZE: usize = 4096;
 const DENTRY_CACHE_MAX_SIZE: usize = 10000;
 
+/// Compression mode for filesystem data
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionMode {
+    /// No compression
+    None,
+    /// Zstd compression
+    Zstd,
+}
+
+impl CompressionMode {
+    /// Parse compression mode from string
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "zstd" => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+
+    /// Convert compression mode to string
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
+impl Default for CompressionMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// LRU cache for directory entry lookups.
 ///
 /// Maps (parent_ino, name) -> child_ino to avoid repeated database queries
@@ -70,6 +104,8 @@ pub struct AgentFS {
     chunk_size: usize,
     /// Cache for directory entry lookups (shared across clones)
     dentry_cache: Arc<DentryCache>,
+    /// Compression mode for data chunks
+    compression: CompressionMode,
 }
 
 /// An open file handle for AgentFS.
@@ -80,6 +116,7 @@ pub struct AgentFSFile {
     pool: ConnectionPool,
     ino: i64,
     chunk_size: usize,
+    compression: CompressionMode,
 }
 
 #[async_trait]
@@ -90,8 +127,14 @@ impl File for AgentFSFile {
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let chunks =
-            read_chunks_from_fs_data(&conn, self.ino, start_chunk as i64, end_chunk as i64).await?;
+        let chunks = read_chunks_from_fs_data(
+            &conn,
+            self.ino,
+            start_chunk as i64,
+            end_chunk as i64,
+            self.compression,
+        )
+        .await?;
 
         let mut result = Vec::with_capacity(size as usize);
         let start_offset_in_chunk = (offset % chunk_size) as usize;
@@ -246,8 +289,13 @@ impl File for AgentFSFile {
                 // Truncate the last chunk if needed
                 let offset_in_chunk = (new_size % chunk_size) as usize;
                 if offset_in_chunk > 0 {
-                    if let Some(mut chunk_data) =
-                        read_chunk_from_fs_data(&conn, self.ino, last_chunk_idx as i64).await?
+                    if let Some(mut chunk_data) = read_chunk_from_fs_data(
+                        &conn,
+                        self.ino,
+                        last_chunk_idx as i64,
+                        self.compression,
+                    )
+                    .await?
                     {
                         if chunk_data.len() > offset_in_chunk {
                             chunk_data.truncate(offset_in_chunk);
@@ -256,6 +304,7 @@ impl File for AgentFSFile {
                                 self.ino,
                                 last_chunk_idx as i64,
                                 &chunk_data,
+                                self.compression,
                             )
                             .await?;
                         }
@@ -349,7 +398,7 @@ impl AgentFSFile {
             let mut chunk_data;
             if to_write != chunk_size as usize {
                 // Get existing chunk data (if any)
-                chunk_data = read_chunk_from_fs_data(conn, self.ino, chunk_index)
+                chunk_data = read_chunk_from_fs_data(conn, self.ino, chunk_index, self.compression)
                     .await?
                     .unwrap_or_default();
 
@@ -365,7 +414,7 @@ impl AgentFSFile {
                 chunk_data = data[written..written + to_write].to_vec();
             }
 
-            let compressed = compress_chunk(&chunk_data);
+            let compressed = compress_chunk(&chunk_data, self.compression);
             insert_stmt
                 .execute((self.ino, chunk_index, Value::Blob(compressed)))
                 .await?;
@@ -379,18 +428,35 @@ impl AgentFSFile {
 }
 
 impl AgentFS {
-    /// Create a new filesystem
-    pub async fn new(db_path: &str) -> Result<Self> {
+    /// Create a new filesystem with specified compression mode
+    pub async fn new(db_path: &str, compression: CompressionMode) -> Result<Self> {
         let db = Builder::new_local(db_path).build().await?;
-        Self::from_pool(ConnectionPool::new(db)).await
+        Self::from_pool(ConnectionPool::new(db), compression).await
     }
 
-    /// Create a filesystem from a connection pool
-    pub async fn from_pool(pool: ConnectionPool) -> Result<Self> {
+    /// Create a filesystem from a connection pool with specified compression mode.
+    ///
+    /// If the database is new (schema doesn't exist), it will be initialized with the
+    /// specified compression mode. If the database already exists, the compression mode
+    /// will be read from the stored config and validated against the requested mode.
+    pub async fn from_pool(pool: ConnectionPool, compression: CompressionMode) -> Result<Self> {
         let conn = pool.get_connection().await?;
 
-        // Initialize schema first
-        Self::initialize_schema(&conn).await?;
+        // Check if database already has schema by checking if fs_config table exists
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='fs_config'",
+                (),
+            )
+            .await?;
+        let db_exists = rows.next().await?.is_some();
+
+        if !db_exists {
+            // New database - initialize schema with requested compression
+            Self::initialize_schema(&conn, compression).await?;
+        }
+        // For existing databases, we'll read compression from the stored config below
+        // (ignoring the requested compression parameter)
 
         // Disable synchronous mode for filesystem fsync() semantics.
         conn.execute("PRAGMA synchronous = OFF", ()).await?;
@@ -402,10 +468,14 @@ impl AgentFS {
         // Get chunk_size from config (or use default)
         let chunk_size = Self::read_chunk_size(&conn).await?;
 
+        // Get the actual compression from the database (whether newly created or existing)
+        let compression = Self::read_compression(&conn).await?;
+
         let fs = Self {
             pool,
             chunk_size,
             dentry_cache: Arc::new(DentryCache::new(DENTRY_CACHE_MAX_SIZE)),
+            compression,
         };
         Ok(fs)
     }
@@ -425,8 +495,8 @@ impl AgentFS {
         self.pool.clone()
     }
 
-    /// Initialize the database schema
-    pub async fn initialize_schema(conn: &Connection) -> Result<()> {
+    /// Initialize the database schema with specified compression mode
+    pub async fn initialize_schema(conn: &Connection, compression: CompressionMode) -> Result<()> {
         // Create config table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS fs_config (
@@ -510,6 +580,19 @@ impl AgentFS {
             .await?;
         }
 
+        // Ensure compression config exists
+        let mut rows = conn
+            .query("SELECT value FROM fs_config WHERE key = 'compression'", ())
+            .await?;
+
+        if rows.next().await?.is_none() {
+            conn.execute(
+                "INSERT INTO fs_config (key, value) VALUES ('compression', ?)",
+                (compression.as_str(),),
+            )
+            .await?;
+        }
+
         // Ensure root directory exists
         let mut rows = conn
             .query("SELECT ino FROM fs_inode WHERE ino = ?", (ROOT_INO,))
@@ -547,6 +630,27 @@ impl AgentFS {
             Ok(value)
         } else {
             Ok(DEFAULT_CHUNK_SIZE)
+        }
+    }
+
+    /// Read compression mode from config
+    async fn read_compression(conn: &Connection) -> Result<CompressionMode> {
+        let mut rows = conn
+            .query("SELECT value FROM fs_config WHERE key = 'compression'", ())
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            let value = row
+                .get_value(0)
+                .ok()
+                .and_then(|v| match v {
+                    Value::Text(s) => CompressionMode::from_str(&s),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Ok(value)
+        } else {
+            Ok(CompressionMode::default())
         }
     }
 
@@ -1060,7 +1164,7 @@ impl AgentFS {
 
             // Write data in chunks
             for (chunk_index, chunk) in data.chunks(self.chunk_size).enumerate() {
-                write_to_fs_data(&conn, ino, chunk_index as i64, chunk).await?;
+                write_to_fs_data(&conn, ino, chunk_index as i64, chunk, self.compression).await?;
             }
 
             // Update mode (to regular file), size and mtime
@@ -1170,6 +1274,7 @@ impl AgentFS {
             pool: self.pool.clone(),
             ino,
             chunk_size: self.chunk_size,
+            compression: self.compression,
         });
 
         Ok((stats, file))
@@ -1184,7 +1289,7 @@ impl AgentFS {
         };
 
         // Read all chunks (use a large range to get all)
-        let chunks = read_chunks_from_fs_data(&conn, ino, 0, i64::MAX).await?;
+        let chunks = read_chunks_from_fs_data(&conn, ino, 0, i64::MAX, self.compression).await?;
 
         let mut data = Vec::new();
         for (_chunk_index, chunk) in chunks {
@@ -1212,8 +1317,14 @@ impl AgentFS {
         let start_chunk = offset / chunk_size;
         let end_chunk = (offset + size).saturating_sub(1) / chunk_size;
 
-        let chunks =
-            read_chunks_from_fs_data(&conn, ino, start_chunk as i64, end_chunk as i64).await?;
+        let chunks = read_chunks_from_fs_data(
+            &conn,
+            ino,
+            start_chunk as i64,
+            end_chunk as i64,
+            self.compression,
+        )
+        .await?;
 
         let mut result = Vec::with_capacity(size as usize);
         let start_offset_in_chunk = (offset % chunk_size) as usize;
@@ -1365,7 +1476,8 @@ impl AgentFS {
                 let needs_read = data_start > 0 || data_end < chunk_size as usize;
                 let mut chunk_data = if needs_read {
                     if let Some(existing) =
-                        read_chunk_from_fs_data(&conn, ino, chunk_idx as i64).await?
+                        read_chunk_from_fs_data(&conn, ino, chunk_idx as i64, self.compression)
+                            .await?
                     {
                         let mut v = existing;
                         v.resize(chunk_size as usize, 0);
@@ -1399,7 +1511,14 @@ impl AgentFS {
                     (ino, chunk_idx as i64),
                 )
                 .await?;
-                write_to_fs_data(&conn, ino, chunk_idx as i64, &chunk_data[..actual_len]).await?;
+                write_to_fs_data(
+                    &conn,
+                    ino,
+                    chunk_idx as i64,
+                    &chunk_data[..actual_len],
+                    self.compression,
+                )
+                .await?;
             }
 
             // Update size and mtime
@@ -1485,12 +1604,19 @@ impl AgentFS {
                 // read it, truncate, and rewrite
                 if end_in_last_chunk < chunk_size {
                     if let Some(chunk_data) =
-                        read_chunk_from_fs_data(&conn, ino, last_chunk_idx as i64).await?
+                        read_chunk_from_fs_data(&conn, ino, last_chunk_idx as i64, self.compression)
+                            .await?
                     {
                         if chunk_data.len() > end_in_last_chunk as usize {
                             let truncated = &chunk_data[..end_in_last_chunk as usize];
-                            update_chunk_in_fs_data(&conn, ino, last_chunk_idx as i64, truncated)
-                                .await?;
+                            update_chunk_in_fs_data(
+                                &conn,
+                                ino,
+                                last_chunk_idx as i64,
+                                truncated,
+                                self.compression,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -1506,7 +1632,8 @@ impl AgentFS {
                 // Pad the last existing chunk with zeros if it's not full
                 if let Some(last_idx) = last_existing_chunk {
                     if let Some(chunk_data) =
-                        read_chunk_from_fs_data(&conn, ino, last_idx as i64).await?
+                        read_chunk_from_fs_data(&conn, ino, last_idx as i64, self.compression)
+                            .await?
                     {
                         let current_chunk_len = chunk_data.len();
                         let needed_len = if last_idx == last_new_chunk {
@@ -1520,7 +1647,14 @@ impl AgentFS {
                         if needed_len > current_chunk_len {
                             let mut padded = chunk_data;
                             padded.resize(needed_len, 0);
-                            update_chunk_in_fs_data(&conn, ino, last_idx as i64, &padded).await?;
+                            update_chunk_in_fs_data(
+                                &conn,
+                                ino,
+                                last_idx as i64,
+                                &padded,
+                                self.compression,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -1534,7 +1668,8 @@ impl AgentFS {
                         chunk_size as usize
                     };
                     let zeros = vec![0u8; chunk_len];
-                    write_to_fs_data(&conn, ino, chunk_idx as i64, &zeros[..]).await?;
+                    write_to_fs_data(&conn, ino, chunk_idx as i64, &zeros[..], self.compression)
+                        .await?;
                 }
             }
             // else: new_size == current_size, nothing to do for data
@@ -2293,6 +2428,7 @@ impl AgentFS {
             pool: self.pool.clone(),
             ino,
             chunk_size: self.chunk_size,
+            compression: self.compression,
         }))
     }
 
@@ -2383,13 +2519,20 @@ impl FileSystem for AgentFS {
     }
 }
 
-fn compress_chunk(data: &[u8]) -> Vec<u8> {
-    let res = zstd::encode_all(data, 3).unwrap();
-    res
+fn compress_chunk(data: &[u8], compression: CompressionMode) -> Vec<u8> {
+    match compression {
+        CompressionMode::None => data.to_vec(),
+        CompressionMode::Zstd => zstd::encode_all(data, 3).unwrap(),
+    }
 }
 
-fn decompress_chunk(data: &[u8]) -> Result<Vec<u8>> {
-    zstd::decode_all(data).map_err(|e| Error::Internal(format!("decompress error: {}", e)))
+fn decompress_chunk(data: &[u8], compression: CompressionMode) -> Result<Vec<u8>> {
+    match compression {
+        CompressionMode::None => Ok(data.to_vec()),
+        CompressionMode::Zstd => {
+            zstd::decode_all(data).map_err(|e| Error::Internal(format!("decompress error: {}", e)))
+        }
+    }
 }
 
 // Trait to abstract over Connection and PooledConnection
@@ -2414,8 +2557,9 @@ async fn write_to_fs_data<C: ConnectionLike>(
     ino: i64,
     chunk_index: i64,
     chunk: &[u8],
+    compression: CompressionMode,
 ) -> Result<()> {
-    let compressed = compress_chunk(chunk);
+    let compressed = compress_chunk(chunk, compression);
     let conn = conn.as_connection();
     let mut write_stmt = conn
         .prepare_cached("INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)")
@@ -2431,8 +2575,9 @@ async fn update_chunk_in_fs_data<C: ConnectionLike>(
     ino: i64,
     chunk_index: i64,
     chunk: &[u8],
+    compression: CompressionMode,
 ) -> Result<()> {
-    let compressed = compress_chunk(chunk);
+    let compressed = compress_chunk(chunk, compression);
     let conn = conn.as_connection();
     let mut update_stmt = conn
         .prepare_cached("UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?")
@@ -2445,6 +2590,7 @@ async fn read_chunk_from_fs_data<C: ConnectionLike>(
     conn: &C,
     ino: i64,
     chunk_index: i64,
+    compression: CompressionMode,
 ) -> Result<Option<Vec<u8>>> {
     let conn = conn.as_connection();
     let mut read_stmt = conn
@@ -2454,7 +2600,7 @@ async fn read_chunk_from_fs_data<C: ConnectionLike>(
 
     if let Some(row) = rows.next().await? {
         if let Ok(Value::Blob(compressed_data)) = row.get_value(0) {
-            let decompressed = decompress_chunk(&compressed_data)?;
+            let decompressed = decompress_chunk(&compressed_data, compression)?;
             return Ok(Some(decompressed));
         }
     }
@@ -2466,6 +2612,7 @@ async fn read_chunks_from_fs_data<C: ConnectionLike>(
     ino: i64,
     start_chunk: i64,
     end_chunk: i64,
+    compression: CompressionMode,
 ) -> Result<Vec<(i64, Vec<u8>)>> {
     let conn = conn.as_connection();
     let mut read_stmt = conn
@@ -2482,7 +2629,7 @@ async fn read_chunks_from_fs_data<C: ConnectionLike>(
             .unwrap_or(0);
 
         if let Ok(Value::Blob(compressed_data)) = row.get_value(1) {
-            let decompressed = decompress_chunk(&compressed_data)?;
+            let decompressed = decompress_chunk(&compressed_data, compression)?;
             chunks.push((chunk_index, decompressed));
         }
     }
@@ -2497,7 +2644,7 @@ mod tests {
     async fn create_test_fs() -> Result<(AgentFS, tempfile::TempDir)> {
         let dir = tempdir()?;
         let db_path = dir.path().join("test.db");
-        let fs = AgentFS::new(db_path.to_str().unwrap()).await?;
+        let fs = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::default()).await?;
         Ok((fs, dir))
     }
 
@@ -3595,6 +3742,272 @@ mod tests {
 
         let stats = fs.lstat("/link.txt").await?.unwrap();
         assert!(stats.is_symlink(), "Should still be a symlink");
+
+        Ok(())
+    }
+
+    // ==================== Compression Tests ====================
+
+    #[tokio::test]
+    async fn test_compression_mode_zstd() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test_zstd.db");
+        let fs = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::Zstd).await?;
+
+        // Write a file with repetitive data (highly compressible)
+        let chunk_size = fs.chunk_size();
+        let data = vec![0xAB; chunk_size * 2]; // Repetitive pattern
+        fs.write_file("/compressible.bin", &data).await?;
+
+        // Read it back and verify
+        let read_data = fs.read_file("/compressible.bin").await?.unwrap();
+        assert_eq!(read_data, data, "Data mismatch with zstd compression");
+
+        // Verify compression mode is stored in fs_config
+        let pooled_conn = fs.pool.get_connection().await?;
+        let conn = pooled_conn.connection();
+        let mut stmt = conn
+            .prepare("SELECT value FROM fs_config WHERE key = 'compression'")
+            .await?;
+        let mut rows = stmt.query(()).await?;
+        let row = rows.next().await?.expect("compression config not found");
+        let compression_value: String = row.get(0)?;
+        assert_eq!(
+            compression_value, "zstd",
+            "Compression mode not stored correctly"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_mode_none() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test_none.db");
+        let fs = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::None).await?;
+
+        // Write a file with random data
+        let chunk_size = fs.chunk_size();
+        let data: Vec<u8> = (0..chunk_size * 2).map(|i| (i % 256) as u8).collect();
+        fs.write_file("/uncompressed.bin", &data).await?;
+
+        // Read it back and verify
+        let read_data = fs.read_file("/uncompressed.bin").await?.unwrap();
+        assert_eq!(read_data, data, "Data mismatch with no compression");
+
+        // Verify compression mode is stored in fs_config
+        let pooled_conn = fs.pool.get_connection().await?;
+        let conn = pooled_conn.connection();
+        let mut stmt = conn
+            .prepare("SELECT value FROM fs_config WHERE key = 'compression'")
+            .await?;
+        let mut rows = stmt.query(()).await?;
+        let row = rows.next().await?.expect("compression config not found");
+        let compression_value: String = row.get(0)?;
+        assert_eq!(
+            compression_value, "none",
+            "Compression mode not stored correctly"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_mode_from_pool_new_database() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test_from_pool_new.db");
+
+        // Create new database with None compression using AgentFS::new
+        let fs = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::None).await?;
+
+        // Write some data
+        let data = b"test data for from_pool";
+        fs.write_file("/test.txt", data).await?;
+
+        // Verify compression mode
+        {
+            let pooled_conn = fs.pool.get_connection().await?;
+            let conn = pooled_conn.connection();
+            let mut stmt = conn
+                .prepare("SELECT value FROM fs_config WHERE key = 'compression'")
+                .await?;
+            let mut rows = stmt.query(()).await?;
+            let row = rows.next().await?.expect("compression config not found");
+            let compression_value: String = row.get(0)?;
+            assert_eq!(
+                compression_value, "none",
+                "New database should use specified compression"
+            );
+        }
+
+        // Read data back
+        let read_data = fs.read_file("/test.txt").await?.unwrap();
+        assert_eq!(read_data, data, "Data mismatch");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_mode_from_pool_existing_database() -> Result<()> {
+        use turso::Builder;
+
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test_from_pool_existing.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        // Create database with Zstd compression
+        {
+            let fs = AgentFS::new(db_path_str, CompressionMode::Zstd).await?;
+            let data = b"initial data with zstd";
+            fs.write_file("/initial.txt", data).await?;
+        }
+
+        // Reopen with from_pool, requesting None compression (should auto-detect Zstd)
+        let db = Builder::new_local(db_path_str).build().await?;
+        let pool = ConnectionPool::new(db);
+        let fs = AgentFS::from_pool(pool, CompressionMode::None).await?;
+
+        // Verify it auto-detected Zstd compression from existing database
+        assert_eq!(
+            fs.compression,
+            CompressionMode::Zstd,
+            "Should auto-detect existing compression"
+        );
+
+        // Read existing data
+        let read_data = fs.read_file("/initial.txt").await?.unwrap();
+        assert_eq!(
+            read_data, b"initial data with zstd",
+            "Should read existing data correctly"
+        );
+
+        // Write new data (should use Zstd compression from auto-detection)
+        let new_data = vec![0x42; 8192];
+        fs.write_file("/new.txt", &new_data).await?;
+
+        let read_new_data = fs.read_file("/new.txt").await?.unwrap();
+        assert_eq!(
+            read_new_data, new_data,
+            "Should write new data with auto-detected compression"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_mode_string_parsing() -> Result<()> {
+        assert_eq!(
+            CompressionMode::from_str("zstd"),
+            Some(CompressionMode::Zstd)
+        );
+        assert_eq!(
+            CompressionMode::from_str("ZSTD"),
+            Some(CompressionMode::Zstd)
+        );
+        assert_eq!(
+            CompressionMode::from_str("none"),
+            Some(CompressionMode::None)
+        );
+        assert_eq!(
+            CompressionMode::from_str("NONE"),
+            Some(CompressionMode::None)
+        );
+        assert_eq!(CompressionMode::from_str("invalid"), None);
+        assert_eq!(CompressionMode::from_str(""), None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_mode_string_conversion() -> Result<()> {
+        assert_eq!(CompressionMode::Zstd.as_str(), "zstd");
+        assert_eq!(CompressionMode::None.as_str(), "none");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_mode_default() -> Result<()> {
+        assert_eq!(CompressionMode::default(), CompressionMode::Zstd);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_large_file_with_both_compression_modes() -> Result<()> {
+        let chunk_size = 4096;
+
+        // Test with Zstd compression
+        let dir_zstd = tempdir()?;
+        let db_path_zstd = dir_zstd.path().join("test_large_zstd.db");
+        let fs_zstd = AgentFS::new(db_path_zstd.to_str().unwrap(), CompressionMode::Zstd).await?;
+
+        // Create large file with repetitive data (compressible)
+        let large_data = vec![0x55; chunk_size * 10]; // 10 chunks of repetitive data
+        fs_zstd.write_file("/large.bin", &large_data).await?;
+        let read_zstd = fs_zstd.read_file("/large.bin").await?.unwrap();
+        assert_eq!(
+            read_zstd, large_data,
+            "Large file mismatch with zstd compression"
+        );
+
+        // Test with no compression
+        let dir_none = tempdir()?;
+        let db_path_none = dir_none.path().join("test_large_none.db");
+        let fs_none = AgentFS::new(db_path_none.to_str().unwrap(), CompressionMode::None).await?;
+
+        fs_none.write_file("/large.bin", &large_data).await?;
+        let read_none = fs_none.read_file("/large.bin").await?.unwrap();
+        assert_eq!(
+            read_none, large_data,
+            "Large file mismatch with no compression"
+        );
+
+        // Both should produce identical output
+        assert_eq!(
+            read_zstd, read_none,
+            "Compression modes should produce identical data"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_across_chunk_boundaries() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test_boundaries.db");
+        let fs = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::Zstd).await?;
+
+        let chunk_size = fs.chunk_size();
+
+        // Create data that spans exactly 3 chunks with different patterns per chunk
+        let mut data = Vec::new();
+        data.extend(vec![0xAA; chunk_size]); // First chunk: all 0xAA
+        data.extend(vec![0xBB; chunk_size]); // Second chunk: all 0xBB
+        data.extend(vec![0xCC; chunk_size]); // Third chunk: all 0xCC
+
+        fs.write_file("/boundary.bin", &data).await?;
+
+        // Read back and verify
+        let read_data = fs.read_file("/boundary.bin").await?.unwrap();
+        assert_eq!(read_data.len(), chunk_size * 3);
+        assert_eq!(
+            read_data, data,
+            "Data corrupted across compressed chunk boundaries"
+        );
+
+        // Verify each chunk maintained its pattern
+        assert!(
+            read_data[..chunk_size].iter().all(|&b| b == 0xAA),
+            "First chunk corrupted"
+        );
+        assert!(
+            read_data[chunk_size..chunk_size * 2]
+                .iter()
+                .all(|&b| b == 0xBB),
+            "Second chunk corrupted"
+        );
+        assert!(
+            read_data[chunk_size * 2..].iter().all(|&b| b == 0xCC),
+            "Third chunk corrupted"
+        );
 
         Ok(())
     }

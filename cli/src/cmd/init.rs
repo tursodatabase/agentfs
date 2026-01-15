@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentfs_sdk::{
-    agentfs_dir, AgentFS, AgentFSOptions, OverlayFS, PartialBootstrapStrategy, PartialSyncOpts,
-    SyncOptions,
+    agentfs_dir, AgentFS, AgentFSOptions, CompressionMode, OverlayFS, PartialBootstrapStrategy,
+    PartialSyncOpts, SyncOptions,
 };
 use anyhow::{Context, Result as AnyhowResult};
 
@@ -69,6 +69,7 @@ pub async fn init_database(
     sync_options: SyncCommandOptions,
     force: bool,
     base: Option<PathBuf>,
+    compression: String,
 ) -> AnyhowResult<()> {
     // Generate ID if not provided
     let id = id.unwrap_or_else(|| {
@@ -118,8 +119,17 @@ pub async fn init_database(
         }
     }
 
-    let mut open_options =
-        AgentFSOptions::with_id(&id).with_sync(build_sync_options(&sync_options));
+    // Parse compression mode
+    let compression_mode = CompressionMode::from_str(&compression).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid compression mode '{}'. Must be 'zstd' or 'none'",
+            compression
+        )
+    })?;
+
+    let mut open_options = AgentFSOptions::with_id(&id)
+        .with_sync(build_sync_options(&sync_options))
+        .with_compression(compression_mode);
     if let Some(base_path) = base.as_ref() {
         open_options = open_options.with_base(base_path);
     }

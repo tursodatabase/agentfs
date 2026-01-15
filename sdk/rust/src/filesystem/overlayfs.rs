@@ -12,6 +12,9 @@ use super::{
     agentfs::AgentFS, BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats,
 };
 
+#[cfg(test)]
+use super::agentfs::CompressionMode;
+
 /// A path-component trie for efficient whiteout lookups.
 ///
 /// This replaces N database queries per is_whiteout() call with a single
@@ -1375,7 +1378,7 @@ mod tests {
         // Create delta database
         let delta_dir = tempdir()?;
         let db_path = delta_dir.path().join("delta.db");
-        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+        let delta = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::default()).await?;
 
         let overlay = OverlayFS::new(base, delta);
         overlay.init(base_dir.path().to_str().unwrap()).await?;
@@ -2004,7 +2007,7 @@ mod prop_tests {
         // Create delta database
         let delta_dir = tempdir()?;
         let db_path = delta_dir.path().join("delta.db");
-        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+        let delta = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::default()).await?;
 
         let overlay = OverlayFS::new(base, delta);
         overlay.init(base_dir.path().to_str().unwrap()).await?;
@@ -2382,7 +2385,9 @@ mod prop_tests {
 
         let base = Arc::new(HostFS::new(base_dir.path()).unwrap());
         let db_path = delta_dir.path().join("delta.db");
-        let delta = AgentFS::new(db_path.to_str().unwrap()).await.unwrap();
+        let delta = AgentFS::new(db_path.to_str().unwrap(), CompressionMode::default())
+            .await
+            .unwrap();
         let overlay = OverlayFS::new(base, delta);
         overlay
             .init(base_dir.path().to_str().unwrap())

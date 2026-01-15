@@ -49,6 +49,10 @@ pub enum Command {
         #[arg(long)]
         base: Option<PathBuf>,
 
+        /// Compression mode for filesystem data chunks (zstd or none)
+        #[arg(long, default_value = "none", value_parser = ["zstd", "none"])]
+        compression: String,
+
         #[command(flatten)]
         sync: SyncCommandOptions,
     },
@@ -98,6 +102,10 @@ pub enum Command {
         /// Use the same session ID to share the delta layer between runs.
         #[arg(long = "session", value_name = "ID")]
         session: Option<String>,
+
+        /// Compression mode for session filesystem data chunks (zstd or none)
+        #[arg(long, default_value = "zstd", value_parser = ["zstd", "none"])]
+        compression: String,
 
         /// Command to execute (defaults to bash on Linux, zsh on macOS)
         command: Option<PathBuf>,
