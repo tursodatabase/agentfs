@@ -19,9 +19,10 @@ const DEFAULT_CHUNK_SIZE: usize = 4096;
 const DENTRY_CACHE_MAX_SIZE: usize = 10000;
 
 /// Compression mode for filesystem data
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionMode {
     /// No compression
+    #[default]
     None,
     /// Zstd compression
     Zstd,
@@ -29,7 +30,7 @@ pub enum CompressionMode {
 
 impl CompressionMode {
     /// Parse compression mode from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "none" => Some(Self::None),
             "zstd" => Some(Self::Zstd),
@@ -43,12 +44,6 @@ impl CompressionMode {
             Self::None => "none",
             Self::Zstd => "zstd",
         }
-    }
-}
-
-impl Default for CompressionMode {
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -644,7 +639,7 @@ impl AgentFS {
                 .get_value(0)
                 .ok()
                 .and_then(|v| match v {
-                    Value::Text(s) => CompressionMode::from_str(&s),
+                    Value::Text(s) => CompressionMode::parse(&s),
                     _ => None,
                 })
                 .unwrap_or_default();
@@ -2564,9 +2559,7 @@ async fn write_to_fs_data<C: ConnectionLike>(
     let mut write_stmt = conn
         .prepare_cached("INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)")
         .await?;
-    let _ = write_stmt
-        .execute((ino, chunk_index as i64, compressed))
-        .await?;
+    let _ = write_stmt.execute((ino, chunk_index, compressed)).await?;
     Ok(())
 }
 
@@ -3896,24 +3889,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_compression_mode_string_parsing() -> Result<()> {
-        assert_eq!(
-            CompressionMode::from_str("zstd"),
-            Some(CompressionMode::Zstd)
-        );
-        assert_eq!(
-            CompressionMode::from_str("ZSTD"),
-            Some(CompressionMode::Zstd)
-        );
-        assert_eq!(
-            CompressionMode::from_str("none"),
-            Some(CompressionMode::None)
-        );
-        assert_eq!(
-            CompressionMode::from_str("NONE"),
-            Some(CompressionMode::None)
-        );
-        assert_eq!(CompressionMode::from_str("invalid"), None);
-        assert_eq!(CompressionMode::from_str(""), None);
+        assert_eq!(CompressionMode::parse("zstd"), Some(CompressionMode::Zstd));
+        assert_eq!(CompressionMode::parse("ZSTD"), Some(CompressionMode::Zstd));
+        assert_eq!(CompressionMode::parse("none"), Some(CompressionMode::None));
+        assert_eq!(CompressionMode::parse("NONE"), Some(CompressionMode::None));
+        assert_eq!(CompressionMode::parse("invalid"), None);
+        assert_eq!(CompressionMode::parse(""), None);
         Ok(())
     }
 
@@ -3926,7 +3907,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compression_mode_default() -> Result<()> {
-        assert_eq!(CompressionMode::default(), CompressionMode::Zstd);
+        assert_eq!(CompressionMode::default(), CompressionMode::None);
         Ok(())
     }
 

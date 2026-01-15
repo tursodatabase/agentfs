@@ -187,7 +187,7 @@ pub async fn run_cmd(
 
     // Parse compression mode
     let compression_mode =
-        agentfs_sdk::CompressionMode::from_str(&compression).ok_or_else(|| {
+        agentfs_sdk::CompressionMode::parse(&compression).ok_or_else(|| {
             anyhow::anyhow!(
                 "Invalid compression mode '{}'. Must be 'zstd' or 'none'",
                 compression

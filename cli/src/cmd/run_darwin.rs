@@ -62,7 +62,7 @@ pub async fn run(
         .to_str()
         .context("Database path contains non-UTF8 characters")?;
 
-    let compression_mode = CompressionMode::from_str(&compression).ok_or_else(|| {
+    let compression_mode = CompressionMode::parse(&compression).ok_or_else(|| {
         anyhow::anyhow!(
             "Invalid compression mode '{}'. Must be 'zstd' or 'none'",
             compression
