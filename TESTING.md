@@ -11,9 +11,12 @@ make pjdfstest
 sudo make install
 sudo dnf install perl-Test-Harness
 mkdir -p ../agentfs-testing
-cd ../agentfs-testing
-agentfs run
-prove -rv ../pjdfstest/tests/
+agentfs init testing
+mkdir mnt
+sudo su
+agentfs mount testing ./mnt
+cd mnt
+prove -rv ../../pjdfstest/tests/ 2>&1 | tee /tmp/pjdfstest.log
 ```
 
 ## xftests
