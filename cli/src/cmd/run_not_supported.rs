@@ -12,6 +12,7 @@ pub async fn run(
     _experimental_sandbox: bool,
     _strace: bool,
     _session: Option<String>,
+    _system: bool,
     _command: PathBuf,
     _args: Vec<String>,
 ) -> Result<()> {
