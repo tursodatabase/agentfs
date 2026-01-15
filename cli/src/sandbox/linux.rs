@@ -145,6 +145,7 @@ pub async fn run_cmd(
     allow: Vec<PathBuf>,
     no_default_allows: bool,
     session_id: Option<String>,
+    system: bool,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
@@ -209,8 +210,7 @@ pub async fn run_cmd(
 
     let overlay: Arc<dyn FileSystem> = Arc::new(overlay);
 
-    // Set up FUSE mount options - mount at hidden temp directory
-    // SAFETY: getuid/getgid are always safe, they simply return the current user/group IDs
+    // SAFETY: getuid/getgid are always safe
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
@@ -218,6 +218,7 @@ pub async fn run_cmd(
         mountpoint: session.fuse_mountpoint.clone(),
         auto_unmount: false,
         allow_root: false,
+        allow_other: system,
         fsname: format!("agentfs:{}", session.run_id),
         uid: Some(uid),
         gid: Some(gid),

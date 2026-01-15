@@ -6,12 +6,14 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 /// Run the command in a Windows sandbox.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     _allow: Vec<PathBuf>,
     _no_default_allows: bool,
     _experimental_sandbox: bool,
     _strace: bool,
     _session: Option<String>,
+    _system: bool,
     _command: PathBuf,
     _args: Vec<String>,
 ) -> Result<()> {

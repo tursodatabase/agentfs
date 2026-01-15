@@ -181,7 +181,7 @@ impl FileSystem for HostFS {
         }
     }
 
-    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+    async fn write_file(&self, path: &str, data: &[u8], _uid: u32, _gid: u32) -> Result<()> {
         let full_path = self.resolve_path(path);
         fs::write(&full_path, data).await?;
         Ok(())
@@ -262,7 +262,7 @@ impl FileSystem for HostFS {
         Ok(Some(entries))
     }
 
-    async fn mkdir(&self, path: &str) -> Result<()> {
+    async fn mkdir(&self, path: &str, _uid: u32, _gid: u32) -> Result<()> {
         let full_path = self.resolve_path(path);
         fs::create_dir(&full_path).await?;
         Ok(())
@@ -289,6 +289,26 @@ impl FileSystem for HostFS {
         Ok(())
     }
 
+    async fn chown(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let full_path = self.resolve_path(path);
+        let c_path = std::ffi::CString::new(full_path.as_os_str().as_bytes())
+            .map_err(|_| Error::Internal("invalid path".to_string()))?;
+
+        // Get current ownership if we need to preserve one
+        let metadata = fs::symlink_metadata(&full_path).await?;
+        let uid = uid.unwrap_or(metadata.uid());
+        let gid = gid.unwrap_or(metadata.gid());
+
+        // Use lchown to not follow symlinks (matches typical chown behavior)
+        let result = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
     async fn rename(&self, from: &str, to: &str) -> Result<()> {
         let from_path = self.resolve_path(from);
         let to_path = self.resolve_path(to);
@@ -296,7 +316,7 @@ impl FileSystem for HostFS {
         Ok(())
     }
 
-    async fn symlink(&self, target: &str, linkpath: &str) -> Result<()> {
+    async fn symlink(&self, target: &str, linkpath: &str, _uid: u32, _gid: u32) -> Result<()> {
         let full_path = self.resolve_path(linkpath);
         tokio::fs::symlink(target, &full_path).await?;
         Ok(())
@@ -360,9 +380,15 @@ impl FileSystem for HostFS {
         }))
     }
 
-    async fn create_file(&self, path: &str, mode: u32) -> Result<(Stats, BoxedFile)> {
+    async fn create_file(
+        &self,
+        path: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(Stats, BoxedFile)> {
         // Fallback implementation for HostFS
-        self.write_file(path, &[]).await?;
+        self.write_file(path, &[], uid, gid).await?;
         self.chmod(path, mode).await?;
         let stats = self.stat(path).await?.ok_or(FsError::NotFound)?;
         let file = self.open(path).await?;
@@ -381,7 +407,7 @@ mod tests {
         let fs = HostFS::new(dir.path())?;
 
         // Write a file
-        fs.write_file("/test.txt", b"hello world").await?;
+        fs.write_file("/test.txt", b"hello world", 0, 0).await?;
 
         // Read it back
         let data = fs.read_file("/test.txt").await?.unwrap();
@@ -401,11 +427,11 @@ mod tests {
         let fs = HostFS::new(dir.path())?;
 
         // Create directory
-        fs.mkdir("/subdir").await?;
+        fs.mkdir("/subdir", 0, 0).await?;
 
         // Create files
-        fs.write_file("/subdir/a.txt", b"a").await?;
-        fs.write_file("/subdir/b.txt", b"b").await?;
+        fs.write_file("/subdir/a.txt", b"a", 0, 0).await?;
+        fs.write_file("/subdir/b.txt", b"b", 0, 0).await?;
 
         // List directory
         let entries = fs.readdir("/subdir").await?.unwrap();
@@ -420,7 +446,7 @@ mod tests {
         let fs = HostFS::new(dir.path())?;
 
         // Write initial data
-        fs.write_file("/test.txt", b"hello world").await?;
+        fs.write_file("/test.txt", b"hello world", 0, 0).await?;
 
         // Open file handle
         let file = fs.open("/test.txt").await?;
@@ -443,7 +469,7 @@ mod tests {
         let fs = HostFS::new(dir.path())?;
 
         // Create a file
-        fs.write_file("/test.txt", b"content").await?;
+        fs.write_file("/test.txt", b"content", 0, 0).await?;
 
         // Change to executable
         fs.chmod("/test.txt", 0o755).await?;
@@ -474,7 +500,7 @@ mod tests {
         let fs = HostFS::new(dir.path())?;
 
         // Create a directory
-        fs.mkdir("/subdir").await?;
+        fs.mkdir("/subdir", 0, 0).await?;
 
         // Change permissions
         fs.chmod("/subdir", 0o700).await?;

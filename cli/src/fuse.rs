@@ -52,6 +52,9 @@ pub struct FuseMountOptions {
     pub auto_unmount: bool,
     /// Allow root to access the mount.
     pub allow_root: bool,
+    /// Allow other system users to access the mount.
+    /// Requires 'user_allow_other' in /etc/fuse.conf for non-root users.
+    pub allow_other: bool,
     /// Filesystem name shown in mount output.
     pub fsname: String,
     /// User ID to report for all files (defaults to current user).
@@ -74,10 +77,6 @@ struct AgentFSFuse {
     open_files: Arc<Mutex<HashMap<u64, OpenFile>>>,
     /// Next file handle to allocate
     next_fh: AtomicU64,
-    /// User ID to report for all files (set at mount time)
-    uid: u32,
-    /// Group ID to report for all files (set at mount time)
-    gid: u32,
     /// Lossy string representation of the absolute mountpoint path.
     /// This is used to avoid looking up ourselves inside ourselves,
     /// e.g., when we mount an under filesystem `/` at /mntpnt,
@@ -133,7 +132,7 @@ impl Filesystem for AgentFSFuse {
         });
         match result {
             Ok(Some(stats)) => {
-                let attr = fillattr(&stats, self.uid, self.gid);
+                let attr = fillattr(&stats);
                 self.add_path(attr.ino, path);
                 reply.entry(&TTL, &attr, 0);
             }
@@ -157,7 +156,7 @@ impl Filesystem for AgentFSFuse {
         let result = self.runtime.block_on(async move { fs.lstat(&path).await });
 
         match result {
-            Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
+            Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats)),
             Ok(None) => reply.error(libc::ENOENT),
             Err(e) => reply.error(error_to_errno(&e)),
         }
@@ -195,8 +194,8 @@ impl Filesystem for AgentFSFuse {
         _req: &Request,
         ino: u64,
         mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
         size: Option<u64>,
         _atime: Option<crate::fuser::TimeOrNow>,
         _mtime: Option<crate::fuser::TimeOrNow>,
@@ -209,9 +208,11 @@ impl Filesystem for AgentFSFuse {
         reply: ReplyAttr,
     ) {
         tracing::debug!(
-            "FUSE::setattr: ino={}, mode={:?}, size={:?}",
+            "FUSE::setattr: ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}",
             ino,
             mode,
+            uid,
+            gid,
             size
         );
         // Handle chmod
@@ -225,6 +226,24 @@ impl Filesystem for AgentFSFuse {
             let result = self
                 .runtime
                 .block_on(async move { fs.chmod(&path, new_mode).await });
+
+            if let Err(e) = result {
+                reply.error(error_to_errno(&e));
+                return;
+            }
+        }
+
+        // Handle chown
+        if uid.is_some() || gid.is_some() {
+            let Some(path) = self.path_cache.lock().get(&ino).cloned() else {
+                reply.error(libc::ENOENT);
+                return;
+            };
+
+            let fs = self.fs.clone();
+            let result = self
+                .runtime
+                .block_on(async move { fs.chown(&path, uid, gid).await });
 
             if let Err(e) = result {
                 reply.error(error_to_errno(&e));
@@ -278,7 +297,7 @@ impl Filesystem for AgentFSFuse {
         let result = self.runtime.block_on(async move { fs.stat(&path).await });
 
         match result {
-            Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats, self.uid, self.gid)),
+            Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats)),
             Ok(None) => reply.error(libc::ENOENT),
             Err(e) => reply.error(error_to_errno(&e)),
         }
@@ -473,15 +492,12 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Build the entries list with full attributes
-        let uid = self.uid;
-        let gid = self.gid;
-
         let mut offset_counter = 0i64;
 
         // Add "." entry
         if offset <= offset_counter {
             if let Some(ref stats) = dir_stats {
-                let attr = fillattr(stats, uid, gid);
+                let attr = fillattr(stats);
                 if reply.add(ino, offset_counter + 1, ".", &TTL, &attr, 0) {
                     reply.ok();
                     return;
@@ -493,7 +509,7 @@ impl Filesystem for AgentFSFuse {
         // Add ".." entry
         if offset <= offset_counter {
             if let Some(ref stats) = parent_stats {
-                let attr = fillattr(stats, uid, gid);
+                let attr = fillattr(stats);
                 if reply.add(parent_ino, offset_counter + 1, "..", &TTL, &attr, 0) {
                     reply.ok();
                     return;
@@ -511,7 +527,7 @@ impl Filesystem for AgentFSFuse {
                     format!("{}/{}", path, entry.name)
                 };
 
-                let attr = fillattr(&entry.stats, uid, gid);
+                let attr = fillattr(&entry.stats);
                 self.add_path(entry.stats.ino as u64, entry_path);
 
                 if reply.add(
@@ -538,7 +554,7 @@ impl Filesystem for AgentFSFuse {
     /// proper attributes and cache the inode mapping.
     fn mkdir(
         &mut self,
-        _req: &Request,
+        req: &Request,
         parent: u64,
         name: &OsStr,
         _mode: u32,
@@ -551,9 +567,11 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
+        let uid = req.uid();
+        let gid = req.gid();
         let fs = self.fs.clone();
         let (result, path) = self.runtime.block_on(async move {
-            let result = fs.mkdir(&path).await;
+            let result = fs.mkdir(&path, uid, gid).await;
             (result, path)
         });
 
@@ -571,7 +589,7 @@ impl Filesystem for AgentFSFuse {
 
         match stat_result {
             Ok(Some(stats)) => {
-                let attr = fillattr(&stats, self.uid, self.gid);
+                let attr = fillattr(&stats);
                 self.add_path(attr.ino, path);
                 reply.entry(&TTL, &attr, 0);
             }
@@ -666,7 +684,7 @@ impl Filesystem for AgentFSFuse {
     /// and returns both the file attributes and handle for immediate use.
     fn create(
         &mut self,
-        _req: &Request,
+        req: &Request,
         parent: u64,
         name: &OsStr,
         mode: u32,
@@ -686,15 +704,17 @@ impl Filesystem for AgentFSFuse {
         };
 
         // Create file with mode, get stats and file handle in one operation
+        let uid = req.uid();
+        let gid = req.gid();
         let fs = self.fs.clone();
         let path_for_create = path.clone();
         let result = self
             .runtime
-            .block_on(async move { fs.create_file(&path_for_create, mode).await });
+            .block_on(async move { fs.create_file(&path_for_create, mode, uid, gid).await });
 
         match result {
             Ok((stats, file)) => {
-                let attr = fillattr(&stats, self.uid, self.gid);
+                let attr = fillattr(&stats);
                 self.add_path(attr.ino, path);
 
                 let fh = self.alloc_fh();
@@ -713,7 +733,7 @@ impl Filesystem for AgentFSFuse {
     /// Creates a symlink at `name` under `parent` pointing to `link`.
     fn symlink(
         &mut self,
-        _req: &Request,
+        req: &Request,
         parent: u64,
         link_name: &OsStr,
         target: &Path,
@@ -735,10 +755,12 @@ impl Filesystem for AgentFSFuse {
             return;
         };
 
+        let uid = req.uid();
+        let gid = req.gid();
         let fs = self.fs.clone();
         let target_owned = target_str.to_string();
         let (result, path) = self.runtime.block_on(async move {
-            let result = fs.symlink(&target_owned, &path).await;
+            let result = fs.symlink(&target_owned, &path, uid, gid).await;
             (result, path)
         });
 
@@ -756,7 +778,7 @@ impl Filesystem for AgentFSFuse {
 
         match stat_result {
             Ok(Some(stats)) => {
-                let attr = fillattr(&stats, self.uid, self.gid);
+                let attr = fillattr(&stats);
                 self.add_path(attr.ino, path);
                 reply.entry(&TTL, &attr, 0);
             }
@@ -819,7 +841,7 @@ impl Filesystem for AgentFSFuse {
 
         match stat_result {
             Ok(Some(stats)) => {
-                let attr = fillattr(&stats, self.uid, self.gid);
+                let attr = fillattr(&stats);
                 self.add_path(attr.ino, newpath);
                 reply.entry(&TTL, &attr, 0);
             }
@@ -1161,24 +1183,13 @@ impl AgentFSFuse {
     ///
     /// The provided Tokio runtime is used to execute async FileSystem operations
     /// from within synchronous FUSE callbacks via `block_on`.
-    ///
-    /// The uid and gid are used for all file ownership to avoid "dubious ownership"
-    /// errors from tools like git that check file ownership.
-    fn new(
-        fs: Arc<dyn FileSystem>,
-        runtime: Runtime,
-        uid: u32,
-        gid: u32,
-        mountpoint_path: PathBuf,
-    ) -> Self {
+    fn new(fs: Arc<dyn FileSystem>, runtime: Runtime, mountpoint_path: PathBuf) -> Self {
         Self {
             fs,
             runtime,
             path_cache: Arc::new(Mutex::new(HashMap::new())),
             open_files: Arc::new(Mutex::new(HashMap::new())),
             next_fh: AtomicU64::new(1),
-            uid,
-            gid,
             mountpoint_path: mountpoint_path.as_os_str().to_string_lossy().to_string(),
         }
     }
@@ -1259,7 +1270,7 @@ impl AgentFSFuse {
 ///
 /// The uid and gid parameters override the stored values to ensure proper
 /// file ownership reporting (avoids "dubious ownership" errors from git).
-fn fillattr(stats: &Stats, uid: u32, gid: u32) -> FileAttr {
+fn fillattr(stats: &Stats) -> FileAttr {
     let kind = if stats.is_directory() {
         FileType::Directory
     } else if stats.is_symlink() {
@@ -1285,12 +1296,39 @@ fn fillattr(stats: &Stats, uid: u32, gid: u32) -> FileAttr {
         kind,
         perm: (stats.mode & 0o777) as u16,
         nlink: stats.nlink,
-        uid,
-        gid,
+        uid: stats.uid,
+        gid: stats.gid,
         rdev: 0,
         flags: 0,
         blksize: 512,
     }
+}
+
+/// Check if allow_other is supported for FUSE mounts.
+///
+/// Returns true if the current user is root or if user_allow_other is enabled
+/// in /etc/fuse.conf.
+fn allow_other_supported() -> bool {
+    // Root can always use allow_other
+    if unsafe { libc::getuid() } == 0 {
+        return true;
+    }
+
+    // Check if user_allow_other is enabled in /etc/fuse.conf
+    if let Ok(contents) = std::fs::read_to_string("/etc/fuse.conf") {
+        for line in contents.lines() {
+            let line = line.trim();
+            // Skip comments and empty lines
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            if line == "user_allow_other" {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 pub fn mount(
@@ -1298,16 +1336,29 @@ pub fn mount(
     opts: FuseMountOptions,
     runtime: Runtime,
 ) -> anyhow::Result<()> {
-    // Use provided uid/gid or default to current user
-    // This avoids "dubious ownership" errors from git and similar tools
-    let uid = opts.uid.unwrap_or_else(|| unsafe { libc::getuid() });
-    let gid = opts.gid.unwrap_or_else(|| unsafe { libc::getgid() });
-
-    let fs = AgentFSFuse::new(fs, runtime, uid, gid, opts.mountpoint.clone());
+    let fs = AgentFSFuse::new(fs, runtime, opts.mountpoint.clone());
 
     fs.add_path(1, "/".to_string());
 
-    let mut mount_opts = vec![MountOption::FSName(opts.fsname)];
+    let mut mount_opts = vec![
+        MountOption::FSName(opts.fsname),
+        // Enable kernel-level permission checking based on file mode/uid/gid
+        MountOption::DefaultPermissions,
+    ];
+
+    // Allow users other than the one who mounted the filesystem to access it.
+    // This requires either running as root or having user_allow_other enabled
+    // in /etc/fuse.conf.
+    if opts.allow_other {
+        if allow_other_supported() {
+            mount_opts.push(MountOption::AllowOther);
+        } else {
+            anyhow::bail!(
+                "FUSE allow_other not supported. Add 'user_allow_other' to /etc/fuse.conf or run as root."
+            );
+        }
+    }
+
     if opts.auto_unmount {
         mount_opts.push(MountOption::AutoUnmount);
     }

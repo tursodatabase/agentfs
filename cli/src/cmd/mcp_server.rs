@@ -675,7 +675,7 @@ impl McpServer {
 
         self.agentfs
             .fs
-            .write_file(&path, &data)
+            .write_file(&path, &data, 0, 0)
             .await
             .context("Failed to write file")?;
 
@@ -708,7 +708,7 @@ impl McpServer {
             // Create parent
             self.agentfs
                 .fs
-                .mkdir(&parent_path)
+                .mkdir(&parent_path, 0, 0)
                 .await
                 .context(format!("Failed to create directory: {}", parent_path))?;
 
@@ -737,7 +737,7 @@ impl McpServer {
 
         self.agentfs
             .fs
-            .mkdir(&path)
+            .mkdir(&path, 0, 0)
             .await
             .context("Failed to create directory")?;
 

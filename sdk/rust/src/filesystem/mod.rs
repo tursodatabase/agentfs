@@ -163,7 +163,10 @@ pub trait FileSystem: Send + Sync {
     async fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>>;
 
     /// Write data to a file (creates or overwrites)
-    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
+    ///
+    /// If the file doesn't exist, it will be created with the specified uid/gid.
+    /// If the file exists, uid/gid are ignored (existing ownership preserved).
+    async fn write_file(&self, path: &str, data: &[u8], uid: u32, gid: u32) -> Result<()>;
 
     /// List directory contents
     ///
@@ -178,8 +181,8 @@ pub trait FileSystem: Send + Sync {
     /// Returns `Ok(None)` if the directory does not exist.
     async fn readdir_plus(&self, path: &str) -> Result<Option<Vec<DirEntry>>>;
 
-    /// Create a directory
-    async fn mkdir(&self, path: &str) -> Result<()>;
+    /// Create a directory with the specified ownership
+    async fn mkdir(&self, path: &str, uid: u32, gid: u32) -> Result<()>;
 
     /// Remove a file or empty directory
     async fn remove(&self, path: &str) -> Result<()>;
@@ -190,11 +193,17 @@ pub trait FileSystem: Send + Sync {
     /// but only the permission bits (lower 12 bits) will be modified.
     async fn chmod(&self, path: &str, mode: u32) -> Result<()>;
 
+    /// Change file ownership
+    ///
+    /// Changes the user and/or group ownership of a file.
+    /// Pass None for uid or gid to leave that value unchanged.
+    async fn chown(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> Result<()>;
+
     /// Rename/move a file or directory
     async fn rename(&self, from: &str, to: &str) -> Result<()>;
 
-    /// Create a symbolic link
-    async fn symlink(&self, target: &str, linkpath: &str) -> Result<()>;
+    /// Create a symbolic link with the specified ownership
+    async fn symlink(&self, target: &str, linkpath: &str, uid: u32, gid: u32) -> Result<()>;
 
     /// Create a hard link
     ///
@@ -217,10 +226,16 @@ pub trait FileSystem: Send + Sync {
     /// operations without requiring path lookups on each operation.
     async fn open(&self, path: &str) -> Result<BoxedFile>;
 
-    /// Create a new empty file with the specified mode.
+    /// Create a new empty file with the specified mode and ownership.
     ///
     /// Returns both the file stats and an open file handle in a single operation.
     /// This is optimized for FUSE create() which needs both atomically.
     /// Fails with AlreadyExists if the file exists.
-    async fn create_file(&self, path: &str, mode: u32) -> Result<(Stats, BoxedFile)>;
+    async fn create_file(
+        &self,
+        path: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(Stats, BoxedFile)>;
 }

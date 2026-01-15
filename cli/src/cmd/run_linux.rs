@@ -7,12 +7,14 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 /// Run the command in a Linux sandbox.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     allow: Vec<PathBuf>,
     no_default_allows: bool,
     experimental_sandbox: bool,
     strace: bool,
     session: Option<String>,
+    system: bool,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {
@@ -28,7 +30,8 @@ pub async fn run(
         if strace {
             eprintln!("Warning: --strace is only supported with --experimental-sandbox, ignoring");
         }
-        crate::sandbox::linux::run_cmd(allow, no_default_allows, session, command, args).await?;
+        crate::sandbox::linux::run_cmd(allow, no_default_allows, session, system, command, args)
+            .await?;
     }
     Ok(())
 }

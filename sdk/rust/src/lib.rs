@@ -639,7 +639,7 @@ mod tests {
         let agentfs = AgentFS::open(AgentFSOptions::ephemeral()).await.unwrap();
 
         // Create a directory
-        agentfs.fs.mkdir("/test_dir").await.unwrap();
+        agentfs.fs.mkdir("/test_dir", 0, 0).await.unwrap();
 
         // Check directory exists
         let stats = agentfs.fs.stat("/test_dir").await.unwrap();
@@ -650,7 +650,7 @@ mod tests {
         let data = b"Hello, AgentFS!";
         agentfs
             .fs
-            .write_file("/test_dir/test.txt", data)
+            .write_file("/test_dir/test.txt", data, 0, 0)
             .await
             .unwrap();
 

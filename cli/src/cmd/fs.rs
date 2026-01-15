@@ -125,10 +125,13 @@ pub async fn write_filesystem(id_or_path: String, path: &str, content: &str) -> 
     for i in 2..components.len() {
         let dir_path = components[0..i].join("/");
         if agentfs.fs.stat(&dir_path).await?.is_none() {
-            agentfs.fs.mkdir(&dir_path).await?;
+            agentfs.fs.mkdir(&dir_path, 0, 0).await?;
         }
     }
-    agentfs.fs.write_file(path, content.as_bytes()).await?;
+    agentfs
+        .fs
+        .write_file(path, content.as_bytes(), 0, 0)
+        .await?;
     Ok(())
 }
 
@@ -268,7 +271,11 @@ mod tests {
     pub async fn cat_file_found() {
         let (agentfs, path, _file) = agentfs().await;
         let content = b"hello, agentfs";
-        agentfs.fs.write_file("test.md", content).await.unwrap();
+        agentfs
+            .fs
+            .write_file("test.md", content, 0, 0)
+            .await
+            .unwrap();
         let mut buf = Vec::new();
         cat_filesystem(&mut buf, path, "test.md").await.unwrap();
         assert_eq!(buf, content);
@@ -278,7 +285,11 @@ mod tests {
     pub async fn cat_big_file_found() {
         let (agentfs, path, _file) = agentfs().await;
         let content = vec![100u8; 4 * 1024 * 1024];
-        agentfs.fs.write_file("test.md", &content).await.unwrap();
+        agentfs
+            .fs
+            .write_file("test.md", &content, 0, 0)
+            .await
+            .unwrap();
         let mut buf = Vec::new();
         cat_filesystem(&mut buf, path, "test.md").await.unwrap();
         assert_eq!(buf, content);
@@ -295,10 +306,10 @@ mod tests {
     #[tokio::test]
     pub async fn ls_files_only() {
         let (agentfs, path, _file) = agentfs().await;
-        agentfs.fs.write_file("1.md", b"1").await.unwrap();
-        agentfs.fs.write_file("2.md", b"11").await.unwrap();
+        agentfs.fs.write_file("1.md", b"1", 0, 0).await.unwrap();
+        agentfs.fs.write_file("2.md", b"11", 0, 0).await.unwrap();
         let big = vec![100u8; 1024 * 1024];
-        agentfs.fs.write_file("3.md", &big).await.unwrap();
+        agentfs.fs.write_file("3.md", &big, 0, 0).await.unwrap();
         let mut buf = Vec::new();
         ls_filesystem(&mut buf, path, "/").await.unwrap();
         assert_eq!(
@@ -313,15 +324,19 @@ f 3.md
     #[tokio::test]
     pub async fn ls_dirs() {
         let (agentfs, path, _file) = agentfs().await;
-        agentfs.fs.mkdir("a").await.unwrap();
-        agentfs.fs.mkdir("a/b").await.unwrap();
-        agentfs.fs.mkdir("a/c").await.unwrap();
-        agentfs.fs.mkdir("d").await.unwrap();
-        agentfs.fs.mkdir("d/e").await.unwrap();
-        agentfs.fs.write_file("a/b/1.md", b"1").await.unwrap();
-        agentfs.fs.write_file("a/c/2.md", b"11").await.unwrap();
+        agentfs.fs.mkdir("a", 0, 0).await.unwrap();
+        agentfs.fs.mkdir("a/b", 0, 0).await.unwrap();
+        agentfs.fs.mkdir("a/c", 0, 0).await.unwrap();
+        agentfs.fs.mkdir("d", 0, 0).await.unwrap();
+        agentfs.fs.mkdir("d/e", 0, 0).await.unwrap();
+        agentfs.fs.write_file("a/b/1.md", b"1", 0, 0).await.unwrap();
+        agentfs
+            .fs
+            .write_file("a/c/2.md", b"11", 0, 0)
+            .await
+            .unwrap();
         let big = vec![100u8; 1024 * 1024];
-        agentfs.fs.write_file("d/e/3.md", &big).await.unwrap();
+        agentfs.fs.write_file("d/e/3.md", &big, 0, 0).await.unwrap();
         let mut buf = Vec::new();
         ls_filesystem(&mut buf, path, "/").await.unwrap();
         assert_eq!(

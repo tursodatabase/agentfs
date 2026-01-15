@@ -26,12 +26,14 @@ use crate::sandbox::darwin::{generate_sandbox_profile, SandboxConfig};
 const DEFAULT_NFS_PORT: u32 = 11111;
 
 /// Run the command in a Darwin sandbox.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     allow: Vec<PathBuf>,
     no_default_allows: bool,
     _experimental_sandbox: bool,
     _strace: bool,
     session_id: Option<String>,
+    _system: bool,
     command: PathBuf,
     args: Vec<String>,
 ) -> Result<()> {

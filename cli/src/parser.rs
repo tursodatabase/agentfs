@@ -99,6 +99,11 @@ pub enum Command {
         #[arg(long = "session", value_name = "ID")]
         session: Option<String>,
 
+        /// Allow other system users to access this mount (requires /etc/fuse.conf
+        /// user_allow_other; use cautiously)
+        #[arg(long = "system")]
+        system: bool,
+
         /// Command to execute (defaults to bash on Linux, zsh on macOS)
         command: Option<PathBuf>,
 
@@ -123,6 +128,11 @@ pub enum Command {
         /// Allow root user to access filesystem
         #[arg(long)]
         allow_root: bool,
+
+        /// Allow other system users to access this mount (requires /etc/fuse.conf
+        /// user_allow_other; use cautiously)
+        #[arg(long = "system")]
+        system: bool,
 
         /// Run in foreground (don't daemonize)
         #[arg(short = 'f', long)]

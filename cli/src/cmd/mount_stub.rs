@@ -13,6 +13,8 @@ pub struct MountArgs {
     pub auto_unmount: bool,
     /// Allow root to access the mount.
     pub allow_root: bool,
+    /// Allow other system users to access the mount.
+    pub allow_other: bool,
     /// Run in foreground (don't daemonize).
     pub foreground: bool,
     /// User ID to report for all files (defaults to current user).

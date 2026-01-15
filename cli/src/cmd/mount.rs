@@ -22,6 +22,8 @@ pub struct MountArgs {
     pub auto_unmount: bool,
     /// Allow root to access the mount.
     pub allow_root: bool,
+    /// Allow other system users to access the mount.
+    pub allow_other: bool,
     /// Run in foreground (don't daemonize).
     pub foreground: bool,
     /// User ID to report for all files (defaults to current user).
@@ -68,6 +70,7 @@ pub fn mount(args: MountArgs) -> Result<()> {
         mountpoint: args.mountpoint,
         auto_unmount: args.auto_unmount,
         allow_root: args.allow_root,
+        allow_other: args.allow_other,
         fsname,
         uid: args.uid,
         gid: args.gid,

@@ -228,7 +228,7 @@ impl Vfs for SqliteVfs {
             .ok_or_else(|| VfsError::InvalidInput("Invalid target path".to_string()))?;
 
         self.fs
-            .symlink(target_str, &linkpath_rel)
+            .symlink(target_str, &linkpath_rel, 0, 0)
             .await
             .map_err(|e| {
                 let err_msg = e.to_string();
@@ -395,7 +395,7 @@ impl FileOps for SqliteFileOps {
 
         // Write the data to the database
         self.fs
-            .write_file(&self.path, &data)
+            .write_file(&self.path, &data, 0, 0)
             .await
             .map_err(|e| VfsError::Other(format!("Failed to write file: {}", e)))?;
 

@@ -76,6 +76,7 @@ fn main() {
             experimental_sandbox,
             strace,
             session,
+            system,
             command,
             args,
         } => {
@@ -87,6 +88,7 @@ fn main() {
                 experimental_sandbox,
                 strace,
                 session,
+                system,
                 command,
                 args,
             )) {
@@ -99,6 +101,7 @@ fn main() {
             mountpoint,
             auto_unmount,
             allow_root,
+            system,
             foreground,
             uid,
             gid,
@@ -109,6 +112,7 @@ fn main() {
                     mountpoint,
                     auto_unmount,
                     allow_root,
+                    allow_other: system,
                     foreground,
                     uid,
                     gid,

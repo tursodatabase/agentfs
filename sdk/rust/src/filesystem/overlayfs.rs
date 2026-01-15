@@ -277,6 +277,10 @@ pub struct OverlayFile {
     path: String,
     /// Track if we've done copy-on-write (to avoid re-copying).
     copied_to_delta: std::sync::atomic::AtomicBool,
+    /// Owner uid for copy-on-write operations.
+    uid: u32,
+    /// Owner gid for copy-on-write operations.
+    gid: u32,
 }
 
 impl OverlayFile {
@@ -293,8 +297,8 @@ impl OverlayFile {
 
             // Check if directory exists in delta
             if self.delta.stat(&current).await?.is_none() {
-                // Create it in delta
-                self.delta.mkdir(&current).await?;
+                // Create it in delta with the file's ownership
+                self.delta.mkdir(&current, self.uid, self.gid).await?;
             }
         }
         Ok(())
@@ -345,9 +349,13 @@ impl File for OverlayFile {
             if let Some(ref base_file) = self.base_file {
                 let stats = base_file.fstat().await?;
                 let base_data = base_file.pread(0, stats.size as u64).await?;
-                self.delta.write_file(&self.path, &base_data).await?;
+                self.delta
+                    .write_file(&self.path, &base_data, self.uid, self.gid)
+                    .await?;
             } else {
-                self.delta.write_file(&self.path, &[]).await?;
+                self.delta
+                    .write_file(&self.path, &[], self.uid, self.gid)
+                    .await?;
             }
             self.copied_to_delta
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -376,9 +384,13 @@ impl File for OverlayFile {
             if let Some(ref base_file) = self.base_file {
                 let stats = base_file.fstat().await?;
                 let base_data = base_file.pread(0, stats.size as u64).await?;
-                self.delta.write_file(&self.path, &base_data).await?;
+                self.delta
+                    .write_file(&self.path, &base_data, self.uid, self.gid)
+                    .await?;
             } else {
-                self.delta.write_file(&self.path, &[]).await?;
+                self.delta
+                    .write_file(&self.path, &[], self.uid, self.gid)
+                    .await?;
             }
             self.copied_to_delta
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -625,7 +637,7 @@ impl OverlayFS {
     }
 
     /// Ensure parent directories exist in delta layer
-    async fn ensure_parent_dirs(&self, path: &str) -> Result<()> {
+    async fn ensure_parent_dirs(&self, path: &str, uid: u32, gid: u32) -> Result<()> {
         let normalized = self.normalize_path(path);
         let components: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -661,8 +673,8 @@ impl OverlayFS {
 
             match base_stats {
                 Some(s) if s.is_directory() => {
-                    // Directory exists in base but not delta, create in delta
-                    self.delta.mkdir(&current).await?;
+                    // Directory exists in base but not delta, preserve its ownership
+                    self.delta.mkdir(&current, s.uid, s.gid).await?;
                     self.delta_dir_cache.insert(&current);
                 }
                 Some(_) => {
@@ -670,8 +682,8 @@ impl OverlayFS {
                     return Err(FsError::NotADirectory.into());
                 }
                 None => {
-                    // Doesn't exist anywhere, create it
-                    self.delta.mkdir(&current).await?;
+                    // Doesn't exist anywhere, create with provided ownership
+                    self.delta.mkdir(&current, uid, gid).await?;
                     self.delta_dir_cache.insert(&current);
                 }
             }
@@ -876,7 +888,7 @@ impl FileSystem for OverlayFS {
         self.base.read_file(&normalized).await
     }
 
-    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+    async fn write_file(&self, path: &str, data: &[u8], uid: u32, gid: u32) -> Result<()> {
         tracing::debug!(
             "OverlayFS::write_file: path={}, data_len={}",
             path,
@@ -891,10 +903,10 @@ impl FileSystem for OverlayFS {
         self.delta_dir_cache.remove(&normalized);
 
         // Ensure parent directories exist in delta
-        self.ensure_parent_dirs(&normalized).await?;
+        self.ensure_parent_dirs(&normalized, uid, gid).await?;
 
         // Write to delta
-        self.delta.write_file(&normalized, data).await
+        self.delta.write_file(&normalized, data, uid, gid).await
     }
 
     async fn readdir(&self, path: &str) -> Result<Option<Vec<String>>> {
@@ -995,7 +1007,7 @@ impl FileSystem for OverlayFS {
         Ok(Some(result))
     }
 
-    async fn mkdir(&self, path: &str) -> Result<()> {
+    async fn mkdir(&self, path: &str, uid: u32, gid: u32) -> Result<()> {
         tracing::debug!("OverlayFS::mkdir: path={}", path);
         let normalized = self.normalize_path(path);
 
@@ -1011,10 +1023,10 @@ impl FileSystem for OverlayFS {
         self.remove_whiteout(&normalized).await?;
 
         // Ensure parent directories exist
-        self.ensure_parent_dirs(&normalized).await?;
+        self.ensure_parent_dirs(&normalized, uid, gid).await?;
 
         // Create in delta
-        self.delta.mkdir(&normalized).await?;
+        self.delta.mkdir(&normalized, uid, gid).await?;
 
         // Update cache
         self.delta_dir_cache.insert(&normalized);
@@ -1102,25 +1114,74 @@ impl FileSystem for OverlayFS {
         // Check if exists in base
         let base_stats = self.base.lstat(&normalized).await?;
         if let Some(stats) = base_stats {
+            // Preserve ownership during copy-up
+            let uid = stats.uid;
+            let gid = stats.gid;
             // Need to copy to delta first, then chmod
             if stats.is_directory() {
                 // For directories, just create in delta and chmod
-                self.ensure_parent_dirs(&normalized).await?;
-                self.delta.mkdir(&normalized).await?;
+                self.ensure_parent_dirs(&normalized, uid, gid).await?;
+                self.delta.mkdir(&normalized, uid, gid).await?;
                 self.delta.chmod(&normalized, mode).await?;
             } else if stats.is_symlink() {
                 // For symlinks, copy the symlink to delta
                 if let Some(target) = self.base.readlink(&normalized).await? {
-                    self.ensure_parent_dirs(&normalized).await?;
-                    self.delta.symlink(&target, &normalized).await?;
+                    self.ensure_parent_dirs(&normalized, uid, gid).await?;
+                    self.delta.symlink(&target, &normalized, uid, gid).await?;
                     self.delta.chmod(&normalized, mode).await?;
                 }
             } else {
                 // For regular files, copy content to delta
                 if let Some(data) = self.base.read_file(&normalized).await? {
-                    self.ensure_parent_dirs(&normalized).await?;
-                    self.delta.write_file(&normalized, &data).await?;
+                    self.ensure_parent_dirs(&normalized, uid, gid).await?;
+                    self.delta.write_file(&normalized, &data, uid, gid).await?;
                     self.delta.chmod(&normalized, mode).await?;
+                }
+            }
+            Ok(())
+        } else {
+            Err(FsError::NotFound.into())
+        }
+    }
+
+    async fn chown(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
+        tracing::debug!(
+            "OverlayFS::chown: path={}, uid={:?}, gid={:?}",
+            path,
+            uid,
+            gid
+        );
+        let normalized = self.normalize_path(path);
+
+        // Check if whited-out
+        if self.is_whiteout(&normalized) {
+            return Err(FsError::NotFound.into());
+        }
+
+        // If file exists in delta, chown there directly
+        if self.exists_in_delta(&normalized).await? {
+            return self.delta.chown(&normalized, uid, gid).await;
+        }
+
+        // Check if exists in base
+        let base_stats = self.base.lstat(&normalized).await?;
+        if let Some(stats) = base_stats {
+            let uid = uid.unwrap_or(stats.uid);
+            let gid = gid.unwrap_or(stats.gid);
+
+            // Copy to delta with correct ownership
+            if stats.is_directory() {
+                self.ensure_parent_dirs(&normalized, uid, gid).await?;
+                self.delta.mkdir(&normalized, uid, gid).await?;
+            } else if stats.is_symlink() {
+                if let Some(target) = self.base.readlink(&normalized).await? {
+                    self.ensure_parent_dirs(&normalized, uid, gid).await?;
+                    self.delta.symlink(&target, &normalized, uid, gid).await?;
+                }
+            } else {
+                if let Some(data) = self.base.read_file(&normalized).await? {
+                    self.ensure_parent_dirs(&normalized, uid, gid).await?;
+                    self.delta.write_file(&normalized, &data, uid, gid).await?;
                 }
             }
             Ok(())
@@ -1154,10 +1215,13 @@ impl FileSystem for OverlayFS {
                     // Copy directory structure to delta
                     self.copy_dir_to_delta(&from_normalized).await?;
                 } else {
-                    // Copy file to delta
+                    // Copy file to delta, preserving ownership
                     if let Some(data) = self.base.read_file(&from_normalized).await? {
-                        self.ensure_parent_dirs(&from_normalized).await?;
-                        self.delta.write_file(&from_normalized, &data).await?;
+                        self.ensure_parent_dirs(&from_normalized, stats.uid, stats.gid)
+                            .await?;
+                        self.delta
+                            .write_file(&from_normalized, &data, stats.uid, stats.gid)
+                            .await?;
                     }
                 }
             } else {
@@ -1168,8 +1232,14 @@ impl FileSystem for OverlayFS {
         // Remove whiteout at destination
         self.remove_whiteout(&to_normalized).await?;
 
-        // Ensure parent directories exist at destination
-        self.ensure_parent_dirs(&to_normalized).await?;
+        // Get ownership from source for parent dirs at destination
+        let stats = self
+            .delta
+            .stat(&from_normalized)
+            .await?
+            .ok_or(FsError::NotFound)?;
+        self.ensure_parent_dirs(&to_normalized, stats.uid, stats.gid)
+            .await?;
 
         // Perform rename in delta
         self.delta.rename(&from_normalized, &to_normalized).await?;
@@ -1186,7 +1256,7 @@ impl FileSystem for OverlayFS {
         Ok(())
     }
 
-    async fn symlink(&self, target: &str, linkpath: &str) -> Result<()> {
+    async fn symlink(&self, target: &str, linkpath: &str, uid: u32, gid: u32) -> Result<()> {
         tracing::debug!(
             "OverlayFS::symlink: target={}, linkpath={}",
             target,
@@ -1198,10 +1268,10 @@ impl FileSystem for OverlayFS {
         self.remove_whiteout(&normalized).await?;
 
         // Ensure parent directories exist
-        self.ensure_parent_dirs(&normalized).await?;
+        self.ensure_parent_dirs(&normalized, uid, gid).await?;
 
         // Create in delta
-        self.delta.symlink(target, &normalized).await
+        self.delta.symlink(target, &normalized, uid, gid).await
     }
 
     async fn link(&self, oldpath: &str, newpath: &str) -> Result<()> {
@@ -1217,9 +1287,6 @@ impl FileSystem for OverlayFS {
         // Remove any whiteout at destination
         self.remove_whiteout(&new_normalized).await?;
 
-        // Ensure parent directories exist for the new path
-        self.ensure_parent_dirs(&new_normalized).await?;
-
         // If source is only in base, copy it to delta first
         let in_delta = self.exists_in_delta(&old_normalized).await?;
 
@@ -1231,10 +1298,13 @@ impl FileSystem for OverlayFS {
                 if stats.is_directory() {
                     return Err(FsError::IsADirectory.into());
                 }
-                // Copy-up: read from base and write to delta
+                // Copy-up: read from base and write to delta, preserving ownership
                 if let Some(data) = self.base.read_file(&old_normalized).await? {
-                    self.ensure_parent_dirs(&old_normalized).await?;
-                    self.delta.write_file(&old_normalized, &data).await?;
+                    self.ensure_parent_dirs(&old_normalized, stats.uid, stats.gid)
+                        .await?;
+                    self.delta
+                        .write_file(&old_normalized, &data, stats.uid, stats.gid)
+                        .await?;
 
                     // Store origin mapping: delta_ino -> base_ino
                     // This ensures stat() returns the original base inode after copy-up
@@ -1248,6 +1318,15 @@ impl FileSystem for OverlayFS {
                 return Err(FsError::NotFound.into());
             }
         }
+
+        // Get ownership from source for parent dirs at destination
+        let stats = self
+            .delta
+            .lstat(&old_normalized)
+            .await?
+            .ok_or(FsError::NotFound)?;
+        self.ensure_parent_dirs(&new_normalized, stats.uid, stats.gid)
+            .await?;
 
         // Create hard link in delta
         self.delta.link(&old_normalized, &new_normalized).await
@@ -1300,16 +1379,34 @@ impl FileSystem for OverlayFS {
             return Err(FsError::NotFound.into());
         }
 
+        // Get uid/gid for copy-on-write operations: prefer delta stats, else base stats
+        // We already verified at least one file exists above, so unwrap is safe
+        let (uid, gid) = if let Some(ref df) = delta_file {
+            let stats = df.fstat().await?;
+            (stats.uid, stats.gid)
+        } else {
+            let stats = base_file.as_ref().unwrap().fstat().await?;
+            (stats.uid, stats.gid)
+        };
+
         Ok(Arc::new(OverlayFile {
             delta_file,
             base_file,
             delta: self.delta.clone(),
             path: normalized.0,
             copied_to_delta: std::sync::atomic::AtomicBool::new(false),
+            uid,
+            gid,
         }))
     }
 
-    async fn create_file(&self, path: &str, mode: u32) -> Result<(Stats, BoxedFile)> {
+    async fn create_file(
+        &self,
+        path: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(Stats, BoxedFile)> {
         tracing::debug!("OverlayFS::create_file: path={}, mode={:o}", path, mode);
         let normalized = self.normalize_path(path);
 
@@ -1320,17 +1417,19 @@ impl FileSystem for OverlayFS {
         self.delta_dir_cache.remove(&normalized);
 
         // Ensure parent directories exist in delta
-        self.ensure_parent_dirs(&normalized).await?;
+        self.ensure_parent_dirs(&normalized, uid, gid).await?;
 
         // Create in delta layer
-        self.delta.create_file(&normalized, mode).await
+        self.delta.create_file(&normalized, mode, uid, gid).await
     }
 }
 
 impl OverlayFS {
-    /// Recursively copy a directory from base to delta
+    /// Recursively copy a directory from base to delta, preserving ownership
     async fn copy_dir_to_delta(&self, path: &str) -> Result<()> {
-        self.delta.mkdir(path).await?;
+        // Get directory stats to preserve ownership
+        let dir_stats = self.base.stat(path).await?.ok_or(FsError::NotFound)?;
+        self.delta.mkdir(path, dir_stats.uid, dir_stats.gid).await?;
 
         if let Some(entries) = self.base.readdir(path).await? {
             for entry in entries {
@@ -1340,15 +1439,19 @@ impl OverlayFS {
                     format!("{}/{}", path, entry)
                 };
 
-                if let Some(stats) = self.base.stat(&entry_path).await? {
+                if let Some(stats) = self.base.lstat(&entry_path).await? {
                     if stats.is_directory() {
                         Box::pin(self.copy_dir_to_delta(&entry_path)).await?;
                     } else if stats.is_symlink() {
                         if let Some(target) = self.base.readlink(&entry_path).await? {
-                            self.delta.symlink(&target, &entry_path).await?;
+                            self.delta
+                                .symlink(&target, &entry_path, stats.uid, stats.gid)
+                                .await?;
                         }
                     } else if let Some(data) = self.base.read_file(&entry_path).await? {
-                        self.delta.write_file(&entry_path, &data).await?;
+                        self.delta
+                            .write_file(&entry_path, &data, stats.uid, stats.gid)
+                            .await?;
                     }
                 }
             }
@@ -1399,7 +1502,7 @@ mod tests {
         let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
 
         // Write new file (goes to delta)
-        overlay.write_file("/new.txt", b"new content").await?;
+        overlay.write_file("/new.txt", b"new content", 0, 0).await?;
 
         // Read it back
         let data = overlay.read_file("/new.txt").await?.unwrap();
@@ -1449,7 +1552,7 @@ mod tests {
         let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
 
         // Add file to delta
-        overlay.write_file("/delta.txt", b"delta").await?;
+        overlay.write_file("/delta.txt", b"delta", 0, 0).await?;
 
         // Readdir should show both base and delta files
         let entries = overlay.readdir("/").await?.unwrap();
@@ -1484,7 +1587,7 @@ mod tests {
         assert!(overlay.stat("/base.txt").await?.is_none());
 
         // Recreate it
-        overlay.write_file("/base.txt", b"recreated").await?;
+        overlay.write_file("/base.txt", b"recreated", 0, 0).await?;
 
         // Should be visible again with new content
         let data = overlay.read_file("/base.txt").await?.unwrap();
@@ -1498,7 +1601,7 @@ mod tests {
         let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
 
         // Write a new file to delta
-        overlay.write_file("/new.txt", b"content").await?;
+        overlay.write_file("/new.txt", b"content", 0, 0).await?;
 
         // chmod it
         overlay.chmod("/new.txt", 0o755).await?;
@@ -1664,7 +1767,9 @@ mod tests {
         overlay.remove("/base_link.txt").await?;
 
         // Create a new file in delta - it should get its own inode, not the old mapping
-        overlay.write_file("/new_file.txt", b"new content").await?;
+        overlay
+            .write_file("/new_file.txt", b"new content", 0, 0)
+            .await?;
         let new_stats = overlay.stat("/new_file.txt").await?.unwrap();
 
         // The new file's inode should not be affected by stale origin mappings
@@ -1682,7 +1787,7 @@ mod tests {
 
         // Create a new file directly in delta (no base file)
         overlay
-            .write_file("/delta_only.txt", b"delta content")
+            .write_file("/delta_only.txt", b"delta content", 0, 0)
             .await?;
         let delta_stats = overlay.stat("/delta_only.txt").await?.unwrap();
         let delta_ino = delta_stats.ino;
@@ -1873,12 +1978,12 @@ mod prop_tests {
         async fn execute(&self, overlay: &OverlayFS) -> Result<()> {
             match self {
                 FsOperation::WriteFile { path, contents } => {
-                    overlay.write_file(path, contents).await
+                    overlay.write_file(path, contents, 0, 0).await
                 }
                 FsOperation::PWrite { path, offset, data } => {
                     // Create file if it doesn't exist, then use file handle
                     if overlay.stat(path).await?.is_none() {
-                        overlay.write_file(path, &[]).await?;
+                        overlay.write_file(path, &[], 0, 0).await?;
                     }
                     let file = overlay.open(path).await?;
                     file.pwrite(*offset, data).await
@@ -1887,11 +1992,11 @@ mod prop_tests {
                     let file = overlay.open(path).await?;
                     file.truncate(*size).await
                 }
-                FsOperation::Mkdir { path } => overlay.mkdir(path).await,
+                FsOperation::Mkdir { path } => overlay.mkdir(path, 0, 0).await,
                 FsOperation::Remove { path } => overlay.remove(path).await,
                 FsOperation::Rename { from, to } => overlay.rename(from, to).await,
                 FsOperation::Symlink { target, linkpath } => {
-                    overlay.symlink(target, linkpath).await
+                    overlay.symlink(target, linkpath, 0, 0).await
                 }
             }
         }
@@ -2391,7 +2496,7 @@ mod prop_tests {
 
         // Create /subdir/nested.txt
         overlay
-            .write_file("/subdir/nested.txt", b"content")
+            .write_file("/subdir/nested.txt", b"content", 0, 0)
             .await
             .unwrap();
 
@@ -2400,7 +2505,7 @@ mod prop_tests {
         assert_eq!(data, Some(b"content".to_vec()));
 
         // Write /subdir as a FILE (overwriting the directory)
-        overlay.write_file("/subdir", b"file").await.unwrap();
+        overlay.write_file("/subdir", b"file", 0, 0).await.unwrap();
 
         // Now /subdir is a file, /subdir/nested.txt should NOT be accessible
         let data = overlay.read_file("/subdir/nested.txt").await.unwrap();

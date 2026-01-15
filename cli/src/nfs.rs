@@ -296,7 +296,7 @@ impl NFSFileSystem for AgentNFS {
         // Create empty file
         {
             let fs = self.fs.lock().await;
-            fs.write_file(&full_path, &[])
+            fs.write_file(&full_path, &[], 0, 0)
                 .await
                 .map_err(error_to_nfsstat)?;
         }
@@ -328,7 +328,7 @@ impl NFSFileSystem for AgentNFS {
         }
 
         // Create empty file
-        fs.write_file(&full_path, &[])
+        fs.write_file(&full_path, &[], 0, 0)
             .await
             .map_err(error_to_nfsstat)?;
 
@@ -347,7 +347,7 @@ impl NFSFileSystem for AgentNFS {
 
         {
             let fs = self.fs.lock().await;
-            fs.mkdir(&full_path).await.map_err(error_to_nfsstat)?;
+            fs.mkdir(&full_path, 0, 0).await.map_err(error_to_nfsstat)?;
         }
 
         let ino = self.inode_map.write().await.get_or_create_ino(&full_path);
@@ -466,7 +466,7 @@ impl NFSFileSystem for AgentNFS {
 
         {
             let fs = self.fs.lock().await;
-            fs.symlink(target, &full_path)
+            fs.symlink(target, &full_path, 0, 0)
                 .await
                 .map_err(error_to_nfsstat)?;
         }
