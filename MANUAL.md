@@ -26,11 +26,15 @@ agentfs init [OPTIONS] [ID]
 **Options:**
 - `--force` - Overwrite existing agent filesystem
 - `--base <PATH>` - Base directory for overlay filesystem (copy-on-write)
+- `--encryption-key <KEY>` - Hex-encoded encryption key for local encryption
+- `--cipher <CIPHER>` - Cipher algorithm (required with `--encryption-key`)
 - `--sync-remote-url <URL>` - Remote Turso database URL for sync
 - `--sync-partial-prefetch` - Enable prefetching for partial sync
 - `--sync-partial-segment-size <SIZE>` - Segment size for partial sync
 - `--sync-partial-bootstrap-query <QUERY>` - Custom bootstrap query
 - `--sync-partial-bootstrap-length <LENGTH>` - Bootstrap prefix length
+
+**Note:** Local encryption and cloud sync cannot be used together.
 
 ### agentfs run
 
@@ -44,6 +48,8 @@ agentfs run [OPTIONS] <COMMAND> [ARGS]...
 - `--session <ID>` - Named session for persistence across runs
 - `--allow <PATH>` - Allow write access to additional directories (repeatable)
 - `--no-default-allows` - Disable default allowed directories
+- `--encryption-key <KEY>` - Hex-encoded encryption key for delta layer
+- `--cipher <CIPHER>` - Cipher algorithm (required with `--encryption-key`)
 - `--experimental-sandbox` - Use ptrace-based syscall interception (Linux only)
 - `--strace` - Show intercepted syscalls (requires `--experimental-sandbox`)
 
@@ -126,10 +132,14 @@ agentfs sync <ID_OR_PATH> <SUBCOMMAND>
 
 Filesystem operations on agent databases.
 
+**Common Options:**
+- `--encryption-key <KEY>` - Hex-encoded encryption key for encrypted databases
+- `--cipher <CIPHER>` - Cipher algorithm (required with `--encryption-key`)
+
 #### agentfs fs ls
 
 ```
-agentfs fs ls <ID_OR_PATH> [FS_PATH]
+agentfs fs <ID_OR_PATH> [OPTIONS] ls [FS_PATH]
 ```
 
 List files and directories. Output: `f <name>` for files, `d <name>` for directories.
@@ -137,7 +147,7 @@ List files and directories. Output: `f <name>` for files, `d <name>` for directo
 #### agentfs fs cat
 
 ```
-agentfs fs cat <ID_OR_PATH> <FILE_PATH>
+agentfs fs <ID_OR_PATH> [OPTIONS] cat <FILE_PATH>
 ```
 
 Display file contents.
@@ -145,7 +155,7 @@ Display file contents.
 #### agentfs fs write
 
 ```
-agentfs fs write <ID_OR_PATH> <FILE_PATH> <CONTENT>
+agentfs fs <ID_OR_PATH> [OPTIONS] write <FILE_PATH> <CONTENT>
 ```
 
 Write content to a file.
@@ -186,13 +196,64 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`
 
 ## Environment Variables
 
-Variables set inside the sandbox:
+**Configuration variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `AGENTFS_ENCRYPTION_KEY` | Default encryption key (hex-encoded) |
+| `AGENTFS_CIPHER` | Default cipher algorithm |
+| `TURSO_DB_AUTH_TOKEN` | Authentication token for cloud sync |
+
+**Variables set inside the sandbox:**
 
 | Variable | Description |
 |----------|-------------|
 | `AGENTFS` | Set to `1` inside AgentFS sandbox |
 | `AGENTFS_SANDBOX` | Sandbox type: `macos-sandbox` or `linux-namespace` |
 | `AGENTFS_SESSION` | Current session ID |
+
+## Local Encryption
+
+AgentFS supports encrypting the local SQLite database at rest using libSQL's encryption feature.
+
+**Supported ciphers:**
+- `aes256gcm` - AES-256-GCM (requires 64-character hex key)
+- `aes128gcm` - AES-128-GCM (requires 32-character hex key)
+- `aegis256` - AEGIS-256 (requires 64-character hex key)
+- `aegis128l` - AEGIS-128L (requires 32-character hex key)
+- `aegis128x2`, `aegis128x4`, `aegis256x2`, `aegis256x4` - AEGIS variants
+
+**Example: Create an encrypted filesystem**
+
+```bash
+# Generate a 256-bit key (64 hex characters)
+KEY=$(openssl rand -hex 32)
+
+# Initialize with encryption
+agentfs init --encryption-key $KEY --cipher aes256gcm my-secure-agent
+
+# Access the filesystem
+agentfs fs my-secure-agent --encryption-key $KEY --cipher aes256gcm ls /
+```
+
+**Example: Encrypted sandbox session**
+
+```bash
+agentfs run --encryption-key $KEY --cipher aes256gcm -- bash
+```
+
+**Using environment variables:**
+
+```bash
+export AGENTFS_ENCRYPTION_KEY=$(openssl rand -hex 32)
+export AGENTFS_CIPHER=aes256gcm
+
+agentfs init my-secure-agent
+agentfs fs my-secure-agent ls /
+```
+
+**Limitations:**
+- Local encryption cannot be used with cloud sync (`--sync-remote-url`)
 
 ## Files
 
