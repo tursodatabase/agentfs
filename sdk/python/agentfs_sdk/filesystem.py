@@ -125,11 +125,10 @@ class Filesystem:
             );
 
             CREATE TABLE IF NOT EXISTS fs_dentry (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 parent_ino INTEGER NOT NULL,
                 ino INTEGER NOT NULL,
-                UNIQUE(parent_ino, name)
+                PRIMARY KEY(parent_ino, name)
             );
 
             CREATE INDEX IF NOT EXISTS idx_fs_dentry_parent

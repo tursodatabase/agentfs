@@ -215,11 +215,10 @@ Maps names to inodes (directory entries).
 
 ```sql
 CREATE TABLE fs_dentry (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   parent_ino INTEGER NOT NULL,
   ino INTEGER NOT NULL,
-  UNIQUE(parent_ino, name)
+  PRIMARY KEY(parent_ino, name)
 )
 
 CREATE INDEX idx_fs_dentry_parent ON fs_dentry(parent_ino, name)
@@ -227,7 +226,6 @@ CREATE INDEX idx_fs_dentry_parent ON fs_dentry(parent_ino, name)
 
 **Fields:**
 
-- `id` - Internal entry ID
 - `name` - Basename (filename or directory name)
 - `parent_ino` - Parent directory inode number
 - `ino` - Inode this entry points to
