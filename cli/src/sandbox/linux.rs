@@ -186,13 +186,12 @@ pub async fn run_cmd(
         .context("Database path contains non-UTF8 characters")?;
 
     // Parse compression mode
-    let compression_mode =
-        agentfs_sdk::CompressionMode::parse(&compression).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Invalid compression mode '{}'. Must be 'zstd' or 'none'",
-                compression
-            )
-        })?;
+    let compression_mode = agentfs_sdk::CompressionMode::parse(&compression).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid compression mode '{}'. Must be 'zstd' or 'none'",
+            compression
+        )
+    })?;
 
     let agentfs =
         AgentFS::open(AgentFSOptions::with_path(db_path_str).with_compression(compression_mode))
