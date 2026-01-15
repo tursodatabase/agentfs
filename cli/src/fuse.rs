@@ -8,6 +8,7 @@ use crate::fuser::{
     Request,
 };
 use agentfs_sdk::error::Error as SdkError;
+use agentfs_sdk::filesystem::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFSOCK};
 use agentfs_sdk::{BoxedFile, FileSystem, Stats};
 use parking_lot::Mutex;
 use std::{
@@ -546,6 +547,67 @@ impl Filesystem for AgentFSFuse {
         }
 
         reply.ok();
+    }
+
+    /// Creates a special file node (FIFO, device, socket, or regular file).
+    ///
+    /// Creates a file node at `name` under `parent` with the specified mode
+    /// and device number, then stats it to return proper attributes.
+    fn mknod(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        tracing::debug!(
+            "FUSE::mknod: parent={}, name={:?}, mode={:o}, rdev={}",
+            parent,
+            name,
+            mode,
+            rdev
+        );
+        let Some(path) = self.lookup_path(parent, name) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+
+        let uid = req.uid();
+        let gid = req.gid();
+        let fs = self.fs.clone();
+        let (result, path) = self.runtime.block_on(async move {
+            let result = fs.mknod(&path, mode, rdev as u64, uid, gid).await;
+            (result, path)
+        });
+
+        if let Err(e) = result {
+            reply.error(error_to_errno(&e));
+            return;
+        }
+
+        // Get the new node's stats
+        let fs = self.fs.clone();
+        let (stat_result, path) = self.runtime.block_on(async move {
+            let result = fs.stat(&path).await;
+            (result, path)
+        });
+
+        match stat_result {
+            Ok(Some(stats)) => {
+                let attr = fillattr(&stats);
+                self.add_path(attr.ino, path);
+                reply.entry(&TTL, &attr, 0);
+            }
+            Ok(None) => {
+                reply.error(libc::ENOENT);
+            }
+            Err(e) => {
+                reply.error(error_to_errno(&e));
+            }
+        }
     }
 
     /// Creates a new directory.
@@ -1271,15 +1333,18 @@ impl AgentFSFuse {
 /// The uid and gid parameters override the stored values to ensure proper
 /// file ownership reporting (avoids "dubious ownership" errors from git).
 fn fillattr(stats: &Stats) -> FileAttr {
-    let kind = if stats.is_directory() {
-        FileType::Directory
-    } else if stats.is_symlink() {
-        FileType::Symlink
-    } else {
-        FileType::RegularFile
+    let file_type = stats.mode & S_IFMT;
+    let kind = match file_type {
+        S_IFDIR => FileType::Directory,
+        S_IFLNK => FileType::Symlink,
+        S_IFIFO => FileType::NamedPipe,
+        S_IFCHR => FileType::CharDevice,
+        S_IFBLK => FileType::BlockDevice,
+        S_IFSOCK => FileType::Socket,
+        _ => FileType::RegularFile,
     };
 
-    let size = if stats.is_directory() {
+    let size = if file_type == S_IFDIR {
         4096_u64 // Standard directory size
     } else {
         stats.size as u64
@@ -1298,7 +1363,7 @@ fn fillattr(stats: &Stats) -> FileAttr {
         nlink: stats.nlink,
         uid: stats.uid,
         gid: stats.gid,
-        rdev: 0,
+        rdev: stats.rdev as u32,
         flags: 0,
         blksize: 512,
     }

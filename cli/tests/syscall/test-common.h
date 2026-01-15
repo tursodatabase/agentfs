@@ -53,5 +53,7 @@ int test_unlink(const char *base_path);
 int test_copyup_inode_stability(const char *base_path);
 int test_rename(const char *base_path);
 int test_chown(const char *base_path);
+int test_mknod(const char *base_path);
+int test_mkfifo(const char *base_path);
 
 #endif /* TEST_COMMON_H */

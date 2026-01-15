@@ -303,7 +303,7 @@ impl File for AgentFSFile {
     async fn fstat(&self) -> Result<Stats> {
         let conn = self.pool.get_connection().await?;
         let mut stmt = conn
-            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?")
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((self.ino,)).await?;
 
@@ -466,7 +466,8 @@ impl AgentFS {
                 size INTEGER NOT NULL DEFAULT 0,
                 atime INTEGER NOT NULL,
                 mtime INTEGER NOT NULL,
-                ctime INTEGER NOT NULL
+                ctime INTEGER NOT NULL,
+                rdev INTEGER NOT NULL DEFAULT 0
             )",
             (),
         )
@@ -734,6 +735,11 @@ impl AgentFS {
                 .ok()
                 .and_then(|v| v.as_integer().copied())
                 .unwrap_or(0),
+            rdev: row
+                .get_value(9)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u64,
         })
     }
 
@@ -813,7 +819,7 @@ impl AgentFS {
         };
 
         let mut stmt = conn
-            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?")
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
 
@@ -835,7 +841,7 @@ impl AgentFS {
         let max_symlink_depth = 40; // Standard limit for symlink following
 
         let mut stmt = conn.prepare_cached(
-            "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
+            "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?",
         ).await?;
         for _ in 0..max_symlink_depth {
             let ino = match self.resolve_path_with_conn(&conn, &current_path).await? {
@@ -903,7 +909,7 @@ impl AgentFS {
 
             let mut rows = conn
                 .query(
-                    "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime FROM fs_inode WHERE ino = ?",
+                    "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?",
                     (ino,),
                 )
                 .await?;
@@ -987,6 +993,70 @@ impl AgentFS {
             .await?;
         let row = stmt
             .query_row((DEFAULT_DIR_MODE as i64, uid, gid, now, now, now))
+            .await?;
+
+        let ino = row
+            .get_value(0)
+            .ok()
+            .and_then(|v| v.as_integer().copied())
+            .ok_or_else(|| Error::Internal("failed to get inode".to_string()))?;
+
+        // Create directory entry
+        let mut stmt = conn
+            .prepare_cached("INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)")
+            .await?;
+        stmt.execute((name.as_str(), parent_ino, ino)).await?;
+
+        // Increment link count
+        let mut stmt = conn
+            .prepare_cached("UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
+            .await?;
+        stmt.execute((ino,)).await?;
+
+        // Populate dentry cache
+        self.dentry_cache.insert(parent_ino, name, ino);
+
+        Ok(())
+    }
+
+    /// Create a special file node (FIFO, device, socket, or regular file)
+    pub async fn mknod(&self, path: &str, mode: u32, rdev: u64, uid: u32, gid: u32) -> Result<()> {
+        let conn = self.pool.get_connection().await?;
+        let path = self.normalize_path(path);
+        let components = self.split_path(&path);
+
+        if components.is_empty() {
+            return Err(FsError::RootOperation.into());
+        }
+
+        let parent_path = if components.len() == 1 {
+            "/".to_string()
+        } else {
+            format!("/{}", components[..components.len() - 1].join("/"))
+        };
+
+        let parent_ino = self
+            .resolve_path_with_conn(&conn, &parent_path)
+            .await?
+            .ok_or(FsError::NotFound)?;
+
+        let name = components.last().unwrap();
+
+        // Check if already exists
+        if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+            return Err(FsError::AlreadyExists.into());
+        }
+
+        // Create inode with mode and rdev
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, rdev)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?) RETURNING ino",
+            )
+            .await?;
+        let row = stmt
+            .query_row((mode as i64, uid, gid, now, now, now, rdev as i64))
             .await?;
 
         let ino = row
@@ -1208,6 +1278,7 @@ impl AgentFS {
             atime: now,
             mtime: now,
             ctime: now,
+            rdev: 0,
         };
 
         let file: BoxedFile = Arc::new(AgentFSFile {
@@ -1688,7 +1759,7 @@ impl AgentFS {
             None => return Ok(None),
         };
 
-        let mut stmt = conn.prepare_cached("SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime
+        let mut stmt = conn.prepare_cached("SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev
             FROM fs_dentry d
             JOIN fs_inode i ON d.ino = i.ino
             WHERE d.parent_ino = ?
@@ -1765,6 +1836,11 @@ impl AgentFS {
                     .ok()
                     .and_then(|v| v.as_integer().copied())
                     .unwrap_or(0),
+                rdev: row
+                    .get_value(10)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u64,
             };
 
             entries.push(DirEntry { name, stats });
@@ -2492,6 +2568,10 @@ impl FileSystem for AgentFS {
 
     async fn statfs(&self) -> Result<FilesystemStats> {
         AgentFS::statfs(self).await
+    }
+
+    async fn mknod(&self, path: &str, mode: u32, rdev: u64, uid: u32, gid: u32) -> Result<()> {
+        AgentFS::mknod(self, path, mode, rdev, uid, gid).await
     }
 
     async fn open(&self, path: &str) -> Result<BoxedFile> {

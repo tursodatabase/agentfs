@@ -19,7 +19,9 @@ SRCS = main.c \
        test-link.c \
        test-unlink.c \
        test-copyup-inode-stability.c \
-       test-rename.c
+       test-rename.c \
+       test-mknod.c \
+       test-mkfifo.c
 
 # Object files
 OBJS = $(SRCS:.c=.o)

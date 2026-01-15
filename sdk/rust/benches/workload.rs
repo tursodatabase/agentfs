@@ -307,13 +307,13 @@ async fn execute_operation(overlay: &OverlayFS, op: Operation, path: &str) {
     match op {
         Operation::CreateFile => {
             // Ignore errors - path may not exist, which is expected
-            let _ = overlay.create_file(path, 0o100644).await;
+            let _ = overlay.create_file(path, 0o100644, 0, 0).await;
         }
         Operation::Lstat => {
             let _ = overlay.lstat(path).await;
         }
         Operation::Mkdir => {
-            let _ = overlay.mkdir(path).await;
+            let _ = overlay.mkdir(path, 0, 0).await;
         }
         Operation::Open => {
             let _ = overlay.open(path).await;

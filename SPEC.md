@@ -1,6 +1,6 @@
 # Agent Filesystem Specification
 
-**Version:** 0.3
+**Version:** 0.4
 
 ## Introduction
 
@@ -170,7 +170,8 @@ CREATE TABLE fs_inode (
   size INTEGER NOT NULL DEFAULT 0,
   atime INTEGER NOT NULL,
   mtime INTEGER NOT NULL,
-  ctime INTEGER NOT NULL
+  ctime INTEGER NOT NULL,
+  rdev INTEGER NOT NULL DEFAULT 0
 )
 ```
 
@@ -185,6 +186,7 @@ CREATE TABLE fs_inode (
 - `atime` - Last access time (Unix timestamp, seconds)
 - `mtime` - Last modification time (Unix timestamp, seconds)
 - `ctime` - Creation/change time (Unix timestamp, seconds)
+- `rdev` - Device number for character and block devices (major/minor encoded)
 
 **Mode Encoding:**
 
@@ -196,6 +198,10 @@ File type (upper bits):
   0o100000 - Regular file (S_IFREG)
   0o040000 - Directory (S_IFDIR)
   0o120000 - Symbolic link (S_IFLNK)
+  0o010000 - FIFO/named pipe (S_IFIFO)
+  0o020000 - Character device (S_IFCHR)
+  0o060000 - Block device (S_IFBLK)
+  0o140000 - Socket (S_IFSOCK)
 
 Permissions (lower 12 bits):
   0o000777 - Permission bits (rwxrwxrwx)
@@ -417,7 +423,7 @@ To read `length` bytes starting at byte offset `offset`:
 1. Resolve path to inode
 2. Query inode (includes link count):
    ```sql
-   SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
+   SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev
    FROM fs_inode WHERE ino = ?
    ```
 
@@ -684,6 +690,13 @@ Implementations MAY extend the key-value store schema with additional functional
 Such extensions SHOULD use separate tables to maintain referential integrity.
 
 ## Revision History
+
+### Version 0.4
+
+- Added POSIX special file support (FIFOs, character devices, block devices, sockets)
+- Added `rdev` column to `fs_inode` table for device major/minor numbers
+- Added `S_IFIFO`, `S_IFCHR`, `S_IFBLK`, `S_IFSOCK` file type constants to Mode Encoding
+- Updated stat query to include `rdev` field
 
 ### Version 0.3
 

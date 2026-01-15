@@ -71,6 +71,10 @@ pub const S_IFMT: u32 = 0o170000; // File type mask
 pub const S_IFREG: u32 = 0o100000; // Regular file
 pub const S_IFDIR: u32 = 0o040000; // Directory
 pub const S_IFLNK: u32 = 0o120000; // Symbolic link
+pub const S_IFIFO: u32 = 0o010000; // FIFO (named pipe)
+pub const S_IFCHR: u32 = 0o020000; // Character device
+pub const S_IFBLK: u32 = 0o060000; // Block device
+pub const S_IFSOCK: u32 = 0o140000; // Socket
 
 // Default permissions
 pub const DEFAULT_FILE_MODE: u32 = S_IFREG | 0o644; // Regular file, rw-r--r--
@@ -88,6 +92,7 @@ pub struct Stats {
     pub atime: i64,
     pub mtime: i64,
     pub ctime: i64,
+    pub rdev: u64, // Device ID for special files (char/block devices)
 }
 
 /// Filesystem statistics for statfs
@@ -225,6 +230,13 @@ pub trait FileSystem: Send + Sync {
     /// The returned file handle can be used for efficient read/write/fsync
     /// operations without requiring path lookups on each operation.
     async fn open(&self, path: &str) -> Result<BoxedFile>;
+
+    /// Create a special file node (FIFO, device, socket, or regular file).
+    ///
+    /// The mode parameter specifies both the file type (S_IFIFO, S_IFCHR, S_IFBLK,
+    /// S_IFSOCK, S_IFREG) and the permissions.
+    /// The rdev parameter is the device number for character and block devices.
+    async fn mknod(&self, path: &str, mode: u32, rdev: u64, uid: u32, gid: u32) -> Result<()>;
 
     /// Create a new empty file with the specified mode and ownership.
     ///

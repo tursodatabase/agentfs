@@ -1033,6 +1033,33 @@ impl FileSystem for OverlayFS {
         Ok(())
     }
 
+    async fn mknod(&self, path: &str, mode: u32, rdev: u64, uid: u32, gid: u32) -> Result<()> {
+        tracing::debug!(
+            "OverlayFS::mknod: path={}, mode={:o}, rdev={}",
+            path,
+            mode,
+            rdev
+        );
+        let normalized = self.normalize_path(path);
+
+        // Check if already exists (in either layer, not whiteout)
+        if !self.is_whiteout(&normalized)
+            && (self.delta.stat(&normalized).await?.is_some()
+                || self.base.stat(&normalized).await?.is_some())
+        {
+            return Err(FsError::AlreadyExists.into());
+        }
+
+        // Remove any whiteout
+        self.remove_whiteout(&normalized).await?;
+
+        // Ensure parent directories exist
+        self.ensure_parent_dirs(&normalized, uid, gid).await?;
+
+        // Create in delta
+        self.delta.mknod(&normalized, mode, rdev, uid, gid).await
+    }
+
     async fn remove(&self, path: &str) -> Result<()> {
         tracing::debug!("OverlayFS::remove: path={}", path);
         let normalized = self.normalize_path(path);

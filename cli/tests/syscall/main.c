@@ -35,6 +35,8 @@ int main(int argc, char *argv[]) {
         {"unlink", test_unlink},
         {"copyup_inode_stability", test_copyup_inode_stability},
         {"rename", test_rename},
+        {"mknod", test_mknod},
+        {"mkfifo", test_mkfifo},
     };
 
     int num_tests = sizeof(tests) / sizeof(tests[0]);

@@ -148,6 +148,7 @@ impl HostFS {
             atime: metadata.atime(),
             mtime: metadata.mtime(),
             ctime: metadata.ctime(),
+            rdev: metadata.rdev(),
         }
     }
 }
@@ -265,6 +266,21 @@ impl FileSystem for HostFS {
     async fn mkdir(&self, path: &str, _uid: u32, _gid: u32) -> Result<()> {
         let full_path = self.resolve_path(path);
         fs::create_dir(&full_path).await?;
+        Ok(())
+    }
+
+    async fn mknod(&self, path: &str, mode: u32, rdev: u64, _uid: u32, _gid: u32) -> Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let full_path = self.resolve_path(path);
+        let c_path = std::ffi::CString::new(full_path.as_os_str().as_bytes())
+            .map_err(|_| Error::Internal("invalid path".to_string()))?;
+
+        let result =
+            unsafe { libc::mknod(c_path.as_ptr(), mode as libc::mode_t, rdev as libc::dev_t) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
         Ok(())
     }
 
