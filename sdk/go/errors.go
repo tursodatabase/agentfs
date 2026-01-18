@@ -2,6 +2,10 @@ package agentfs
 
 import "fmt"
 
+var (
+	_ error = (*ErrnoException)(nil)
+)
+
 // POSIX-style error codes for filesystem operations.
 type FsErrorCode string
 
@@ -33,20 +37,14 @@ const (
 )
 
 type ErrnoException struct {
-	Code    *FsErrorCode
+	Code    FsErrorCode
 	Syscall *FsSyscall
 	Path    *string
+	Message *string
 }
 
 // ErrnoException implements the error interface
 func (e *ErrnoException) Error() string {
-	var code string
-	switch e.Code {
-	case nil:
-		code = "no code"
-	default:
-		code = string(*e.Code)
-	}
 	var syscall string
 	switch e.Syscall {
 	case nil:
@@ -61,37 +59,12 @@ func (e *ErrnoException) Error() string {
 	default:
 		path = *e.Path
 	}
-	return fmt.Sprintf("%s: %s %s", code, syscall, path)
-}
-
-func (e *ErrnoException) ErrorWithMessage(message *string) string {
 	var msg string
-	switch message {
+	switch e.Message {
 	case nil:
-		msg = ""
+		msg = "no message"
 	default:
-		msg = *message
+		msg = *e.Message
 	}
-	var code string
-	switch e.Code {
-	case nil:
-		code = "no code"
-	default:
-		code = string(*e.Code)
-	}
-	var syscall string
-	switch e.Syscall {
-	case nil:
-		syscall = "no syscall"
-	default:
-		syscall = string(*e.Syscall)
-	}
-	var path string
-	switch e.Path {
-	case nil:
-		path = "no path"
-	default:
-		path = *e.Path
-	}
-	return fmt.Sprintf("%s: %s, %s %s", code, msg, syscall, path)
+	return fmt.Sprintf("%s: %s, %s %s", e.Code, msg, syscall, path)
 }

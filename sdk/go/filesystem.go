@@ -6,13 +6,18 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "turso.tech/database/tursogo"
 )
 
+const DefaultChunkSize int = 4096
+
 var (
 	_ FileHandle = (*AgentFSFile)(nil)
+	_ FileSystem = (*AgentFS)(nil)
 )
 
 type AgentFSFile struct {
@@ -316,4 +321,423 @@ func (f *AgentFSFile) Fstat() (stats Stats, err error) {
 	}
 	stats = data
 	return
+}
+
+type AgentFS struct {
+	db        *sql.DB
+	rootIno   int
+	chunkSize int
+}
+
+func NewAgentFS(db *sql.DB) *AgentFS {
+	return &AgentFS{
+		db:        db,
+		rootIno:   1,
+		chunkSize: DefaultChunkSize,
+	}
+}
+
+func AgentFSFromDabatase(db *sql.DB) *AgentFS {
+	agentfs := &AgentFS{
+		db:        db,
+		rootIno:   1,
+		chunkSize: DefaultChunkSize,
+	}
+	agentfs.initialize()
+	return agentfs
+}
+
+func (this *AgentFS) GetChunkSize() int {
+	return this.chunkSize
+}
+
+func (this *AgentFS) initialize() (err error) {
+	ctx := context.Background()
+	_, err = this.db.ExecContext(ctx, `
+      CREATE TABLE IF NOT EXISTS fs_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `)
+	if err != nil {
+		return
+	}
+
+	_, err = this.db.ExecContext(ctx, `
+      CREATE TABLE IF NOT EXISTS fs_inode (
+        ino INTEGER PRIMARY KEY AUTOINCREMENT,
+        mode INTEGER NOT NULL,
+        nlink INTEGER NOT NULL DEFAULT 0,
+        uid INTEGER NOT NULL DEFAULT 0,
+        gid INTEGER NOT NULL DEFAULT 0,
+        size INTEGER NOT NULL DEFAULT 0,
+        atime INTEGER NOT NULL,
+        mtime INTEGER NOT NULL,
+        ctime INTEGER NOT NULL
+      )
+    `)
+	if err != nil {
+		return
+	}
+
+	_, err = this.db.ExecContext(ctx, `
+      CREATE TABLE IF NOT EXISTS fs_dentry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        parent_ino INTEGER NOT NULL,
+        ino INTEGER NOT NULL,
+        UNIQUE(parent_ino, name)
+      )
+    `)
+	if err != nil {
+		return
+	}
+	_, err = this.db.ExecContext(ctx, `
+      CREATE INDEX IF NOT EXISTS idx_fs_dentry_parent
+      ON fs_dentry(parent_ino, name)
+    `)
+	if err != nil {
+		return
+	}
+
+	_, err = this.db.ExecContext(ctx, `
+      CREATE TABLE IF NOT EXISTS fs_data (
+        ino INTEGER NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        data BLOB NOT NULL,
+        PRIMARY KEY (ino, chunk_index)
+      )
+    `)
+	if err != nil {
+		return
+	}
+
+	_, err = this.db.ExecContext(ctx, `
+      CREATE TABLE IF NOT EXISTS fs_symlink (
+        ino INTEGER PRIMARY KEY,
+        target TEXT NOT NULL
+      )
+    `)
+	if err != nil {
+		return
+	}
+
+	this.chunkSize, err = this.ensureRoot()
+	return
+}
+
+func (this *AgentFS) ensureRoot() (chunkSize int, err error) {
+	ctx := context.Background()
+	configStmt, err := this.db.PrepareContext(ctx,
+		"SELECT value FROM fs_config WHERE key = 'chunk_size'",
+	)
+	if err != nil {
+		return
+	}
+	row := configStmt.QueryRowContext(ctx)
+	var config struct {
+		value string
+	}
+	err = row.Scan(&config)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return
+		} else {
+			insertConfigStmt, err := this.db.PrepareContext(ctx, `
+			     INSERT INTO fs_config (key, value) VALUES ('chunk_size', ?)
+			   `)
+			if err != nil {
+				return 0, err
+			}
+			_, err = insertConfigStmt.ExecContext(ctx, strconv.Itoa(DefaultChunkSize))
+			if err != nil {
+				return 0, err
+			}
+			chunkSize = DefaultChunkSize
+			err = insertConfigStmt.Close()
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+	chunkSize, err = strconv.Atoi(config.value)
+	if err != nil {
+		return
+	}
+	stmt, err := this.db.PrepareContext(ctx, "SELECT ino FROM fs_inode WHERE ino = ?")
+	if err != nil {
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	rootRow := stmt.QueryRowContext(ctx, this.rootIno)
+	var ino int
+	err = rootRow.Scan(&ino)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			now := int(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+			insertStmt, err := this.db.PrepareContext(ctx, `
+			     INSERT INTO fs_inode (ino, mode, nlink, uid, gid, size, atime, mtime, ctime)
+			     VALUES (?, ?, 1, 0, 0, 0, ?, ?, ?)
+			   `)
+			if err != nil {
+				return 0, err
+			}
+			_, err = insertStmt.ExecContext(ctx, this.rootIno, DEFAULT_DIR_MODE, now, now, now)
+			if err != nil {
+				return 0, err
+			}
+			err = insertStmt.Close()
+			if err != nil {
+				return 0, err
+			}
+		} else {
+			return
+		}
+	}
+	return
+}
+
+func (this *AgentFS) normalizePath(path string) string {
+	normalized := strings.TrimRight(path, "/")
+	if normalized == "" {
+		normalized = "/"
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	return normalized
+}
+
+func (this *AgentFS) splitPath(path string) []string {
+	normalized := this.normalizePath(path)
+	if normalized == "/" {
+		return []string{}
+	}
+	parts := strings.Split(normalized, "/")
+	if len(parts) > 0 && parts[0] == "" {
+		return parts[1:]
+	}
+	return parts
+}
+
+func (this *AgentFS) resolvePathOrThrow(
+	path string,
+	syscall FsSyscall,
+) (*struct {
+	normalizedPath string
+	ino            int
+}, error) {
+	normalizedPath := this.normalizePath(path)
+	ino, err := this.resolvePath(normalizedPath)
+	if err != nil {
+		message := "no such file or directory"
+		return nil, &ErrnoException{
+			Code:    ErrNoEnt,
+			Syscall: &syscall,
+			Path:    &normalizedPath,
+			Message: &message,
+		}
+	}
+	return &struct {
+		normalizedPath string
+		ino            int
+	}{
+		normalizedPath: normalizedPath,
+		ino:            ino,
+	}, nil
+}
+
+func (this *AgentFS) resolvePath(path string) (int, error) {
+	ctx := context.Background()
+	normalized := this.normalizePath(path)
+
+	if normalized == "/" {
+		return this.rootIno, nil
+	}
+
+	parts := this.splitPath(normalized)
+	currentIno := this.rootIno
+
+	for _, name := range parts {
+		stmt, err := this.db.PrepareContext(ctx, `
+      SELECT ino FROM fs_dentry
+      WHERE parent_ino = ? AND name = ?
+    `)
+		if err != nil {
+			return 0, err
+		}
+		var result struct {
+			ino int
+		}
+		row := stmt.QueryRowContext(ctx, currentIno, name)
+		err = row.Scan(&result)
+		if err != nil {
+			return 0, err
+		}
+		currentIno = result.ino
+		err = stmt.Close()
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	return currentIno, nil
+}
+
+func (this *AgentFS) resolveParent(path string) (*struct {
+	parentIno int
+	name      string
+}, error) {
+	normalized := this.normalizePath(path)
+	if normalized == "/" {
+		return nil, nil
+	}
+	parts := this.splitPath(normalized)
+	name := parts[len(parts)-1]
+	var parentPath string
+	if len(parts) == 1 {
+		parentPath = "/"
+	} else {
+		parentPath = "/" + strings.Join(parts[0:len(parts)-1], "/")
+	}
+	parentIno, err := this.resolvePath(parentPath)
+	if err != nil {
+		return nil, err
+	}
+	return &struct {
+		parentIno int
+		name      string
+	}{parentIno: parentIno, name: name}, nil
+}
+
+func (this *AgentFS) createInode(
+	mode int,
+	uid int,
+	gid int,
+) (int, error) {
+	ctx := context.Background()
+	now := int(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	insertStmt, err := this.db.PrepareContext(ctx, `
+  		INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
+    	VALUES (?, ?, ?, 0, ?, ?, ?)
+     	RETURNING ino
+	   `)
+	if err != nil {
+		return 0, err
+	}
+	row := insertStmt.QueryRowContext(ctx, mode, uid, gid, now, now, now)
+	var ino int
+	err = row.Scan(&ino)
+	if err != nil {
+		return 0, err
+	}
+	err = insertStmt.Close()
+	if err != nil {
+		return 0, err
+	}
+	return ino, nil
+}
+
+func (this *AgentFS) createDentry(
+	parentIno int,
+	name string,
+	ino int,
+) (err error) {
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+     INSERT INTO fs_dentry (name, parent_ino, ino)
+     VALUES (?, ?, ?)
+   `)
+	if err != nil {
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	_, err = stmt.ExecContext(ctx, parentIno, ino)
+	if err != nil {
+		return
+	}
+	updateStmt, err := this.db.PrepareContext(ctx, "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
+	if err != nil {
+		return
+	}
+	defer func() { err = updateStmt.Close() }()
+	_, err = updateStmt.ExecContext(ctx, ino)
+	return
+}
+
+func (this *AgentFS) ensureParentDirs(path string) error {
+	parts := this.splitPath(path)
+	parts = parts[:len(parts)-1]
+	ctx := context.Background()
+	currentIno := this.rootIno
+	for _, name := range parts {
+		stmt, err := this.db.PrepareContext(ctx, `
+       	SELECT ino FROM fs_dentry
+        WHERE parent_ino = ? AND name = ?
+       `)
+		if err != nil {
+			return err
+		}
+		var result struct {
+			ino int
+		}
+		row := stmt.QueryRowContext(ctx, currentIno, name)
+		err = row.Scan(&result)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				dirIno, err := this.createInode(DEFAULT_DIR_MODE, 0, 0)
+				if err != nil {
+					return err
+				}
+				this.createDentry(currentIno, name, dirIno)
+			} else {
+				return err
+			}
+		}
+		err = assertInodeIsDirectory(this.db, result.ino, Open, this.normalizePath(path))
+		if err != nil {
+			return err
+		}
+		currentIno = result.ino
+	}
+	return nil
+}
+
+func (this *AgentFS) getLinkCount(ino int) (int, error) {
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, "SELECT nlink FROM fs_inode WHERE ino = ?")
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		nlink int
+	}
+	row := stmt.QueryRowContext(ctx, ino)
+	err = row.Scan(&result)
+	if err != nil {
+		return 0, err
+	}
+	err = stmt.Close()
+	if err != nil {
+		return 0, err
+	}
+	return result.nlink, nil
+}
+
+func (this *AgentFS) getInodeMode(ino int) (int, error) {
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, "SELECT mode FROM fs_inode WHERE ino = ?")
+	var result struct {
+		mode int
+	}
+	row := stmt.QueryRowContext(ctx, ino)
+	err = row.Scan(&result)
+	if err != nil {
+		return 0, err
+	}
+	err = stmt.Close()
+	if err != nil {
+		return 0, err
+	}
+	return result.mode, nil
 }
