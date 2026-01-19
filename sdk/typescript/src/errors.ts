@@ -9,7 +9,8 @@ export type FsErrorCode =
   | 'ENOTEMPTY' // Directory not empty
   | 'EPERM'     // Operation not permitted
   | 'EINVAL'    // Invalid argument
-  | 'ENOSYS';   // Function not implemented (use for symlinks)
+  | 'ENOSPC'    // Not enough space
+  | 'ENOSYS'   // Function not implemented (use for symlinks)
 
 /**
  * Filesystem syscall names for error reporting.
@@ -25,6 +26,7 @@ export type FsSyscall =
   | 'rename'
   | 'scandir'
   | 'copyfile'
+  | 'write'
   | 'access';
 
 export interface ErrnoException extends Error {
