@@ -160,10 +160,15 @@ pub async fn run_cmd(
 
     // If the FUSE mountpoint is already mounted, join the existing session
     if is_mountpoint(&session.fuse_mountpoint) {
+        // Get the original base path from the session's base_path file
+        let overlay_base = std::fs::read_to_string(&session.base_path_file)
+            .context("Failed to read session base path")?;
+        let overlay_base = PathBuf::from(overlay_base.trim());
+
         eprintln!("Joining existing session: {}", session.run_id);
         eprintln!();
         return run_in_existing_session(
-            &cwd,
+            &overlay_base,
             &session.fuse_mountpoint,
             &allowed_paths,
             command,
@@ -215,6 +220,10 @@ pub async fn run_cmd(
         .init(cwd_str)
         .await
         .context("Failed to initialize overlay")?;
+
+    // Write the base path to a file for session joining
+    std::fs::write(&session.base_path_file, cwd_str)
+        .context("Failed to write session base path")?;
 
     let overlay: Arc<dyn FileSystem> = Arc::new(overlay);
 
@@ -439,6 +448,8 @@ struct RunSession {
     db_path: PathBuf,
     /// Path where FUSE filesystem will be mounted.
     fuse_mountpoint: PathBuf,
+    /// Path to the file storing the overlay base path.
+    base_path_file: PathBuf,
 }
 
 /// Create a run directory with database and mountpoint paths.
@@ -453,12 +464,14 @@ fn setup_run_directory(session_id: Option<String>) -> Result<RunSession> {
 
     let db_path = run_dir.join("delta.db");
     let fuse_mountpoint = run_dir.join("mnt");
+    let base_path_file = run_dir.join("base_path");
     std::fs::create_dir_all(&fuse_mountpoint).context("Failed to create FUSE mountpoint")?;
 
     Ok(RunSession {
         run_id,
         db_path,
         fuse_mountpoint,
+        base_path_file,
     })
 }
 
