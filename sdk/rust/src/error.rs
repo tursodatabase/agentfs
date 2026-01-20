@@ -68,6 +68,10 @@ pub enum Error {
     /// Internal error (for unexpected conditions)
     #[error("{0}")]
     Internal(String),
+
+    /// Snapshot error
+    #[error("snapshot error: {0}")]
+    Snapshot(String),
 }
 
 /// Result type alias using the SDK Error type.
