@@ -608,6 +608,63 @@ impl AgentFS {
         Ok(whiteouts)
     }
 
+    /// Create a snapshot of the current database state.
+    ///
+    /// This creates a point-in-time copy of the database by checkpointing the WAL
+    /// and copying the database file. The snapshot is consistent because we
+    /// checkpoint first to ensure all data is written to the main database file.
+    ///
+    /// # Arguments
+    /// * `dest_path` - Path where the snapshot will be saved (e.g., "/path/to/snapshot.db")
+    ///
+    /// # Example
+    /// ```no_run
+    /// use agentfs_sdk::{AgentFS, AgentFSOptions};
+    ///
+    /// # async fn example() -> agentfs_sdk::error::Result<()> {
+    /// let agent = AgentFS::open(AgentFSOptions::with_id("my-agent")).await?;
+    /// agent.snapshot("/tmp/my-agent-snapshot.db").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn snapshot(&self, dest_path: &str) -> Result<()> {
+        let conn = self.pool.get_connection().await?;
+
+        // Checkpoint the WAL to ensure all data is in the main database file
+        // PRAGMA wal_checkpoint(TRUNCATE) writes all WAL content to the database
+        // and truncates the WAL file
+        let mut checkpoint_rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
+        // Consume the result rows
+        while let Some(_) = checkpoint_rows.next().await? {}
+
+        // Get the source database path by querying the database filename
+        let mut rows = conn.query("PRAGMA database_list", ()).await?;
+        let mut source_path: Option<String> = None;
+
+        while let Some(row) = rows.next().await? {
+            // database_list returns: seq, name, file
+            // We want the 'file' column (index 2) for the 'main' database
+            if let Ok(Value::Text(name)) = row.get_value(1) {
+                if name == "main" {
+                    if let Ok(Value::Text(file)) = row.get_value(2) {
+                        if !file.is_empty() {
+                            source_path = Some(file.clone());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        let source_path = source_path
+            .ok_or_else(|| Error::Snapshot("Cannot snapshot in-memory database".to_string()))?;
+
+        // Copy the database file
+        std::fs::copy(&source_path, dest_path)?;
+
+        Ok(())
+    }
+
     /// Check if overlay is enabled for this filesystem
     ///
     /// Returns the base path if overlay is enabled, None otherwise.
@@ -918,5 +975,136 @@ mod tests {
         for file_name in file_names {
             let _ = std::fs::remove_file(agentfs_dir().join(file_name));
         }
+    }
+
+    #[tokio::test]
+    async fn test_snapshot() {
+        let temp_dir = std::env::temp_dir();
+        let source_path = temp_dir.join("test_snapshot_source.db");
+        let snapshot_path = temp_dir.join("test_snapshot_dest.db");
+
+        // Cleanup any existing files
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&snapshot_path);
+
+        // Create source database and add some data
+        {
+            let agentfs = AgentFS::open(AgentFSOptions::with_path(source_path.to_str().unwrap()))
+                .await
+                .unwrap();
+
+            // Add KV data
+            agentfs
+                .kv
+                .set("snapshot_key", &"snapshot_value")
+                .await
+                .unwrap();
+
+            // Add filesystem data
+            agentfs.fs.mkdir("/snapshot_dir", 0, 0).await.unwrap();
+            let (_, file) = agentfs
+                .fs
+                .create_file("/snapshot_dir/file.txt", DEFAULT_FILE_MODE, 0, 0)
+                .await
+                .unwrap();
+            file.pwrite(0, b"snapshot content").await.unwrap();
+
+            // Create snapshot
+            agentfs
+                .snapshot(snapshot_path.to_str().unwrap())
+                .await
+                .unwrap();
+        }
+
+        // Verify snapshot file exists
+        assert!(snapshot_path.exists(), "Snapshot file should exist");
+
+        // Open snapshot and verify data
+        {
+            let snapshot_agentfs =
+                AgentFS::open(AgentFSOptions::with_path(snapshot_path.to_str().unwrap()))
+                    .await
+                    .unwrap();
+
+            // Verify KV data
+            let value: Option<String> = snapshot_agentfs.kv.get("snapshot_key").await.unwrap();
+            assert_eq!(value, Some("snapshot_value".to_string()));
+
+            // Verify filesystem data
+            let stats = snapshot_agentfs.fs.stat("/snapshot_dir").await.unwrap();
+            assert!(stats.is_some());
+            assert!(stats.unwrap().is_directory());
+
+            let content = snapshot_agentfs
+                .fs
+                .read_file("/snapshot_dir/file.txt")
+                .await
+                .unwrap();
+            assert_eq!(content, Some(b"snapshot content".to_vec()));
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&snapshot_path);
+        // Also clean up WAL files
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_source.db-shm"));
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_source.db-wal"));
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_dest.db-shm"));
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_dest.db-wal"));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_is_independent() {
+        let temp_dir = std::env::temp_dir();
+        let source_path = temp_dir.join("test_snapshot_indep_source.db");
+        let snapshot_path = temp_dir.join("test_snapshot_indep_dest.db");
+
+        // Cleanup any existing files
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&snapshot_path);
+
+        // Create source database
+        let agentfs = AgentFS::open(AgentFSOptions::with_path(source_path.to_str().unwrap()))
+            .await
+            .unwrap();
+
+        // Add initial data
+        agentfs.kv.set("key1", &"value1").await.unwrap();
+
+        // Create snapshot
+        agentfs
+            .snapshot(snapshot_path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        // Modify source after snapshot
+        agentfs.kv.set("key2", &"value2").await.unwrap();
+
+        // Open snapshot and verify it doesn't have the new data
+        let snapshot_agentfs =
+            AgentFS::open(AgentFSOptions::with_path(snapshot_path.to_str().unwrap()))
+                .await
+                .unwrap();
+
+        // Snapshot should have key1
+        let value: Option<String> = snapshot_agentfs.kv.get("key1").await.unwrap();
+        assert_eq!(value, Some("value1".to_string()));
+
+        // Snapshot should NOT have key2 (added after snapshot)
+        let value: Option<String> = snapshot_agentfs.kv.get("key2").await.unwrap();
+        assert_eq!(
+            value, None,
+            "Snapshot should not contain data added after snapshot was created"
+        );
+
+        // Cleanup
+        drop(agentfs);
+        drop(snapshot_agentfs);
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&snapshot_path);
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_indep_source.db-shm"));
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_indep_source.db-wal"));
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_indep_dest.db-shm"));
+        let _ = std::fs::remove_file(temp_dir.join("test_snapshot_indep_dest.db-wal"));
     }
 }
