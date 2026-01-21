@@ -31,6 +31,8 @@ pub use ll::TimeOrNow;
 pub use mnt::mount_options::MountOption;
 pub use notify::{Notifier, PollHandle};
 pub use reply::ReplyPoll;
+#[cfg(feature = "abi-7-39")]
+pub use reply::ReplyStatx;
 pub use reply::ReplyXattr;
 pub use reply::{Reply, ReplyAttr, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen};
 pub use reply::{
@@ -760,6 +762,25 @@ pub trait Filesystem {
             "[Not Implemented] copy_file_range(ino_in: {ino_in:#x?}, fh_in: {fh_in}, \
             offset_in: {offset_in}, ino_out: {ino_out:#x?}, fh_out: {fh_out}, \
             offset_out: {offset_out}, len: {len}, flags: {flags})"
+        );
+        reply.error(ENOSYS);
+    }
+
+    /// Get extended file attributes (statx).
+    /// Available since FUSE ABI 7.39. This provides more detailed file information
+    /// than getattr, including birth time and file attributes.
+    #[cfg(feature = "abi-7-39")]
+    fn statx(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: Option<u64>,
+        flags: u32,
+        mask: u32,
+        reply: ReplyStatx,
+    ) {
+        warn!(
+            "[Not Implemented] statx(ino: {ino:#x?}, fh: {fh:?}, flags: {flags:#x}, mask: {mask:#x})"
         );
         reply.error(ENOSYS);
     }

@@ -1597,6 +1597,38 @@ mod op {
     }
     impl_request!(CuseInit<'a>);
 
+    /// Get extended file attributes (statx).
+    /// Available since FUSE ABI 7.39.
+    #[cfg(feature = "abi-7-39")]
+    #[derive(Debug)]
+    pub struct Statx<'a> {
+        header: &'a fuse_in_header,
+        arg: &'a fuse_statx_in,
+    }
+    #[cfg(feature = "abi-7-39")]
+    impl_request!(Statx<'a>);
+    #[cfg(feature = "abi-7-39")]
+    impl Statx<'_> {
+        /// Returns the file handle if FUSE_GETATTR_FH flag is set
+        pub fn file_handle(&self) -> Option<FileHandle> {
+            if self.arg.getattr_flags & FUSE_GETATTR_FH != 0 {
+                Some(FileHandle(self.arg.fh))
+            } else {
+                None
+            }
+        }
+
+        /// Returns the statx flags (AT_* flags passed to statx syscall)
+        pub fn flags(&self) -> u32 {
+            self.arg.sx_flags
+        }
+
+        /// Returns the statx mask (STATX_* mask of requested fields)
+        pub fn mask(&self) -> u32 {
+            self.arg.sx_mask
+        }
+    }
+
     fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
         if secs >= 0 {
             SystemTime::UNIX_EPOCH + Duration::new(secs as u64, nsecs)
@@ -1815,6 +1847,11 @@ mod op {
                 header,
                 arg: data.fetch()?,
             }),
+            #[cfg(feature = "abi-7-39")]
+            fuse_opcode::FUSE_STATX => Operation::Statx(Statx {
+                header,
+                arg: data.fetch()?,
+            }),
 
             #[cfg(target_os = "macos")]
             fuse_opcode::FUSE_SETVOLNAME => Operation::SetVolName(SetVolName {
@@ -1898,6 +1935,8 @@ pub enum Operation<'a> {
     Lseek(Lseek<'a>),
     #[cfg(feature = "abi-7-28")]
     CopyFileRange(CopyFileRange<'a>),
+    #[cfg(feature = "abi-7-39")]
+    Statx(Statx<'a>),
 
     #[cfg(target_os = "macos")]
     SetVolName(SetVolName<'a>),
@@ -2083,6 +2122,14 @@ impl fmt::Display for Operation<'_> {
                 x.src(),
                 x.dest(),
                 x.len()
+            ),
+            #[cfg(feature = "abi-7-39")]
+            Operation::Statx(x) => write!(
+                f,
+                "STATX fh {:?}, flags {:#x}, mask {:#x}",
+                x.file_handle(),
+                x.flags(),
+                x.mask()
             ),
 
             #[cfg(target_os = "macos")]

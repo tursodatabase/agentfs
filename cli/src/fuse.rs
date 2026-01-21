@@ -4,8 +4,8 @@ use crate::fuser::{
         FUSE_WRITEBACK_CACHE,
     },
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite,
-    Request,
+    ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyStatx,
+    ReplyWrite, Request,
 };
 use agentfs_sdk::error::Error as SdkError;
 use agentfs_sdk::filesystem::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFSOCK};
@@ -158,6 +158,35 @@ impl Filesystem for AgentFSFuse {
 
         match result {
             Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats)),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(e) => reply.error(error_to_errno(&e)),
+        }
+    }
+
+    /// Retrieves extended file attributes (statx) for a given inode.
+    ///
+    /// This is similar to getattr but provides more detailed information including
+    /// birth time and file attributes. Available since FUSE ABI 7.39.
+    fn statx(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: Option<u64>,
+        _flags: u32,
+        mask: u32,
+        reply: ReplyStatx,
+    ) {
+        tracing::debug!("FUSE::statx: ino={}, mask={:#x}", ino, mask);
+        let Some(path) = self.get_path(ino) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+
+        let fs = self.fs.clone();
+        let result = self.runtime.block_on(async move { fs.lstat(&path).await });
+
+        match result {
+            Ok(Some(stats)) => reply.statx(&TTL, &fillattr(&stats, self.uid, self.gid), mask),
             Ok(None) => reply.error(libc::ENOENT),
             Err(e) => reply.error(error_to_errno(&e)),
         }
