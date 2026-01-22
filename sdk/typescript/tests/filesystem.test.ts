@@ -1023,4 +1023,115 @@ describe("Filesystem Integration Tests", () => {
       }
     });
   });
+
+  // ==================== Symlink Tests ====================
+
+  describe("Symlink Operations", () => {
+    it("should create and read a symlink", async () => {
+      await fs.writeFile("/target.txt", "target content");
+      await fs.symlink("/target.txt", "/link.txt");
+
+      const target = await fs.readlink("/link.txt");
+      expect(target).toBe("/target.txt");
+    });
+
+    it("should follow symlinks in stat()", async () => {
+      await fs.writeFile("/real-file.txt", "file content");
+      await fs.symlink("/real-file.txt", "/symlink-to-file.txt");
+
+      // stat() should follow the symlink and return the target file's stats
+      const stats = await fs.stat("/symlink-to-file.txt");
+      expect(stats.isFile()).toBe(true);
+      expect(stats.isSymbolicLink()).toBe(false);
+      expect(stats.size).toBe("file content".length);
+    });
+
+    it("should NOT follow symlinks in lstat()", async () => {
+      await fs.writeFile("/real-file2.txt", "file content");
+      await fs.symlink("/real-file2.txt", "/symlink-to-file2.txt");
+
+      // lstat() should return the symlink's own stats
+      const stats = await fs.lstat("/symlink-to-file2.txt");
+      expect(stats.isSymbolicLink()).toBe(true);
+      expect(stats.isFile()).toBe(false);
+      // Symlink size is the length of the target path
+      expect(stats.size).toBe("/real-file2.txt".length);
+    });
+
+    it("should follow symlinks to directories in stat()", async () => {
+      await fs.mkdir("/real-dir");
+      await fs.symlink("/real-dir", "/symlink-to-dir");
+
+      const stats = await fs.stat("/symlink-to-dir");
+      expect(stats.isDirectory()).toBe(true);
+      expect(stats.isSymbolicLink()).toBe(false);
+    });
+
+    it("should follow chain of symlinks in stat()", async () => {
+      await fs.writeFile("/final-target.txt", "final content");
+      await fs.symlink("/final-target.txt", "/link1.txt");
+      await fs.symlink("/link1.txt", "/link2.txt");
+      await fs.symlink("/link2.txt", "/link3.txt");
+
+      const stats = await fs.stat("/link3.txt");
+      expect(stats.isFile()).toBe(true);
+      expect(stats.size).toBe("final content".length);
+    });
+
+    it("should handle relative symlink targets", async () => {
+      await fs.writeFile("/dir/file.txt", "content in dir");
+      await fs.symlink("file.txt", "/dir/relative-link.txt");
+
+      const stats = await fs.stat("/dir/relative-link.txt");
+      expect(stats.isFile()).toBe(true);
+      expect(stats.size).toBe("content in dir".length);
+    });
+
+    it("should handle relative symlink targets with parent directory", async () => {
+      await fs.writeFile("/parent-file.txt", "parent content");
+      await fs.mkdir("/subdir");
+      await fs.symlink("../parent-file.txt", "/subdir/link-to-parent.txt");
+
+      const stats = await fs.stat("/subdir/link-to-parent.txt");
+      expect(stats.isFile()).toBe(true);
+      expect(stats.size).toBe("parent content".length);
+    });
+
+    it("should throw ELOOP for symlink loops", async () => {
+      await fs.symlink("/loop-b", "/loop-a");
+      await fs.symlink("/loop-a", "/loop-b");
+
+      await expect(fs.stat("/loop-a")).rejects.toMatchObject({ code: "ELOOP" });
+    });
+
+    it("should throw ELOOP for self-referencing symlink", async () => {
+      await fs.symlink("/self-ref", "/self-ref");
+
+      await expect(fs.stat("/self-ref")).rejects.toMatchObject({ code: "ELOOP" });
+    });
+
+    it("should throw ENOENT when symlink target does not exist", async () => {
+      await fs.symlink("/nonexistent-target.txt", "/dangling-link.txt");
+
+      await expect(fs.stat("/dangling-link.txt")).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("should return symlink stats with lstat() for dangling symlink", async () => {
+      await fs.symlink("/nonexistent.txt", "/dangling.txt");
+
+      // lstat should work even if target doesn't exist
+      const stats = await fs.lstat("/dangling.txt");
+      expect(stats.isSymbolicLink()).toBe(true);
+    });
+
+    it("should throw EEXIST when creating symlink at existing path", async () => {
+      await fs.writeFile("/exists.txt", "content");
+      await expect(fs.symlink("/target", "/exists.txt")).rejects.toMatchObject({ code: "EEXIST" });
+    });
+
+    it("should throw EINVAL when readlink is called on a non-symlink", async () => {
+      await fs.writeFile("/regular-file.txt", "content");
+      await expect(fs.readlink("/regular-file.txt")).rejects.toMatchObject({ code: "EINVAL" });
+    });
+  });
 });

@@ -318,8 +318,32 @@ export class AgentFS implements FileSystem {
   }
 
   private normalizePath(path: string): string {
-    const normalized = path.replace(/\/+$/, '') || '/';
-    return normalized.startsWith('/') ? normalized : '/' + normalized;
+    // Ensure path starts with /
+    let normalized = path.startsWith('/') ? path : '/' + path;
+
+    // Remove trailing slashes (except for root)
+    normalized = normalized.replace(/\/+$/, '') || '/';
+
+    // Split into parts and resolve . and ..
+    const parts = normalized.split('/').filter(p => p);
+    const resolved: string[] = [];
+
+    for (const part of parts) {
+      if (part === '.') {
+        // Current directory - skip
+        continue;
+      } else if (part === '..') {
+        // Parent directory - pop if possible
+        if (resolved.length > 0) {
+          resolved.pop();
+        }
+        // If resolved is empty, we're at root, just ignore the ..
+      } else {
+        resolved.push(part);
+      }
+    }
+
+    return resolved.length === 0 ? '/' : '/' + resolved.join('/');
   }
 
   private splitPath(path: string): string[] {
@@ -620,7 +644,92 @@ export class AgentFS implements FileSystem {
   }
 
   async stat(path: string): Promise<Stats> {
-    const { normalizedPath, ino } = await this.resolvePathOrThrow(path, 'stat');
+    const MAX_SYMLINK_DEPTH = 40; // Standard POSIX limit for symlink following
+
+    let currentPath = this.normalizePath(path);
+
+    for (let depth = 0; depth < MAX_SYMLINK_DEPTH; depth++) {
+      const ino = await this.resolvePath(currentPath);
+      if (ino === null) {
+        throw createFsError({
+          code: 'ENOENT',
+          syscall: 'stat',
+          path: currentPath,
+          message: 'no such file or directory',
+        });
+      }
+
+      const stmt = this.db.prepare(`
+        SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
+        FROM fs_inode
+        WHERE ino = ?
+      `);
+      const row = await stmt.get(ino) as {
+        ino: number;
+        mode: number;
+        nlink: number;
+        uid: number;
+        gid: number;
+        size: number;
+        atime: number;
+        mtime: number;
+        ctime: number;
+      } | undefined;
+
+      if (!row) {
+        throw createFsError({
+          code: 'ENOENT',
+          syscall: 'stat',
+          path: currentPath,
+          message: 'no such file or directory',
+        });
+      }
+
+      // Check if this is a symlink
+      if ((row.mode & S_IFMT) === S_IFLNK) {
+        // Read the symlink target
+        const targetStmt = this.db.prepare('SELECT target FROM fs_symlink WHERE ino = ?');
+        const targetRow = await targetStmt.get(ino) as { target: string } | undefined;
+
+        if (!targetRow) {
+          throw createFsError({
+            code: 'ENOENT',
+            syscall: 'stat',
+            path: currentPath,
+            message: 'symlink has no target',
+          });
+        }
+
+        const target = targetRow.target;
+
+        // Resolve target path (handle both absolute and relative paths)
+        if (target.startsWith('/')) {
+          currentPath = this.normalizePath(target);
+        } else {
+          // Relative path - resolve relative to the symlink's directory
+          const parts = this.splitPath(currentPath);
+          parts.pop(); // Remove the symlink name
+          const parentPath = parts.length === 0 ? '/' : '/' + parts.join('/');
+          currentPath = this.normalizePath(parentPath + '/' + target);
+        }
+        continue; // Follow the symlink
+      }
+
+      // Not a symlink, return the stats
+      return createStats(row);
+    }
+
+    // Too many symlinks
+    throw createFsError({
+      code: 'ELOOP',
+      syscall: 'stat',
+      path: this.normalizePath(path),
+      message: 'too many levels of symbolic links',
+    });
+  }
+
+  async lstat(path: string): Promise<Stats> {
+    const { normalizedPath, ino } = await this.resolvePathOrThrow(path, 'lstat');
 
     const stmt = this.db.prepare(`
       SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
@@ -642,18 +751,13 @@ export class AgentFS implements FileSystem {
     if (!row) {
       throw createFsError({
         code: 'ENOENT',
-        syscall: 'stat',
+        syscall: 'lstat',
         path: normalizedPath,
         message: 'no such file or directory',
       });
     }
 
     return createStats(row);
-  }
-
-  async lstat(path: string): Promise<Stats> {
-    // For now, lstat is the same as stat since we don't follow symlinks in stat yet
-    return this.stat(path);
   }
 
   async mkdir(path: string): Promise<void> {
