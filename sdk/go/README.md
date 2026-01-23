@@ -204,6 +204,39 @@ io.Copy(f, bytes.NewReader(data))  // Write from bytes.Reader
 | `List(prefix)` | List keys with metadata |
 | `Clear(prefix)` | Delete keys (optionally by prefix) |
 
+#### Generic Helper Functions (Go 1.18+)
+
+The SDK provides type-safe generic functions for cleaner KV operations:
+
+```go
+// Type-safe get - returns value directly instead of requiring dest pointer
+version, err := agentfs.KVGet[string](ctx, afs.KV, "config:version")
+count, err := agentfs.KVGet[int](ctx, afs.KV, "stats:count")
+
+type Config struct {
+    Debug bool `json:"debug"`
+}
+cfg, err := agentfs.KVGet[Config](ctx, afs.KV, "app:config")
+
+// Get with default value - returns default if key doesn't exist
+debug, err := agentfs.KVGetOrDefault(ctx, afs.KV, "config:debug", false)
+name, err := agentfs.KVGetOrDefault(ctx, afs.KV, "user:name", "anonymous")
+
+// Get with zero value - returns zero value if key doesn't exist
+count, err := agentfs.KVGetOrZero[int](ctx, afs.KV, "stats:count")    // 0 if not found
+name, err := agentfs.KVGetOrZero[string](ctx, afs.KV, "user:name")    // "" if not found
+
+// Type-safe set (for API consistency)
+err := agentfs.KVSet(ctx, afs.KV, "config:version", "1.0.0")
+```
+
+| Function | Description |
+|----------|-------------|
+| `KVGet[T](ctx, kv, key)` | Type-safe get, returns value directly |
+| `KVGetOrDefault[T](ctx, kv, key, default)` | Returns default if key not found |
+| `KVGetOrZero[T](ctx, kv, key)` | Returns zero value if key not found |
+| `KVSet[T](ctx, kv, key, value)` | Type-safe set (wrapper for consistency) |
+
 ### Tool Calls
 
 | Method | Description |

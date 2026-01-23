@@ -165,3 +165,74 @@ func escapePattern(s string) string {
 	s = strings.ReplaceAll(s, "_", "\\_")
 	return s
 }
+
+// ============================================================================
+// Generic Helper Functions (Go 1.18+)
+// ============================================================================
+
+// KVGet retrieves a value with type safety using generics.
+// Returns the value directly instead of requiring a destination pointer.
+//
+// Example:
+//
+//	version, err := agentfs.KVGet[string](ctx, afs.KV, "config:version")
+//	count, err := agentfs.KVGet[int](ctx, afs.KV, "stats:count")
+//
+//	type Config struct {
+//	    Debug bool `json:"debug"`
+//	}
+//	cfg, err := agentfs.KVGet[Config](ctx, afs.KV, "app:config")
+func KVGet[T any](ctx context.Context, kv *KVStore, key string) (T, error) {
+	var result T
+	err := kv.Get(ctx, key, &result)
+	return result, err
+}
+
+// KVGetOrDefault retrieves a value, returning the default if the key doesn't exist.
+// Only returns an error for non-"not found" errors (e.g., JSON unmarshal failures).
+//
+// Example:
+//
+//	debug := agentfs.KVGetOrDefault(ctx, afs.KV, "config:debug", false)
+//	name := agentfs.KVGetOrDefault(ctx, afs.KV, "user:name", "anonymous")
+func KVGetOrDefault[T any](ctx context.Context, kv *KVStore, key string, defaultValue T) (T, error) {
+	result, err := KVGet[T](ctx, kv, key)
+	if err != nil {
+		// Check if it's a "not found" error
+		if isKeyNotFoundError(err) {
+			return defaultValue, nil
+		}
+		return defaultValue, err
+	}
+	return result, nil
+}
+
+// KVGetOrZero retrieves a value, returning the zero value if the key doesn't exist.
+// This is a convenience wrapper around KVGetOrDefault with the zero value.
+//
+// Example:
+//
+//	count, _ := agentfs.KVGetOrZero[int](ctx, afs.KV, "stats:count")  // 0 if not found
+//	name, _ := agentfs.KVGetOrZero[string](ctx, afs.KV, "user:name")  // "" if not found
+func KVGetOrZero[T any](ctx context.Context, kv *KVStore, key string) (T, error) {
+	var zero T
+	return KVGetOrDefault(ctx, kv, key, zero)
+}
+
+// KVSet is a generic-friendly wrapper around KVStore.Set.
+// It's provided for API consistency with the other KV generic functions.
+//
+// Example:
+//
+//	agentfs.KVSet(ctx, afs.KV, "config:version", "1.0.0")
+func KVSet[T any](ctx context.Context, kv *KVStore, key string, value T) error {
+	return kv.Set(ctx, key, value)
+}
+
+// isKeyNotFoundError checks if an error is a "key not found" error
+func isKeyNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.HasPrefix(err.Error(), "key not found:")
+}
