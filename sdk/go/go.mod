@@ -1,4 +1,4 @@
-module agentfs/sdk/go
+module github.com/tursodatabase/agentfs/sdk/go
 
 go 1.21
 

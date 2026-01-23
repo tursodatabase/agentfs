@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"agentfs/sdk/go/internal/cache"
+	"github.com/tursodatabase/agentfs/sdk/go/internal/cache"
 )
 
 // Filesystem provides POSIX-like file operations backed by SQLite.

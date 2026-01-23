@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"agentfs/sdk/go/internal/cache"
+	"github.com/tursodatabase/agentfs/sdk/go/internal/cache"
 )
 
 // FileSystem defines the interface for filesystem operations.

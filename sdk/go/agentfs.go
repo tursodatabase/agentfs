@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strconv"
 
-	"agentfs/sdk/go/internal/cache"
+	"github.com/tursodatabase/agentfs/sdk/go/internal/cache"
 
 	_ "modernc.org/sqlite"
 )

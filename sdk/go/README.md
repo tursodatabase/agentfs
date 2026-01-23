@@ -5,7 +5,7 @@ A Go SDK for AgentFS - a SQLite-backed virtual filesystem, key-value store, and 
 ## Installation
 
 ```bash
-go get agentfs/sdk/go
+go get github.com/tursodatabase/agentfs/sdk/go
 ```
 
 ## Quick Start
@@ -18,7 +18,7 @@ import (
     "fmt"
     "log"
 
-    agentfs "agentfs/sdk/go"
+    agentfs "github.com/tursodatabase/agentfs/sdk/go"
 )
 
 func main() {
