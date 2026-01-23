@@ -328,6 +328,74 @@ iofsWithCtx := iofs.WithContext(ctx)
 
 **Note:** Use `fs.Glob(iofs, pattern)` for glob matching - it uses the `ReadDir` implementation.
 
+## Benchmarks
+
+Run benchmarks with:
+
+```bash
+go test -bench=. -run=^$ -benchmem
+```
+
+### Sequential I/O (1MB files)
+
+| Operation | Throughput | Allocs/op |
+|-----------|------------|-----------|
+| WriteFile | 274 MB/s | 1,898 |
+| ReadFile | 752 MB/s | 1,101 |
+| Streaming Write | 93 MB/s | 13,628 |
+| Streaming Read | 167 MB/s | 12,612 |
+
+### Random I/O (16MB file, 4KB operations)
+
+| Operation | Throughput |
+|-----------|------------|
+| RandomRead | 138 MB/s |
+| RandomWrite | 56 MB/s |
+
+### Metadata Operations
+
+| Operation | Latency |
+|-----------|---------|
+| Stat | 13 μs |
+| Readdir (100 entries) | 57 μs |
+| Mkdir | 60 μs |
+| Rename | 24 μs |
+| Create+Delete | 132 μs |
+
+### Path Resolution
+
+| Depth | Latency |
+|-------|---------|
+| 1 level | 18 μs |
+| 10 levels | 60 μs |
+| 20 levels | 106 μs |
+
+### Chunk Size Impact (1MB file)
+
+| Chunk Size | Write | Read |
+|------------|-------|------|
+| 4KB (default) | 266 MB/s | 740 MB/s |
+| 16KB | 491 MB/s | 644 MB/s |
+| 64KB | 947 MB/s | 842 MB/s |
+
+### KV Store
+
+| Operation | Latency |
+|-----------|---------|
+| Get (small value) | 4 μs |
+| Set (small value) | 16 μs |
+| Has | 3 μs |
+| Keys (100 keys) | 56 μs |
+
+### Key Insights
+
+- **Chunk size matters**: Larger chunks significantly improve write performance (3.5x from 4KB to 64KB). Consider using `ChunkSize: 65536` for write-heavy workloads.
+- **Path resolution scales linearly**: ~5μs per directory level. Deep paths benefit from caching.
+- **Bulk reads are fast**: ReadFile outperforms streaming for whole-file reads.
+- **KV is efficient**: Small value operations complete in single-digit microseconds.
+
+*Benchmarks run on Apple M1 Ultra. Results vary by hardware and SQLite configuration.*
+
 ## Schema Compatibility
 
 This SDK implements the AgentFS specification v0.4 and is compatible with databases created by:
