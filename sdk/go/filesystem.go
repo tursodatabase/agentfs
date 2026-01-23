@@ -6,12 +6,15 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"agentfs/sdk/go/internal/cache"
 )
 
 // Filesystem provides POSIX-like file operations backed by SQLite.
 type Filesystem struct {
 	db        *sql.DB
 	chunkSize int
+	cache     cache.PathCache // nil if caching disabled
 }
 
 // ChunkSize returns the configured chunk size for file data.
@@ -361,6 +364,11 @@ func (fs *Filesystem) Unlink(ctx context.Context, p string) error {
 		}
 	}
 
+	// Invalidate cache
+	if fs.cache != nil {
+		fs.cache.Delete(p)
+	}
+
 	return nil
 }
 
@@ -412,6 +420,12 @@ func (fs *Filesystem) Rmdir(ctx context.Context, p string) error {
 	}
 	if _, err := fs.db.ExecContext(ctx, deleteInode, ino); err != nil {
 		return err
+	}
+
+	// Invalidate cache (directory and any cached children paths)
+	if fs.cache != nil {
+		fs.cache.Delete(p)
+		fs.cache.DeletePrefix(p + "/")
 	}
 
 	return nil
@@ -487,6 +501,14 @@ func (fs *Filesystem) Rename(ctx context.Context, oldPath, newPath string) error
 	// Update dentry
 	if _, err := fs.db.ExecContext(ctx, updateDentryParent, newParentIno, newName, oldParentIno, oldName); err != nil {
 		return err
+	}
+
+	// Invalidate cache for both old and new paths (and children if directory)
+	if fs.cache != nil {
+		fs.cache.Delete(oldPath)
+		fs.cache.DeletePrefix(oldPath + "/")
+		fs.cache.Delete(newPath)
+		fs.cache.DeletePrefix(newPath + "/")
 	}
 
 	return nil
@@ -758,6 +780,14 @@ func (fs *Filesystem) resolvePath(ctx context.Context, p string) (int64, error) 
 		return RootIno, nil
 	}
 
+	// Check cache first
+	if fs.cache != nil {
+		if ino, ok := fs.cache.Get(p); ok {
+			return ino, nil
+		}
+	}
+
+	// Cache miss - do database lookup
 	components := splitPath(p)
 	currentIno := int64(RootIno)
 
@@ -767,6 +797,11 @@ func (fs *Filesystem) resolvePath(ctx context.Context, p string) (int64, error) 
 			return 0, ErrNoent("resolve", p)
 		}
 		currentIno = ino
+	}
+
+	// Cache the result
+	if fs.cache != nil {
+		fs.cache.Set(p, currentIno)
 	}
 
 	return currentIno, nil
@@ -811,4 +846,21 @@ func (fs *Filesystem) writeChunks(ctx context.Context, ino int64, data []byte) e
 		chunkIndex++
 	}
 	return nil
+}
+
+// CacheStats returns cache statistics, or nil if caching is disabled.
+func (fs *Filesystem) CacheStats() *cache.Stats {
+	if fs.cache == nil {
+		return nil
+	}
+	stats := fs.cache.Stats()
+	return &stats
+}
+
+// ClearCache clears all cached path resolutions.
+// This is useful when external changes may have occurred.
+func (fs *Filesystem) ClearCache() {
+	if fs.cache != nil {
+		fs.cache.Clear()
+	}
 }

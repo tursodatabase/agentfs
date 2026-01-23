@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strconv"
 
+	"agentfs/sdk/go/internal/cache"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -109,10 +111,26 @@ func Open(ctx context.Context, opts AgentFSOptions) (*AgentFS, error) {
 		path: dbPath,
 	}
 
+	// Initialize cache if enabled
+	var pathCache cache.PathCache
+	if opts.Cache.Enabled {
+		maxEntries := opts.Cache.MaxEntries
+		if maxEntries <= 0 {
+			maxEntries = 10000 // Default
+		}
+		var err error
+		pathCache, err = cache.NewLRU(maxEntries, opts.Cache.TTL)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to initialize cache: %w", err)
+		}
+	}
+
 	// Initialize subsystems
 	afs.FS = &Filesystem{
 		db:        db,
 		chunkSize: actualChunkSize,
+		cache:     pathCache,
 	}
 	afs.KV = &KVStore{db: db}
 	afs.Tools = &ToolCalls{db: db}

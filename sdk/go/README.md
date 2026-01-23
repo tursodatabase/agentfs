@@ -117,9 +117,16 @@ func main() {
 func Open(ctx context.Context, opts AgentFSOptions) (*AgentFS, error)
 
 type AgentFSOptions struct {
-    ID   string // Agent ID (creates ~/.agentfs/{id}.db)
-    Path string // Explicit database path (takes precedence)
-    ChunkSize int // Chunk size for file data (default: 4096)
+    ID        string       // Agent ID (creates ~/.agentfs/{id}.db)
+    Path      string       // Explicit database path (takes precedence)
+    ChunkSize int          // Chunk size for file data (default: 4096)
+    Cache     CacheOptions // Optional path resolution cache
+}
+
+type CacheOptions struct {
+    Enabled    bool          // Enable LRU cache (default: false)
+    MaxEntries int           // Max cached paths (default: 10000)
+    TTL        time.Duration // Entry expiration (0 = no expiration)
 }
 ```
 
@@ -387,14 +394,57 @@ go test -bench=. -run=^$ -benchmem
 | Has | 3 μs |
 | Keys (100 keys) | 56 μs |
 
+### Path Resolution Cache
+
+| Depth | Without Cache | With Cache | Speedup |
+|-------|---------------|------------|---------|
+| 1 level | 18 μs | 9 μs | 2x |
+| 10 levels | 60 μs | 9 μs | 6.7x |
+| 20 levels | 108 μs | 9 μs | 12x |
+
 ### Key Insights
 
 - **Chunk size matters**: Larger chunks significantly improve write performance (3.5x from 4KB to 64KB). Consider using `ChunkSize: 65536` for write-heavy workloads.
-- **Path resolution scales linearly**: ~5μs per directory level. Deep paths benefit from caching.
+- **Path resolution cache eliminates depth penalty**: With caching enabled, deep paths perform the same as shallow ones (~9μs vs 108μs for depth 20).
 - **Bulk reads are fast**: ReadFile outperforms streaming for whole-file reads.
 - **KV is efficient**: Small value operations complete in single-digit microseconds.
 
 *Benchmarks run on Apple M1 Ultra. Results vary by hardware and SQLite configuration.*
+
+## Path Resolution Cache
+
+The SDK includes an optional LRU cache for path-to-inode resolution, significantly improving performance for deep directory structures.
+
+```go
+afs, err := agentfs.Open(ctx, agentfs.AgentFSOptions{
+    ID: "my-agent",
+    Cache: agentfs.CacheOptions{
+        Enabled:    true,
+        MaxEntries: 10000,  // Max cached paths (default: 10000)
+        TTL:        0,      // No expiration (recommended for single-process)
+    },
+})
+
+// For multi-process scenarios, use TTL to handle external changes
+afs, err := agentfs.Open(ctx, agentfs.AgentFSOptions{
+    ID: "shared-agent",
+    Cache: agentfs.CacheOptions{
+        Enabled:    true,
+        MaxEntries: 5000,
+        TTL:        5 * time.Second,  // Re-validate after 5s
+    },
+})
+
+// Check cache performance
+if stats := afs.FS.CacheStats(); stats != nil {
+    fmt.Printf("Cache hit rate: %.1f%%\n", stats.HitRate())
+}
+
+// Clear cache if external changes occurred
+afs.FS.ClearCache()
+```
+
+The cache automatically invalidates entries when files/directories are deleted, renamed, or moved.
 
 ## Schema Compatibility
 

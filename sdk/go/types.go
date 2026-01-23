@@ -2,6 +2,7 @@ package agentfs
 
 import (
 	"encoding/json"
+	"time"
 )
 
 // AgentFSOptions configures how AgentFS opens or creates a database
@@ -17,6 +18,25 @@ type AgentFSOptions struct {
 	// ChunkSize is the size of data chunks in bytes (default: 4096)
 	// Only used when creating a new database; ignored for existing databases.
 	ChunkSize int
+
+	// Cache configures the optional path resolution cache.
+	Cache CacheOptions
+}
+
+// CacheOptions configures the optional LRU cache for path resolution.
+type CacheOptions struct {
+	// Enabled turns caching on/off (default: false)
+	Enabled bool
+
+	// MaxEntries is the maximum number of path->inode mappings to cache.
+	// Default: 10000 when enabled.
+	MaxEntries int
+
+	// TTL is an optional time-to-live for cache entries.
+	// Use 0 for no expiration (recommended for single-process usage).
+	// Use a short TTL (e.g., 5s) for multi-process scenarios where
+	// external changes may occur.
+	TTL time.Duration
 }
 
 // Stats represents file/directory metadata (matches POSIX stat)
