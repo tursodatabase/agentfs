@@ -283,6 +283,38 @@ Common error codes:
 - `EISDIR` (21) - Is a directory
 - `ENOTEMPTY` (39) - Directory not empty
 
+## Interfaces for Testing
+
+The SDK provides optional interfaces for users who want to mock the filesystem, KV store, or tool calls in their tests:
+
+```go
+// Your application code - program against the interface
+type MyService struct {
+    fs agentfs.FileSystem  // Interface, not *Filesystem
+}
+
+func NewMyService(afs *agentfs.AgentFS) *MyService {
+    return &MyService{fs: afs.FS}  // Concrete type satisfies interface
+}
+
+// In tests - use a mock
+type MockFS struct{}
+func (m *MockFS) Stat(ctx context.Context, path string) (*agentfs.Stats, error) {
+    return &agentfs.Stats{Size: 100}, nil
+}
+// ... implement other methods
+
+svc := &MyService{fs: &MockFS{}}
+```
+
+| Interface | Concrete Type |
+|-----------|---------------|
+| `FileSystem` | `*Filesystem` |
+| `KVStoreInterface` | `*KVStore` |
+| `ToolCallsInterface` | `*ToolCalls` |
+
+These interfaces are entirely optional. The SDK continues to return concrete types, and users who don't need mocking can ignore the interfaces entirely.
+
 ## Go Standard Library `io/fs` Integration
 
 The SDK provides an `io/fs` compatible wrapper for use with Go standard library functions:
