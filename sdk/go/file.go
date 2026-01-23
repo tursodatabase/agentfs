@@ -2,19 +2,148 @@ package agentfs
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
 // File represents an open file handle for read/write operations.
+//
+// File implements the following io interfaces:
+//   - io.Reader, io.Writer (sequential I/O with position tracking)
+//   - io.ReaderAt, io.WriterAt (random access I/O)
+//   - io.Seeker (position control)
+//   - io.Closer
+//
+// For context-aware operations, use Pread/Pwrite or set the context via WithContext.
 type File struct {
-	fs    *Filesystem
-	ino   int64
-	path  string
-	flags int
+	fs     *Filesystem
+	ino    int64
+	path   string
+	flags  int
+	offset int64           // Current file position for Read/Write
+	ctx    context.Context // Context for streaming operations
+}
+
+// Compile-time interface checks
+var (
+	_ io.Reader      = (*File)(nil)
+	_ io.Writer      = (*File)(nil)
+	_ io.Seeker      = (*File)(nil)
+	_ io.Closer      = (*File)(nil)
+	_ io.ReaderAt    = (*File)(nil)
+	_ io.WriterAt    = (*File)(nil)
+	_ io.ReadSeeker  = (*File)(nil)
+	_ io.WriteSeeker = (*File)(nil)
+)
+
+// WithContext returns a copy of the File with the given context.
+// This context will be used for Read, Write, and Seek operations.
+func (f *File) WithContext(ctx context.Context) *File {
+	return &File{
+		fs:     f.fs,
+		ino:    f.ino,
+		path:   f.path,
+		flags:  f.flags,
+		offset: f.offset,
+		ctx:    ctx,
+	}
+}
+
+// context returns the file's context, defaulting to Background if not set.
+func (f *File) context() context.Context {
+	if f.ctx != nil {
+		return f.ctx
+	}
+	return context.Background()
+}
+
+// Read reads up to len(p) bytes into p, advancing the file offset.
+// It implements io.Reader.
+//
+// Read returns io.EOF when the end of file is reached.
+func (f *File) Read(p []byte) (int, error) {
+	n, err := f.Pread(f.context(), p, f.offset)
+	f.offset += int64(n)
+
+	// Convert zero-read at EOF to io.EOF
+	if n == 0 && err == nil {
+		return 0, io.EOF
+	}
+	return n, err
+}
+
+// Write writes len(p) bytes from p, advancing the file offset.
+// It implements io.Writer.
+func (f *File) Write(p []byte) (int, error) {
+	n, err := f.Pwrite(f.context(), p, f.offset)
+	f.offset += int64(n)
+	return n, err
+}
+
+// Seek sets the offset for the next Read or Write.
+// It implements io.Seeker.
+//
+// Whence values:
+//   - io.SeekStart (0): offset is relative to the start of the file
+//   - io.SeekCurrent (1): offset is relative to the current position
+//   - io.SeekEnd (2): offset is relative to the end of the file
+func (f *File) Seek(offset int64, whence int) (int64, error) {
+	var newOffset int64
+
+	switch whence {
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = f.offset + offset
+	case io.SeekEnd:
+		stats, err := f.fs.statInode(f.context(), f.ino)
+		if err != nil {
+			return 0, err
+		}
+		newOffset = stats.Size + offset
+	default:
+		return 0, ErrInval("seek", f.path, "invalid whence")
+	}
+
+	if newOffset < 0 {
+		return 0, ErrInval("seek", f.path, "negative offset")
+	}
+
+	f.offset = newOffset
+	return newOffset, nil
+}
+
+// ReadAt reads len(p) bytes at the given offset.
+// It implements io.ReaderAt.
+//
+// ReadAt does not affect the file's current offset.
+func (f *File) ReadAt(p []byte, off int64) (int, error) {
+	n, err := f.Pread(f.context(), p, off)
+
+	// io.ReaderAt requires returning io.EOF if fewer bytes were read
+	if n < len(p) && err == nil {
+		err = io.EOF
+	}
+	return n, err
+}
+
+// WriteAt writes len(p) bytes at the given offset.
+// It implements io.WriterAt.
+//
+// WriteAt does not affect the file's current offset.
+func (f *File) WriteAt(p []byte, off int64) (int, error) {
+	return f.Pwrite(f.context(), p, off)
+}
+
+// Offset returns the current file offset.
+func (f *File) Offset() int64 {
+	return f.offset
 }
 
 // Pread reads data at a specific offset (positioned read).
 // Returns the number of bytes read and any error.
+//
+// Unlike Read, Pread does not modify the file's current offset.
 func (f *File) Pread(ctx context.Context, buf []byte, offset int64) (int, error) {
 	if len(buf) == 0 {
 		return 0, nil
@@ -97,6 +226,8 @@ func (f *File) Pread(ctx context.Context, buf []byte, offset int64) (int, error)
 
 // Pwrite writes data at a specific offset (positioned write).
 // Returns the number of bytes written and any error.
+//
+// Unlike Write, Pwrite does not modify the file's current offset.
 func (f *File) Pwrite(ctx context.Context, data []byte, offset int64) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
@@ -260,9 +391,40 @@ func (f *File) Path() string {
 	return f.path
 }
 
+// Size returns the current file size.
+func (f *File) Size() (int64, error) {
+	stats, err := f.fs.statInode(f.context(), f.ino)
+	if err != nil {
+		return 0, err
+	}
+	return stats.Size, nil
+}
+
 // Close closes the file handle.
 func (f *File) Close() error {
 	// Currently no resources to release
 	// In the future, this could handle things like advisory locks
 	return nil
+}
+
+// Reader returns an io.Reader that reads from the current offset.
+// This is useful when you need to pass the file to functions expecting io.Reader.
+func (f *File) Reader() io.Reader {
+	return f
+}
+
+// Writer returns an io.Writer that writes at the current offset.
+// This is useful when you need to pass the file to functions expecting io.Writer.
+func (f *File) Writer() io.Writer {
+	return f
+}
+
+// ReadSeeker returns an io.ReadSeeker interface.
+func (f *File) ReadSeeker() io.ReadSeeker {
+	return f
+}
+
+// WriteSeeker returns an io.WriteSeeker interface.
+func (f *File) WriteSeeker() io.WriteSeeker {
+	return f
 }

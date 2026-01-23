@@ -147,16 +147,49 @@ type AgentFSOptions struct {
 
 ### File Handle
 
-```go
-type File struct { ... }
+The `File` type implements Go's standard I/O interfaces for seamless integration:
 
-func (f *File) Pread(ctx, buf, offset) (int, error)  // Positioned read
-func (f *File) Pwrite(ctx, data, offset) (int, error) // Positioned write
-func (f *File) Truncate(ctx, size) error             // Set file size
-func (f *File) Fsync(ctx) error                      // Flush to storage
-func (f *File) Stat(ctx) (*Stats, error)             // Get metadata
-func (f *File) Close() error                         // Close handle
+```go
+// File implements:
+//   - io.Reader, io.Writer (sequential I/O)
+//   - io.ReaderAt, io.WriterAt (random access)
+//   - io.Seeker, io.Closer
+
+// Sequential I/O (tracks position automatically)
+f, _ := afs.FS.Open(ctx, "/file.txt", agentfs.O_RDWR)
+defer f.Close()
+
+data, _ := io.ReadAll(f)           // Read entire file
+f.Seek(0, io.SeekStart)            // Seek back to start
+f.Write([]byte("new content"))     // Write at current position
+
+// Random access (does not affect position)
+f.ReadAt(buf, 100)                 // Read at offset 100
+f.WriteAt(data, 200)               // Write at offset 200
+
+// Context-aware positioned I/O
+f.Pread(ctx, buf, offset)          // Read with context
+f.Pwrite(ctx, data, offset)        // Write with context
+
+// Use with io.Copy
+io.Copy(destFile, srcFile)         // Copy between files
+io.Copy(f, bytes.NewReader(data))  // Write from bytes.Reader
 ```
+
+| Method | Description |
+|--------|-------------|
+| `Read(p []byte)` | Read sequentially (io.Reader) |
+| `Write(p []byte)` | Write sequentially (io.Writer) |
+| `Seek(offset, whence)` | Set position (io.Seeker) |
+| `ReadAt(p, offset)` | Read at offset (io.ReaderAt) |
+| `WriteAt(p, offset)` | Write at offset (io.WriterAt) |
+| `Pread(ctx, buf, offset)` | Positioned read with context |
+| `Pwrite(ctx, data, offset)` | Positioned write with context |
+| `Truncate(ctx, size)` | Set file size |
+| `Stat(ctx)` | Get metadata |
+| `Size()` | Get current file size |
+| `Offset()` | Get current position |
+| `Close()` | Close handle |
 
 ### Key-Value Store
 
