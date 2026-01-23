@@ -210,6 +210,58 @@ Common error codes:
 - `EISDIR` (21) - Is a directory
 - `ENOTEMPTY` (39) - Directory not empty
 
+## Go Standard Library `io/fs` Integration
+
+The SDK provides an `io/fs` compatible wrapper for use with Go standard library functions:
+
+```go
+import (
+    "io/fs"
+    "html/template"
+    "net/http"
+)
+
+// Create io/fs wrapper
+iofs := agentfs.NewIOFS(afs.FS)
+
+// Use with fs.WalkDir
+fs.WalkDir(iofs, ".", func(path string, d fs.DirEntry, err error) error {
+    fmt.Println(path)
+    return nil
+})
+
+// Use with fs.Glob
+matches, _ := fs.Glob(iofs, "*.txt")
+
+// Use with template.ParseFS
+tmpl, _ := template.ParseFS(iofs, "templates/*.html")
+
+// Use with http.FileServer
+http.Handle("/", http.FileServer(http.FS(iofs)))
+
+// Use SubFS for subdirectories
+subFS, _ := iofs.Sub("public")
+http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(subFS))))
+
+// Use with context for timeout control
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+iofsWithCtx := iofs.WithContext(ctx)
+```
+
+### Supported Interfaces
+
+| Interface | Status |
+|-----------|--------|
+| `fs.FS` | Supported |
+| `fs.StatFS` | Supported |
+| `fs.ReadFileFS` | Supported |
+| `fs.ReadDirFS` | Supported |
+| `fs.SubFS` | Supported |
+| `fs.ReadDirFile` | Supported (for directories) |
+
+**Note:** Use `fs.Glob(iofs, pattern)` for glob matching - it uses the `ReadDir` implementation.
+
 ## Schema Compatibility
 
 This SDK implements the AgentFS specification v0.4 and is compatible with databases created by:
