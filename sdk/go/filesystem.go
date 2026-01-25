@@ -839,3 +839,611 @@ func (this *AgentFS) updateFileContent(
 	_, err = updateStmt.ExecContext(ctx, len(content), now, ino)
 	return
 }
+
+func (this *AgentFS) ReadFile(path string) ([]byte, error) {
+	s, err := this.resolvePathOrThrow(path, Open)
+	if err != nil {
+		return nil, err
+	}
+	normalizedPath := s.normalizedPath
+	ino := s.ino
+	err = assertReadableExistingInode(this.db, ino, Open, normalizedPath)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+     SELECT data FROM fs_data
+     WHERE ino = ?
+     ORDER BY chunk_index ASC
+   `)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = stmt.Close() }()
+	rows, err := stmt.QueryContext(ctx, ino)
+	if err != nil {
+		return nil, err
+	}
+	buffers := []struct {
+		data []byte
+	}{}
+	for rows.Next() {
+		var d struct{ data []byte }
+		err = rows.Scan(&d)
+		if err != nil {
+			return nil, err
+		}
+		buffers = append(buffers, d)
+	}
+	buffer := []byte{}
+	if len(buffers) != 0 {
+		for _, d := range buffers {
+			buffer = append(buffer, d.data...)
+		}
+	}
+	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	updateStmt, err := this.db.PrepareContext(ctx, "UPDATE fs_inode SET atime = ? WHERE ino = ?")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = updateStmt.Close() }()
+	_, err = updateStmt.ExecContext(ctx, now, ino)
+	if err != nil {
+		return nil, err
+	}
+	return buffer, nil
+}
+
+func (this *AgentFS) Readdir(path string) ([]string, error) {
+	s, err := this.resolvePathOrThrow(path, Open)
+	if err != nil {
+		return nil, err
+	}
+	normalizedPath := s.normalizedPath
+	ino := s.ino
+	err = assertReaddirTargetInode(this.db, ino, normalizedPath)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+     SELECT name FROM fs_dentry
+     WHERE parent_ino = ?
+     ORDER BY name ASC
+   `)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = stmt.Close() }()
+	rows, err := stmt.QueryContext(ctx, ino)
+	if err != nil {
+		return nil, err
+	}
+	names := []string{}
+	for rows.Next() {
+		var n struct{ name string }
+		err := rows.Scan(&n)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, n.name)
+	}
+	return names, nil
+}
+
+func (this *AgentFS) ReaddirPlus(path string) ([]DirEntry, error) {
+	s, err := this.resolvePathOrThrow(path, Open)
+	if err != nil {
+		return nil, err
+	}
+	normalizedPath := s.normalizedPath
+	ino := s.ino
+	err = assertReaddirTargetInode(this.db, ino, normalizedPath)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+     SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime
+     FROM fs_dentry d
+     JOIN fs_inode i ON d.ino = i.ino
+     WHERE d.parent_ino = ?
+     ORDER BY d.name ASC
+   `)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = stmt.Close() }()
+	rows, err := stmt.QueryContext(ctx, ino)
+	if err != nil {
+		return nil, err
+	}
+	entries := []struct {
+		name  string
+		ino   int
+		mode  int
+		nlink int
+		uid   int
+		gid   int
+		size  int
+		atime int
+		mtime int
+		ctime int
+	}{}
+	for rows.Next() {
+		var entry struct {
+			name  string
+			ino   int
+			mode  int
+			nlink int
+			uid   int
+			gid   int
+			size  int
+			atime int
+			mtime int
+			ctime int
+		}
+		err := rows.Scan(&entry)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	dirEntries := make([]DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		stats := NewDataStats(
+			entry.ino,
+			entry.mode,
+			entry.nlink,
+			entry.uid,
+			entry.gid,
+			entry.size,
+			entry.atime,
+			entry.mtime,
+			entry.ctime,
+		)
+		name := entry.name
+		dirEntry := DirEntry{name: name, stats: stats}
+		dirEntries = append(dirEntries, dirEntry)
+	}
+	return dirEntries, nil
+}
+
+func (this *AgentFS) Stat(path string) (Stats, error) {
+	s, err := this.resolvePathOrThrow(path, Stat)
+	if err != nil {
+		return nil, err
+	}
+	normalizedPath := s.normalizedPath
+	ino := s.ino
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+     SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
+     FROM fs_inode
+     WHERE ino = ?
+   `)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = stmt.Close() }()
+	row := stmt.QueryRowContext(ctx, ino)
+	var stats struct {
+		ino   int
+		mode  int
+		nlink int
+		uid   int
+		gid   int
+		size  int
+		atime int
+		mtime int
+		ctime int
+	}
+	err = row.Scan(&stats)
+	if err != nil {
+		scall := Stat
+		message := "no such file or directory"
+		return nil, &ErrnoException{
+			Code:    ErrNoEnt,
+			Path:    &normalizedPath,
+			Message: &message,
+			Syscall: &scall,
+		}
+	}
+	return NewDataStats(
+		stats.ino,
+		stats.mode,
+		stats.nlink,
+		stats.uid,
+		stats.gid,
+		stats.size,
+		stats.atime,
+		stats.mtime, stats.ctime,
+	), nil
+}
+
+func (this *AgentFS) Lstat(path string) (Stats, error) {
+	return this.Stat(path)
+}
+
+func (this *AgentFS) Mkdir(path string) error {
+	normalizedPath := this.normalizePath(path)
+	_, err := this.resolvePath(normalizedPath)
+	if err == nil {
+		scall := Mkdir
+		message := "file already exists"
+		return &ErrnoException{
+			Code:    ErrExist,
+			Syscall: &scall,
+			Path:    &normalizedPath,
+			Message: &message,
+		}
+	}
+	parent, err := this.resolveParent(normalizedPath)
+	if err != nil {
+		scall := Mkdir
+		message := "no such file or directory"
+		return &ErrnoException{
+			Code:    ErrNoEnt,
+			Path:    &normalizedPath,
+			Message: &message,
+			Syscall: &scall,
+		}
+	}
+	err = assertInodeIsDirectory(this.db, parent.parentIno, Mkdir, normalizedPath)
+	if err != nil {
+		return err
+	}
+	dirIno, err := this.createInode(DEFAULT_DIR_MODE, 0, 0)
+	if err != nil {
+		return err
+	}
+	err = this.createDentry(parent.parentIno, parent.name, dirIno)
+	if err != nil {
+		scall := Mkdir
+		message := "file already exists"
+		return &ErrnoException{
+			Code:    ErrExist,
+			Syscall: &scall,
+			Path:    &normalizedPath,
+			Message: &message,
+		}
+	}
+	return nil
+}
+
+func (this *AgentFS) Rmdir(path string) error {
+	normalizedPath := this.normalizePath(path)
+	assertNotRoot(path, Rmdir)
+	s, err := this.resolvePathOrThrow(normalizedPath, Rmdir)
+	if err != nil {
+		return err
+	}
+	ino := s.ino
+	mode, err := getInodeModeOrThrow(
+		this.db,
+		ino,
+		Rmdir,
+		normalizedPath,
+	)
+	if err != nil {
+		return err
+	}
+	err = assertNotSymlinkMode(mode, Rmdir, normalizedPath)
+	if err != nil {
+		return err
+	}
+	if (mode & S_IFMT) != S_IFDIR {
+		scall := Rmdir
+		message := "not a directory"
+		return &ErrnoException{
+			Code:    ErrNotDir,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &normalizedPath,
+		}
+	}
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+     SELECT 1 as one FROM fs_dentry
+     WHERE parent_ino = ?
+     LIMIT 1
+   `)
+	if err != nil {
+		return err
+	}
+	defer func() { err = stmt.Close() }()
+	row := stmt.QueryRowContext(ctx, ino)
+	var child struct{ one int }
+	err = row.Scan(&child)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	} else {
+		scall := Rmdir
+		message := "directory not empty"
+		return &ErrnoException{
+			Code:    ErrNotEmpty,
+			Syscall: &scall,
+			Path:    &normalizedPath,
+			Message: &message,
+		}
+	}
+	parent, err := this.resolveParent(normalizedPath)
+	if err != nil {
+		scall := Rmdir
+		message := "operation not permitted"
+		return &ErrnoException{
+			Code:    ErrPerm,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &normalizedPath,
+		}
+	}
+	return this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
+}
+
+func (this *AgentFS) removeDentryAndMaybeInode(
+	parentIno int,
+	name string,
+	ino int,
+) error {
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+    DELETE FROM fs_dentry
+    WHERE parent_ino = ? AND name = ?
+  `)
+	if err != nil {
+		return err
+	}
+	defer func() { err = stmt.Close() }()
+	_, err = stmt.ExecContext(ctx, parentIno, name)
+	if err != nil {
+		return err
+	}
+
+	decrementStmt, err := this.db.PrepareContext(ctx,
+		"UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?",
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { err = decrementStmt.Close() }()
+	_, err = decrementStmt.ExecContext(ctx, ino)
+	if err != nil {
+		return err
+	}
+
+	linkCount, err := this.getLinkCount(ino)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	if linkCount == 0 {
+		deleteInodeStmt, err := this.db.PrepareContext(ctx,
+			"DELETE FROM fs_inode WHERE ino = ?",
+		)
+		if err != nil {
+			return err
+		}
+		_, err = deleteInodeStmt.ExecContext(ctx, ino)
+		if err != nil {
+			return err
+		}
+		err = deleteInodeStmt.Close()
+		if err != nil {
+			return err
+		}
+
+		deleteDataStmt, err := this.db.PrepareContext(ctx,
+			"DELETE FROM fs_data WHERE ino = ?",
+		)
+		if err != nil {
+			return err
+		}
+		_, err = deleteDataStmt.ExecContext(ctx, ino)
+		if err != nil {
+			return err
+		}
+		err = deleteDataStmt.Close()
+		if err != nil {
+			return err
+		}
+
+		deleteSymlinkStmt, err := this.db.PrepareContext(ctx,
+			"DELETE FROM fs_symlink WHERE ino = ?",
+		)
+		if err != nil {
+			return err
+		}
+		_, err = deleteSymlinkStmt.ExecContext(ctx, ino)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (this *AgentFS) Unlink(path string) error {
+	normalizedPath := this.normalizePath(path)
+	err := assertNotRoot(normalizedPath, Unlink)
+	if err != nil {
+		return err
+	}
+	s, err := this.resolvePathOrThrow(normalizedPath, Unlink)
+	if err != nil {
+		return err
+	}
+	ino := s.ino
+	err = assertUnlinkTargetInode(this.db, ino, normalizedPath)
+	if err != nil {
+		return err
+	}
+	parent, err := this.resolveParent(normalizedPath)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+     DELETE FROM fs_dentry
+     WHERE parent_ino = ? AND name = ?
+   `)
+	if err != nil {
+		return err
+	}
+	defer func() { err = stmt.Close() }()
+	_, err = stmt.ExecContext(ctx, parent.parentIno, parent.name)
+	decrementStmt, err := this.db.PrepareContext(ctx, "UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?")
+	if err != nil {
+		return err
+	}
+	defer func() { err = decrementStmt.Close() }()
+	_, err = decrementStmt.ExecContext(ctx, ino)
+	if err != nil {
+		return err
+	}
+	linkCount, err := this.getLinkCount(ino)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if linkCount == 0 {
+		deleteInoStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_inode WHERE ino = ?")
+		if err != nil {
+			return err
+		}
+		_, err = deleteInoStmt.ExecContext(ctx, ino)
+		if err != nil {
+			return err
+		}
+		err = deleteInoStmt.Close()
+		if err != nil {
+			return err
+		}
+		deleteDataStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
+		if err != nil {
+			return err
+		}
+		_, err = deleteDataStmt.ExecContext(ctx, ino)
+		if err != nil {
+			return err
+		}
+		err = deleteDataStmt.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (this *AgentFS) Rm(path string, rmOptions ...RmOptions) error {
+	normalizedPath := this.normalizePath(path)
+	rmOption := normalizeRmOptions(rmOptions...)
+	err := assertNotRoot(normalizedPath, Rm)
+	if err != nil {
+		return err
+	}
+	ino, err := this.resolvePath(normalizedPath)
+	if err != nil {
+		throwENOENTUnlessForce(normalizedPath, Rm, rmOption.Force)
+		return err
+	}
+	mode, err := getInodeModeOrThrow(this.db, ino, Rm, normalizedPath)
+	if err != nil {
+		return err
+	}
+	err = assertNotSymlinkMode(mode, Rm, normalizedPath)
+	if err != nil {
+		return err
+	}
+	parent, err := this.resolveParent(normalizedPath)
+	if err != nil {
+		scall := Rm
+		message := "operation not permitted"
+		return &ErrnoException{
+			Code:    ErrPerm,
+			Syscall: &scall,
+			Path:    &normalizedPath,
+			Message: &message,
+		}
+	}
+	if (mode & S_IFMT) == S_IFDIR {
+		if !rmOption.Recursive {
+			scall := Rm
+			message := "illegal operation on a directory"
+			return &ErrnoException{
+				Path:    &normalizedPath,
+				Message: &message,
+				Syscall: &scall,
+				Code:    ErrIsDir,
+			}
+		}
+		err := this.rmDirContentsRecursive(ino)
+		if err != nil {
+			return err
+		}
+		err = this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	return this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
+}
+
+func (this *AgentFS) rmDirContentsRecursive(dirIno int) error {
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, `
+    SELECT name, ino FROM fs_dentry
+    WHERE parent_ino = ?
+    ORDER BY name ASC
+  `)
+	if err != nil {
+		return err
+	}
+	defer func() { err = stmt.Close() }()
+	rows, err := stmt.QueryContext(ctx, dirIno)
+	if err != nil {
+		return err
+	}
+	children := []struct {
+		name string
+		ino  int
+	}{}
+	for rows.Next() {
+		var child struct {
+			name string
+			ino  int
+		}
+		err := rows.Scan(&child)
+		if err != nil {
+			return err
+		}
+		children = append(children, child)
+	}
+
+	for _, child := range children {
+		mode, err := this.getInodeMode(child.ino)
+		if err != nil {
+			continue
+		}
+
+		if (mode & S_IFMT) == S_IFDIR {
+			err := this.rmDirContentsRecursive(child.ino)
+			if err != nil {
+				return err
+			}
+			err = this.removeDentryAndMaybeInode(dirIno, child.name, child.ino)
+			if err != nil {
+				return err
+			}
+		} else {
+			assertNotSymlinkMode(mode, "rm", "<symlink>")
+			err = this.removeDentryAndMaybeInode(dirIno, child.name, child.ino)
+			return err
+		}
+	}
+	return nil
+}

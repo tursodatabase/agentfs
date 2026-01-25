@@ -41,6 +41,20 @@ func (s DataStats) IsSymbolicLink() bool {
 	return s.Mode&S_IFMT == S_IFLNK
 }
 
+func NewDataStats(ino, mode, nlink, uid, gid, size, atime, mtime, ctime int) DataStats {
+	return DataStats{
+		Ino:   ino,
+		Mode:  mode,
+		Nlink: nlink,
+		Uid:   uid,
+		Gid:   gid,
+		Size:  size,
+		Atime: atime,
+		Mtime: mtime,
+		Ctime: ctime,
+	}
+}
+
 /**
  * Directory entry with full statistics
  */
@@ -124,7 +138,7 @@ type FileSystem interface {
 	/**
 	 * Read entire file contents.
 	 */
-	ReadFile(string, ...EncodingOption) ([]byte, error)
+	ReadFile(string) ([]byte, error)
 
 	/**
 	 * Write data to a file (creates or overwrites).
