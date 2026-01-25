@@ -741,3 +741,101 @@ func (this *AgentFS) getInodeMode(ino int) (int, error) {
 	}
 	return result.mode, nil
 }
+
+func (this *AgentFS) WriteFile(
+	path string,
+	content []byte,
+) (err error) {
+	err = this.ensureParentDirs(path)
+	if err != nil {
+		return
+	}
+	normalizedPath := this.normalizePath(path)
+	ino, err := this.resolvePath(path)
+	var parent struct {
+		parentIno int
+		name      string
+	}
+	if err != nil {
+		assertWritableExistingInode(this.db, ino, Open, normalizedPath)
+		err := this.updateFileContent(ino, content)
+		if err != nil {
+			return err
+		}
+	} else {
+		parentPtr, err := this.resolveParent(path)
+		if err != nil {
+			scall := Open
+			message := "no such file or directory"
+			return &ErrnoException{
+				Code:    ErrNoEnt,
+				Syscall: &scall,
+				Path:    &normalizedPath,
+				Message: &message,
+			}
+		}
+		parent = *parentPtr
+	}
+	err = assertInodeIsDirectory(this.db, parent.parentIno, Open, normalizedPath)
+	if err != nil {
+		return
+	}
+	fileIno, err := this.createInode(DEFAULT_FILE_MODE, 0, 0)
+	if err != nil {
+		return
+	}
+	err = this.createDentry(parent.parentIno, parent.name, fileIno)
+	if err != nil {
+		return
+	}
+	return this.updateFileContent(fileIno, content)
+
+}
+
+func (this *AgentFS) updateFileContent(
+	ino int,
+	content []byte,
+) (err error) {
+	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	ctx := context.Background()
+	deleteStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
+	if err != nil {
+		return
+	}
+	defer func() { err = deleteStmt.Close() }()
+	_, err = deleteStmt.ExecContext(ctx, ino)
+	if len(content) > 0 {
+		stmt, err := this.db.PrepareContext(ctx, `
+			INSERT INTO fs_data (ino, chunk_index, data)
+       		VALUES (?, ?, ?)
+         `)
+		if err != nil {
+			return err
+		}
+		chunkIndex := 0
+		for offset := 0; offset < len(content); offset += this.chunkSize {
+			maxIdx := min(offset+this.chunkSize, len(content))
+			chunk := content[offset:maxIdx]
+			_, err := stmt.ExecContext(ctx, ino, chunkIndex, chunk)
+			if err != nil {
+				return err
+			}
+			chunkIndex++
+		}
+		err = stmt.Close()
+		if err != nil {
+			return err
+		}
+	}
+	updateStmt, err := this.db.PrepareContext(ctx, `
+      UPDATE fs_inode
+      SET size = ?, mtime = ?
+      WHERE ino = ?
+     `)
+	if err != nil {
+		return
+	}
+	defer func() { err = updateStmt.Close() }()
+	_, err = updateStmt.ExecContext(ctx, len(content), now, ino)
+	return
+}

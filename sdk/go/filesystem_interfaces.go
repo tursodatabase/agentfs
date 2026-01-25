@@ -133,7 +133,6 @@ type FileSystem interface {
 	WriteFile(
 		string,
 		[]byte,
-		...EncodingOption,
 	) error
 
 	/**

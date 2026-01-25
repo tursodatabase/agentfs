@@ -59,3 +59,54 @@ func assertInodeIsDirectory(
 	}
 	return nil
 }
+
+func assertExistingNonDirNonSymlinkInode(
+	db *sql.DB,
+	ino int,
+	syscall FsSyscall,
+	fullPathForError string,
+) error {
+	mode, err := getInodeMode(db, ino)
+	if err != nil {
+		message := "no such file or directory"
+		return &ErrnoException{
+			Code:    ErrNoEnt,
+			Syscall: &syscall,
+			Path:    &fullPathForError,
+			Message: &message,
+		}
+	}
+	if isDirMode(mode) {
+		message := "illegal operation on a directory"
+		return &ErrnoException{
+			Code:    ErrIsDir,
+			Syscall: &syscall,
+			Path:    &fullPathForError,
+			Message: &message,
+		}
+	}
+	assertNotSymlinkMode(mode, syscall, fullPathForError)
+	return nil
+}
+
+func assertNotSymlinkMode(mode int, syscall FsSyscall, path string) error {
+	if (mode & S_IFMT) == S_IFLNK {
+		message := "symbolic links not supported yet"
+		return &ErrnoException{
+			Code:    ErrNoSys,
+			Syscall: &syscall,
+			Path:    &path,
+			Message: &message,
+		}
+	}
+	return nil
+}
+
+func assertWritableExistingInode(
+	db *sql.DB,
+	ino int,
+	syscall FsSyscall,
+	fullPathForError string,
+) error {
+	return assertExistingNonDirNonSymlinkInode(db, ino, syscall, fullPathForError)
+}
