@@ -15,10 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-use zerofs_nfsserve::tcp::NFSTcp;
 
 use crate::nfs::AgentNFS;
+use crate::nfsserve::tcp::NFSTcp;
 
 #[cfg(target_os = "macos")]
 use crate::sandbox::darwin::{generate_sandbox_profile, SandboxConfig};
@@ -97,18 +96,14 @@ pub async fn run(
     let port = find_available_port(DEFAULT_NFS_PORT)?;
 
     // Start NFS server in background
-    let bind_addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
-        .parse()
-        .context("Invalid bind address")?;
-    let listener = zerofs_nfsserve::tcp::NFSTcpListener::bind(bind_addr, nfs)
+    let bind_addr = format!("127.0.0.1:{}", port);
+    let listener = crate::nfsserve::tcp::NFSTcpListener::bind(&bind_addr, nfs)
         .await
         .context("Failed to bind NFS server")?;
 
-    // Spawn the NFS server task with shutdown token
-    let shutdown = CancellationToken::new();
-    let shutdown_clone = shutdown.clone();
+    // Spawn the NFS server task
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = listener.handle_with_shutdown(shutdown_clone).await {
+        if let Err(e) = listener.handle_forever().await {
             eprintln!("NFS server error: {}", e);
         }
     });
@@ -127,9 +122,8 @@ pub async fn run(
     // Unmount
     unmount(&session.mountpoint)?;
 
-    // Stop the server gracefully
-    shutdown.cancel();
-    let _ = server_handle.await;
+    // Abort the server task (vendored nfsserve doesn't support graceful shutdown)
+    server_handle.abort();
 
     // Clean up mountpoint directory (but keep the delta database)
     if let Err(e) = std::fs::remove_dir(&session.mountpoint) {

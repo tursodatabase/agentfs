@@ -10,8 +10,7 @@ use turso::value::Value;
 
 use crate::mount::{mount_fs, MountOpts};
 use crate::nfs::AgentNFS;
-use tokio_util::sync::CancellationToken;
-use zerofs_nfsserve::tcp::NFSTcp;
+use crate::nfsserve::tcp::NFSTcp;
 
 #[cfg(target_os = "linux")]
 use agentfs_sdk::{get_mounts, Mount};
@@ -257,19 +256,15 @@ async fn mount_nfs_backend(args: MountArgs) -> Result<()> {
         let nfs = AgentNFS::new(fs);
         let port = find_available_port(DEFAULT_NFS_PORT)?;
 
-        let bind_addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
-            .parse()
-            .context("Invalid bind address")?;
-        let listener = zerofs_nfsserve::tcp::NFSTcpListener::bind(bind_addr, nfs)
+        let bind_addr = format!("127.0.0.1:{}", port);
+        let listener = crate::nfsserve::tcp::NFSTcpListener::bind(&bind_addr, nfs)
             .await
             .context("Failed to bind NFS server")?;
 
         eprintln!("Starting NFS server on 127.0.0.1:{}", port);
 
-        let shutdown = CancellationToken::new();
-        let shutdown_clone = shutdown.clone();
         tokio::spawn(async move {
-            if let Err(e) = listener.handle_with_shutdown(shutdown_clone).await {
+            if let Err(e) = listener.handle_forever().await {
                 eprintln!("NFS server error: {}", e);
             }
         });

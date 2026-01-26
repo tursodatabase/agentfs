@@ -12,6 +12,9 @@ pub mod fuse;
 pub mod fuser;
 
 #[cfg(unix)]
+pub mod nfsserve;
+
+#[cfg(unix)]
 pub mod nfs;
 
 #[cfg(unix)]

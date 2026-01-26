@@ -1,23 +1,23 @@
 //! NFS server adapter for AgentFS.
 //!
-//! This module implements zerofs_nfsserve's NFSFileSystem trait on top of AgentFS's
+//! This module implements nfsserve's NFSFileSystem trait on top of AgentFS's
 //! FileSystem trait, enabling systems to mount AgentFS via NFS without requiring
 //! FUSE or other system extensions.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::nfsserve::nfs::{
+    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, set_gid3, set_mode3,
+    set_size3, set_uid3, specdata3,
+};
+use crate::nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use agentfs_sdk::error::Error as SdkError;
 use agentfs_sdk::{
     FileSystem, Stats, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
 };
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
-use zerofs_nfsserve::nfs::{
-    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, set_gid3, set_mode3,
-    set_size3, set_uid3, specdata3,
-};
-use zerofs_nfsserve::vfs::{AuthContext, DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 
 /// Root directory inode number
 const ROOT_INO: fileid3 = 1;
@@ -107,14 +107,6 @@ impl InodeMap {
     }
 }
 
-/// Permission check result
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Permission {
-    Read,
-    Write,
-    Execute,
-}
-
 impl AgentNFS {
     /// Create a new NFS adapter wrapping the given filesystem.
     pub fn new(fs: Arc<Mutex<dyn FileSystem>>) -> Self {
@@ -145,47 +137,6 @@ impl AgentNFS {
         }
 
         Ok(current_ino)
-    }
-
-    /// Check if the given auth context has the requested permission on a file.
-    fn check_permission(auth: &AuthContext, stats: &Stats, perm: Permission) -> bool {
-        let mode = stats.mode & 0o7777;
-
-        // Root (uid 0) can do anything
-        if auth.uid == 0 {
-            return true;
-        }
-
-        let (user_bit, group_bit, other_bit) = match perm {
-            Permission::Read => (0o400, 0o040, 0o004),
-            Permission::Write => (0o200, 0o020, 0o002),
-            Permission::Execute => (0o100, 0o010, 0o001),
-        };
-
-        // Check owner permissions
-        if auth.uid == stats.uid {
-            return (mode & user_bit) != 0;
-        }
-
-        // Check group permissions
-        if auth.gid == stats.gid || auth.gids.contains(&stats.gid) {
-            return (mode & group_bit) != 0;
-        }
-
-        // Check other permissions
-        (mode & other_bit) != 0
-    }
-
-    /// Check if auth context can write to a directory (for creating/deleting files).
-    fn can_write_dir(auth: &AuthContext, dir_stats: &Stats) -> bool {
-        Self::check_permission(auth, dir_stats, Permission::Write)
-            && Self::check_permission(auth, dir_stats, Permission::Execute)
-    }
-
-    /// Check if auth context can modify file attributes.
-    /// Only owner or root can chmod/chown.
-    fn can_modify_attrs(auth: &AuthContext, stats: &Stats) -> bool {
-        auth.uid == 0 || auth.uid == stats.uid
     }
 
     /// Convert AgentFS Stats to NFS fattr3.
@@ -289,12 +240,7 @@ impl NFSFileSystem for AgentNFS {
         VFSCapabilities::ReadWrite
     }
 
-    async fn lookup(
-        &self,
-        _auth: &AuthContext,
-        dirid: fileid3,
-        filename: &filename3,
-    ) -> Result<fileid3, nfsstat3> {
+    async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
         let dir_path = self.get_path(dirid).await?;
         let dir_fs_ino = self.get_fs_ino(dirid).await?;
         let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
@@ -347,7 +293,7 @@ impl NFSFileSystem for AgentNFS {
             .get_or_create_ino(&full_path, stats.ino))
     }
 
-    async fn getattr(&self, _auth: &AuthContext, id: fileid3) -> Result<fattr3, nfsstat3> {
+    async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
         let fs_ino = self.get_fs_ino(id).await?;
         let fs = self.fs.lock().await;
         let stats = fs
@@ -359,31 +305,16 @@ impl NFSFileSystem for AgentNFS {
         Ok(self.stats_to_fattr(&stats, id))
     }
 
-    async fn setattr(
-        &self,
-        auth: &AuthContext,
-        id: fileid3,
-        setattr: sattr3,
-    ) -> Result<fattr3, nfsstat3> {
+    async fn setattr(&self, id: fileid3, setattr: sattr3) -> Result<fattr3, nfsstat3> {
         let fs_ino = self.get_fs_ino(id).await?;
         let fs = self.fs.lock().await;
 
-        // Get current stats for permission checking
-        let stats = fs
-            .getattr(fs_ino)
-            .await
-            .map_err(error_to_nfsstat)?
-            .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-        // Handle chmod (mode change) - only owner or root
+        // Handle chmod (mode change)
         if let set_mode3::mode(mode) = setattr.mode {
-            if !Self::can_modify_attrs(auth, &stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
             fs.chmod(fs_ino, mode).await.map_err(error_to_nfsstat)?;
         }
 
-        // Handle chown (uid/gid change) - only root can change uid, owner can change gid to own group
+        // Handle chown (uid/gid change)
         let new_uid = if let set_uid3::uid(uid) = setattr.uid {
             Some(uid)
         } else {
@@ -395,57 +326,35 @@ impl NFSFileSystem for AgentNFS {
             None
         };
         if new_uid.is_some() || new_gid.is_some() {
-            // Only root can change uid
-            if new_uid.is_some() && auth.uid != 0 {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-            // Only owner or root can change gid, and non-root can only change to a group they belong to
-            if let Some(gid) = new_gid {
-                if auth.uid != 0 && auth.uid != stats.uid {
-                    return Err(nfsstat3::NFS3ERR_ACCES);
-                }
-                if auth.uid != 0 && gid != auth.gid && !auth.gids.contains(&gid) {
-                    return Err(nfsstat3::NFS3ERR_ACCES);
-                }
-            }
             fs.chown(fs_ino, new_uid, new_gid)
                 .await
                 .map_err(error_to_nfsstat)?;
         }
 
-        // Handle size change (truncate) - requires write permission
+        // Handle size change (truncate)
         if let set_size3::size(size) = setattr.size {
-            if !Self::check_permission(auth, &stats, Permission::Write) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
             let file = fs.open(fs_ino).await.map_err(error_to_nfsstat)?;
             file.truncate(size).await.map_err(error_to_nfsstat)?;
         }
 
-        drop(fs);
-        self.getattr(auth, id).await
-    }
-
-    async fn read(
-        &self,
-        auth: &AuthContext,
-        id: fileid3,
-        offset: u64,
-        count: u32,
-    ) -> Result<(Vec<u8>, bool), nfsstat3> {
-        let fs_ino = self.get_fs_ino(id).await?;
-        let fs = self.fs.lock().await;
-
-        // Check read permission
+        // Get updated stats
         let stats = fs
             .getattr(fs_ino)
             .await
             .map_err(error_to_nfsstat)?
             .ok_or(nfsstat3::NFS3ERR_NOENT)?;
 
-        if !Self::check_permission(auth, &stats, Permission::Read) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
+        Ok(self.stats_to_fattr(&stats, id))
+    }
+
+    async fn read(
+        &self,
+        id: fileid3,
+        offset: u64,
+        count: u32,
+    ) -> Result<(Vec<u8>, bool), nfsstat3> {
+        let fs_ino = self.get_fs_ino(id).await?;
+        let fs = self.fs.lock().await;
 
         let file = fs.open(fs_ino).await.map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
         let data = file
@@ -460,39 +369,21 @@ impl NFSFileSystem for AgentNFS {
         Ok((data, eof))
     }
 
-    async fn write(
-        &self,
-        auth: &AuthContext,
-        id: fileid3,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<fattr3, nfsstat3> {
+    async fn write(&self, id: fileid3, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
         let fs_ino = self.get_fs_ino(id).await?;
 
         {
             let fs = self.fs.lock().await;
 
-            // Check write permission
-            let stats = fs
-                .getattr(fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::check_permission(auth, &stats, Permission::Write) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-
             let file = fs.open(fs_ino).await.map_err(error_to_nfsstat)?;
             file.pwrite(offset, data).await.map_err(error_to_nfsstat)?;
         }
 
-        self.getattr(auth, id).await
+        self.getattr(id).await
     }
 
     async fn create(
         &self,
-        auth: &AuthContext,
         dirid: fileid3,
         filename: &filename3,
         _attr: sattr3,
@@ -502,22 +393,11 @@ impl NFSFileSystem for AgentNFS {
         let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
         let full_path = Self::join_path(&dir_path, name);
 
-        // Check write permission on parent directory
+        // Create file with root uid/gid (permission checks removed)
         let new_fs_ino = {
             let fs = self.fs.lock().await;
-            let dir_stats = fs
-                .getattr(dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::can_write_dir(auth, &dir_stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-
-            // Create file with caller's uid/gid
             let (stats, _file) = fs
-                .create_file(dir_fs_ino, name, S_IFREG | 0o644, auth.uid, auth.gid)
+                .create_file(dir_fs_ino, name, S_IFREG | 0o644, 0, 0)
                 .await
                 .map_err(error_to_nfsstat)?;
             stats.ino
@@ -528,13 +408,12 @@ impl NFSFileSystem for AgentNFS {
             .write()
             .await
             .get_or_create_ino(&full_path, new_fs_ino);
-        let attr = self.getattr(auth, ino).await?;
+        let attr = self.getattr(ino).await?;
         Ok((ino, attr))
     }
 
     async fn create_exclusive(
         &self,
-        auth: &AuthContext,
         dirid: fileid3,
         filename: &filename3,
     ) -> Result<fileid3, nfsstat3> {
@@ -544,17 +423,6 @@ impl NFSFileSystem for AgentNFS {
         let full_path = Self::join_path(&dir_path, name);
 
         let fs = self.fs.lock().await;
-
-        // Check write permission on parent directory
-        let dir_stats = fs
-            .getattr(dir_fs_ino)
-            .await
-            .map_err(error_to_nfsstat)?
-            .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-        if !Self::can_write_dir(auth, &dir_stats) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
 
         // Check if file already exists
         if fs
@@ -566,9 +434,9 @@ impl NFSFileSystem for AgentNFS {
             return Err(nfsstat3::NFS3ERR_EXIST);
         }
 
-        // Create file with caller's uid/gid
+        // Create file with root uid/gid
         let (stats, _file) = fs
-            .create_file(dir_fs_ino, name, S_IFREG | 0o644, auth.uid, auth.gid)
+            .create_file(dir_fs_ino, name, S_IFREG | 0o644, 0, 0)
             .await
             .map_err(error_to_nfsstat)?;
 
@@ -582,10 +450,8 @@ impl NFSFileSystem for AgentNFS {
 
     async fn mkdir(
         &self,
-        auth: &AuthContext,
         dirid: fileid3,
         dirname: &filename3,
-        _attrs: &sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let dir_path = self.get_path(dirid).await?;
         let dir_fs_ino = self.get_fs_ino(dirid).await?;
@@ -595,19 +461,8 @@ impl NFSFileSystem for AgentNFS {
         let new_fs_ino = {
             let fs = self.fs.lock().await;
 
-            // Check write permission on parent directory
-            let dir_stats = fs
-                .getattr(dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::can_write_dir(auth, &dir_stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-
             let stats = fs
-                .mkdir(dir_fs_ino, name, auth.uid, auth.gid)
+                .mkdir(dir_fs_ino, name, 0, 0)
                 .await
                 .map_err(error_to_nfsstat)?;
             stats.ino
@@ -618,16 +473,11 @@ impl NFSFileSystem for AgentNFS {
             .write()
             .await
             .get_or_create_ino(&full_path, new_fs_ino);
-        let attr = self.getattr(auth, ino).await?;
+        let attr = self.getattr(ino).await?;
         Ok((ino, attr))
     }
 
-    async fn remove(
-        &self,
-        auth: &AuthContext,
-        dirid: fileid3,
-        filename: &filename3,
-    ) -> Result<(), nfsstat3> {
+    async fn remove(&self, dirid: fileid3, filename: &filename3) -> Result<(), nfsstat3> {
         let dir_path = self.get_path(dirid).await?;
         let dir_fs_ino = self.get_fs_ino(dirid).await?;
         let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
@@ -635,17 +485,6 @@ impl NFSFileSystem for AgentNFS {
 
         {
             let fs = self.fs.lock().await;
-
-            // Check write permission on parent directory
-            let dir_stats = fs
-                .getattr(dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::can_write_dir(auth, &dir_stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
 
             // Check if it's a file or directory and use appropriate method
             let stats = fs
@@ -669,7 +508,6 @@ impl NFSFileSystem for AgentNFS {
 
     async fn rename(
         &self,
-        auth: &AuthContext,
         from_dirid: fileid3,
         from_filename: &filename3,
         to_dirid: fileid3,
@@ -688,28 +526,6 @@ impl NFSFileSystem for AgentNFS {
         {
             let fs = self.fs.lock().await;
 
-            // Check write permission on source directory
-            let from_dir_stats = fs
-                .getattr(from_dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::can_write_dir(auth, &from_dir_stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-
-            // Check write permission on destination directory
-            let to_dir_stats = fs
-                .getattr(to_dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::can_write_dir(auth, &to_dir_stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-
             fs.rename(from_dir_fs_ino, from_name, to_dir_fs_ino, to_name)
                 .await
                 .map_err(error_to_nfsstat)?;
@@ -724,7 +540,6 @@ impl NFSFileSystem for AgentNFS {
 
     async fn readdir(
         &self,
-        auth: &AuthContext,
         dirid: fileid3,
         start_after: fileid3,
         max_entries: usize,
@@ -734,19 +549,6 @@ impl NFSFileSystem for AgentNFS {
 
         let entries = {
             let fs = self.fs.lock().await;
-
-            // Check read+execute permission on directory
-            let dir_stats = fs
-                .getattr(dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::check_permission(auth, &dir_stats, Permission::Read)
-                || !Self::check_permission(auth, &dir_stats, Permission::Execute)
-            {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
 
             fs.readdir_plus(dir_fs_ino)
                 .await
@@ -763,7 +565,7 @@ impl NFSFileSystem for AgentNFS {
         let mut skip = start_after > 0;
         let mut skipped_count = 0;
 
-        for (idx, entry) in entries.iter().enumerate() {
+        for entry in entries.iter() {
             let entry_path = Self::join_path(&dir_path, &entry.name);
             let ino = self
                 .inode_map
@@ -787,7 +589,6 @@ impl NFSFileSystem for AgentNFS {
                 fileid: ino,
                 name: entry.name.as_bytes().into(),
                 attr: self.stats_to_fattr(&entry.stats, ino),
-                cookie: (idx + 1) as u64,
             });
         }
 
@@ -799,7 +600,6 @@ impl NFSFileSystem for AgentNFS {
 
     async fn symlink(
         &self,
-        auth: &AuthContext,
         dirid: fileid3,
         linkname: &filename3,
         symlink: &nfspath3,
@@ -814,19 +614,8 @@ impl NFSFileSystem for AgentNFS {
         let new_fs_ino = {
             let fs = self.fs.lock().await;
 
-            // Check write permission on parent directory
-            let dir_stats = fs
-                .getattr(dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::can_write_dir(auth, &dir_stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-
             let stats = fs
-                .symlink(dir_fs_ino, name, target, auth.uid, auth.gid)
+                .symlink(dir_fs_ino, name, target, 0, 0)
                 .await
                 .map_err(error_to_nfsstat)?;
             stats.ino
@@ -837,25 +626,14 @@ impl NFSFileSystem for AgentNFS {
             .write()
             .await
             .get_or_create_ino(&full_path, new_fs_ino);
-        let attr = self.getattr(auth, ino).await?;
+        let attr = self.getattr(ino).await?;
         Ok((ino, attr))
     }
 
-    async fn readlink(&self, auth: &AuthContext, id: fileid3) -> Result<nfspath3, nfsstat3> {
+    async fn readlink(&self, id: fileid3) -> Result<nfspath3, nfsstat3> {
         let fs_ino = self.get_fs_ino(id).await?;
 
         let fs = self.fs.lock().await;
-
-        // Check read permission on the symlink
-        let stats = fs
-            .getattr(fs_ino)
-            .await
-            .map_err(error_to_nfsstat)?
-            .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-        if !Self::check_permission(auth, &stats, Permission::Read) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
 
         let target = fs
             .readlink(fs_ino)
@@ -864,113 +642,5 @@ impl NFSFileSystem for AgentNFS {
             .ok_or(nfsstat3::NFS3ERR_NOENT)?;
 
         Ok(target.into_bytes().into())
-    }
-
-    async fn mknod(
-        &self,
-        auth: &AuthContext,
-        dirid: fileid3,
-        filename: &filename3,
-        ftype: ftype3,
-        attr: &sattr3,
-        spec: Option<&specdata3>,
-    ) -> Result<(fileid3, fattr3), nfsstat3> {
-        let dir_path = self.get_path(dirid).await?;
-        let dir_fs_ino = self.get_fs_ino(dirid).await?;
-        let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
-        let full_path = Self::join_path(&dir_path, name);
-
-        // Convert NFS ftype3 to Unix mode bits
-        let mode_type = match ftype {
-            ftype3::NF3REG => S_IFREG,
-            ftype3::NF3FIFO => S_IFIFO,
-            ftype3::NF3CHR => S_IFCHR,
-            ftype3::NF3BLK => S_IFBLK,
-            ftype3::NF3SOCK => S_IFSOCK,
-            ftype3::NF3DIR | ftype3::NF3LNK => return Err(nfsstat3::NFS3ERR_BADTYPE),
-        };
-
-        // Extract rdev from specdata3 for device nodes
-        let rdev = match ftype {
-            ftype3::NF3CHR | ftype3::NF3BLK => {
-                let spec = spec.ok_or(nfsstat3::NFS3ERR_INVAL)?;
-                ((spec.specdata1 as u64) << 8) | (spec.specdata2 as u64 & 0xff)
-            }
-            _ => 0,
-        };
-
-        // Extract mode from sattr3 if provided
-        let perms = match attr.mode {
-            set_mode3::mode(m) => m & 0o7777,
-            set_mode3::Void => 0o644,
-        };
-        let mode = mode_type | perms;
-
-        let new_fs_ino = {
-            let fs = self.fs.lock().await;
-
-            let dir_stats = fs
-                .getattr(dir_fs_ino)
-                .await
-                .map_err(error_to_nfsstat)?
-                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-            if !Self::can_write_dir(auth, &dir_stats) {
-                return Err(nfsstat3::NFS3ERR_ACCES);
-            }
-
-            let stats = fs
-                .mknod(dir_fs_ino, name, mode, rdev, auth.uid, auth.gid)
-                .await
-                .map_err(error_to_nfsstat)?;
-            stats.ino
-        };
-
-        let ino = self
-            .inode_map
-            .write()
-            .await
-            .get_or_create_ino(&full_path, new_fs_ino);
-        let attr = self.getattr(auth, ino).await?;
-        Ok((ino, attr))
-    }
-
-    async fn link(
-        &self,
-        auth: &AuthContext,
-        fileid: fileid3,
-        linkdirid: fileid3,
-        linkname: &filename3,
-    ) -> Result<(), nfsstat3> {
-        let file_fs_ino = self.get_fs_ino(fileid).await?;
-        let link_dir_path = self.get_path(linkdirid).await?;
-        let link_dir_fs_ino = self.get_fs_ino(linkdirid).await?;
-        let name = std::str::from_utf8(linkname).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
-        let link_path = Self::join_path(&link_dir_path, name);
-
-        let fs = self.fs.lock().await;
-
-        // Check write permission on target directory
-        let dir_stats = fs
-            .getattr(link_dir_fs_ino)
-            .await
-            .map_err(error_to_nfsstat)?
-            .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-
-        if !Self::can_write_dir(auth, &dir_stats) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
-
-        let stats = fs
-            .link(file_fs_ino, link_dir_fs_ino, name)
-            .await
-            .map_err(error_to_nfsstat)?;
-
-        drop(fs);
-        self.inode_map
-            .write()
-            .await
-            .get_or_create_ino(&link_path, stats.ino);
-        Ok(())
     }
 }
