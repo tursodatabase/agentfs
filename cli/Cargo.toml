@@ -41,9 +41,13 @@ base64 = "0.22"
 
 # NFS server for userspace filesystem (used by `agentfs run` and `agentfs nfs`)
 uuid = { version = "1", features = ["v4"] }
-zerofs_nfsserve = "0.19"
 tokio-util = "0.7"
 async-trait = "0.1"
+# Vendored nfsserve dependencies
+byteorder = "1.5"
+num-derive = "0.4"
+num-traits = "0.2"
+filetime = "0.2"
 
 # Unix dependencies
 [target.'cfg(unix)'.dependencies]

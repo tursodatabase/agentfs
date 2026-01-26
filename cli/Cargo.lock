@@ -79,14 +79,18 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "byteorder",
  "chrono",
  "clap 4.5.54",
  "clap_complete",
  "dirs",
+ "filetime",
  "libc",
  "log",
  "memchr",
  "nix 0.29.0",
+ "num-derive",
+ "num-traits",
  "page_size",
  "parking_lot",
  "reverie",
@@ -103,7 +107,6 @@ dependencies = [
  "turso",
  "uuid",
  "zerocopy",
- "zerofs_nfsserve",
 ]
 
 [[package]]
@@ -387,15 +390,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "bytestream"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04f720842a717d6afaf69fee2dc69b771edc165f12cc3eb1b0e8eeef53a86454"
-dependencies = [
- "byteorder",
 ]
 
 [[package]]
@@ -4027,27 +4021,6 @@ dependencies = [
  "quote",
  "syn 2.0.114",
  "synstructure",
-]
-
-[[package]]
-name = "zerofs_nfsserve"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d77a28d248c17d7408a27137892f3b5c75f19f58d98ea16b158463409d5ed25"
-dependencies = [
- "anyhow",
- "async-trait",
- "byteorder",
- "bytestream",
- "filetime",
- "futures 0.3.31",
- "num-derive",
- "num-traits",
- "smallvec",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-attributes",
 ]
 
 [[package]]

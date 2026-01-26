@@ -5,10 +5,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
 use crate::nfs::AgentNFS;
-use zerofs_nfsserve::tcp::NFSTcp;
+use crate::nfsserve::tcp::NFSTcp;
 
 use super::{MountBackend, MountHandle, MountHandleInner, MountOpts};
 
@@ -82,21 +81,22 @@ pub(super) async fn mount_nfs(
     fs: Arc<Mutex<dyn agentfs_sdk::FileSystem + Send>>,
     opts: MountOpts,
 ) -> Result<MountHandle> {
+    use tokio_util::sync::CancellationToken;
+
     let nfs = AgentNFS::new(fs);
 
     let port = find_available_port(DEFAULT_NFS_PORT)?;
 
-    let bind_addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
-        .parse()
-        .context("Invalid bind address")?;
-    let listener = zerofs_nfsserve::tcp::NFSTcpListener::bind(bind_addr, nfs)
+    let bind_addr = format!("127.0.0.1:{}", port);
+    let listener = crate::nfsserve::tcp::NFSTcpListener::bind(&bind_addr, nfs)
         .await
         .context("Failed to bind NFS server")?;
 
+    // CancellationToken is kept for API compatibility, but the vendored nfsserve
+    // doesn't support graceful shutdown. The task will be aborted on drop.
     let shutdown = CancellationToken::new();
-    let shutdown_clone = shutdown.clone();
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = listener.handle_with_shutdown(shutdown_clone).await {
+        if let Err(e) = listener.handle_forever().await {
             eprintln!("NFS server error: {}", e);
         }
     });

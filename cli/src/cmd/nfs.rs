@@ -10,8 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-use zerofs_nfsserve::tcp::NFSTcp;
 
 use crate::cmd::init::open_agentfs;
 use crate::nfs::AgentNFS;
@@ -53,10 +51,7 @@ pub async fn handle_nfs_command(id_or_path: String, bind: String, port: u32) -> 
 
     // Bind NFS server
     let bind_addr_str = format!("{}:{}", bind, port);
-    let bind_addr: std::net::SocketAddr = bind_addr_str
-        .parse()
-        .with_context(|| format!("Invalid bind address: {}", bind_addr_str))?;
-    let listener = zerofs_nfsserve::tcp::NFSTcpListener::bind(bind_addr, nfs)
+    let listener = crate::nfsserve::tcp::NFSTcpListener::bind(&bind_addr_str, nfs)
         .await
         .with_context(|| format!("Failed to bind NFS server to {}", bind_addr_str))?;
 
@@ -76,11 +71,10 @@ pub async fn handle_nfs_command(id_or_path: String, bind: String, port: u32) -> 
     eprintln!("Press Ctrl+C to stop.");
     eprintln!();
 
-    // Spawn the NFS server task with shutdown token
-    let shutdown = CancellationToken::new();
-    let shutdown_clone = shutdown.clone();
+    // Spawn the NFS server task
+    use crate::nfsserve::tcp::NFSTcp;
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = listener.handle_with_shutdown(shutdown_clone).await {
+        if let Err(e) = listener.handle_forever().await {
             eprintln!("NFS server error: {}", e);
         }
     });
@@ -93,9 +87,8 @@ pub async fn handle_nfs_command(id_or_path: String, bind: String, port: u32) -> 
     eprintln!();
     eprintln!("Shutting down...");
 
-    // Stop the server gracefully
-    shutdown.cancel();
-    let _ = server_handle.await;
+    // Abort the server task (no graceful shutdown support)
+    server_handle.abort();
 
     Ok(())
 }
