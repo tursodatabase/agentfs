@@ -8,7 +8,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing;
+use tracing::trace;
 use turso::{Connection, Value};
 
 use super::{agentfs::AgentFS, BoxedFile, DirEntry, FileSystem, FilesystemStats, FsError, Stats};
@@ -517,7 +517,7 @@ impl OverlayFS {
 #[async_trait]
 impl FileSystem for OverlayFS {
     async fn lookup(&self, parent_ino: i64, name: &str) -> Result<Option<Stats>> {
-        tracing::debug!(
+        trace!(
             "OverlayFS::lookup: parent_ino={}, name={}",
             parent_ino,
             name
@@ -596,7 +596,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn getattr(&self, ino: i64) -> Result<Option<Stats>> {
-        tracing::debug!("OverlayFS::getattr: ino={}", ino);
+        trace!("OverlayFS::getattr: ino={}", ino);
 
         let info = match self.get_inode_info(ino) {
             Some(i) => i,
@@ -615,7 +615,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn readlink(&self, ino: i64) -> Result<Option<String>> {
-        tracing::debug!("OverlayFS::readlink: ino={}", ino);
+        trace!("OverlayFS::readlink: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
 
@@ -626,7 +626,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn readdir(&self, ino: i64) -> Result<Option<Vec<String>>> {
-        tracing::debug!("OverlayFS::readdir: ino={}", ino);
+        trace!("OverlayFS::readdir: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
         let child_whiteouts = self.get_child_whiteouts(&info.path);
@@ -684,7 +684,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn readdir_plus(&self, ino: i64) -> Result<Option<Vec<DirEntry>>> {
-        tracing::debug!("OverlayFS::readdir_plus: ino={}", ino);
+        trace!("OverlayFS::readdir_plus: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
         let child_whiteouts = self.get_child_whiteouts(&info.path);
@@ -769,7 +769,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn chmod(&self, ino: i64, mode: u32) -> Result<()> {
-        tracing::debug!("OverlayFS::chmod: ino={}, mode={:o}", ino, mode);
+        trace!("OverlayFS::chmod: ino={}, mode={:o}", ino, mode);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
 
@@ -782,7 +782,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn chown(&self, ino: i64, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
-        tracing::debug!(
+        trace!(
             "OverlayFS::chown: ino={}, uid={:?}, gid={:?}",
             ino,
             uid,
@@ -800,7 +800,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn open(&self, ino: i64) -> Result<BoxedFile> {
-        tracing::debug!("OverlayFS::open: ino={}", ino);
+        trace!("OverlayFS::open: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
 
@@ -813,7 +813,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn mkdir(&self, parent_ino: i64, name: &str, uid: u32, gid: u32) -> Result<Stats> {
-        tracing::debug!("OverlayFS::mkdir: parent_ino={}, name={}", parent_ino, name);
+        trace!("OverlayFS::mkdir: parent_ino={}, name={}", parent_ino, name);
 
         let parent_info = self.get_inode_info(parent_ino).ok_or(FsError::NotFound)?;
         let path = self.build_path(parent_ino, name)?;
@@ -858,7 +858,7 @@ impl FileSystem for OverlayFS {
         uid: u32,
         gid: u32,
     ) -> Result<(Stats, BoxedFile)> {
-        tracing::debug!(
+        trace!(
             "OverlayFS::create_file: parent_ino={}, name={}",
             parent_ino,
             name
@@ -903,7 +903,7 @@ impl FileSystem for OverlayFS {
         uid: u32,
         gid: u32,
     ) -> Result<Stats> {
-        tracing::debug!("OverlayFS::mknod: parent_ino={}, name={}", parent_ino, name);
+        trace!("OverlayFS::mknod: parent_ino={}, name={}", parent_ino, name);
 
         let parent_info = self.get_inode_info(parent_ino).ok_or(FsError::NotFound)?;
         let path = self.build_path(parent_ino, name)?;
@@ -939,7 +939,7 @@ impl FileSystem for OverlayFS {
         uid: u32,
         gid: u32,
     ) -> Result<Stats> {
-        tracing::debug!(
+        trace!(
             "OverlayFS::symlink: parent_ino={}, name={}, target={}",
             parent_ino,
             name,
@@ -973,7 +973,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn unlink(&self, parent_ino: i64, name: &str) -> Result<()> {
-        tracing::debug!(
+        trace!(
             "OverlayFS::unlink: parent_ino={}, name={}",
             parent_ino,
             name
@@ -1019,7 +1019,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn rmdir(&self, parent_ino: i64, name: &str) -> Result<()> {
-        tracing::debug!("OverlayFS::rmdir: parent_ino={}, name={}", parent_ino, name);
+        trace!("OverlayFS::rmdir: parent_ino={}, name={}", parent_ino, name);
 
         let parent_info = self.get_inode_info(parent_ino).ok_or(FsError::NotFound)?;
         let path = self.build_path(parent_ino, name)?;
@@ -1067,7 +1067,7 @@ impl FileSystem for OverlayFS {
     }
 
     async fn link(&self, ino: i64, newparent_ino: i64, newname: &str) -> Result<Stats> {
-        tracing::debug!(
+        trace!(
             "OverlayFS::link: ino={}, newparent_ino={}, newname={}",
             ino,
             newparent_ino,
@@ -1116,7 +1116,7 @@ impl FileSystem for OverlayFS {
         newparent_ino: i64,
         newname: &str,
     ) -> Result<()> {
-        tracing::debug!(
+        trace!(
             "OverlayFS::rename: oldparent={}, oldname={}, newparent={}, newname={}",
             oldparent_ino,
             oldname,
