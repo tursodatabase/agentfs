@@ -165,8 +165,8 @@ impl AgentNFS {
 
         // Extract major/minor from rdev for device files
         let rdev = specdata3 {
-            specdata1: ((stats.rdev >> 8) & 0xff) as u32, // major
-            specdata2: (stats.rdev & 0xff) as u32,        // minor
+            specdata1: libc::major(stats.rdev as libc::dev_t) as u32,
+            specdata2: libc::minor(stats.rdev as libc::dev_t) as u32,
         };
 
         fattr3 {
@@ -495,6 +495,65 @@ impl NFSFileSystem for AgentNFS {
 
             // Set the mode after creation (SDK mkdir doesn't take mode)
             fs.chmod(stats.ino, S_IFDIR | mode)
+                .await
+                .map_err(error_to_nfsstat)?;
+
+            stats.ino
+        };
+
+        let ino = self
+            .inode_map
+            .write()
+            .await
+            .get_or_create_ino(&full_path, new_fs_ino);
+        let attr = self.getattr(ino).await?;
+        Ok((ino, attr))
+    }
+
+    async fn mknod(
+        &self,
+        dirid: fileid3,
+        filename: &filename3,
+        ftype: ftype3,
+        attr: sattr3,
+        rdev: specdata3,
+        auth: &auth_unix,
+    ) -> Result<(fileid3, fattr3), nfsstat3> {
+        let dir_path = self.get_path(dirid).await?;
+        let dir_fs_ino = self.get_fs_ino(dirid).await?;
+        let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
+        let full_path = Self::join_path(&dir_path, name);
+
+        // Use mode from sattr3 if provided, otherwise default to 0o644
+        let perm_mode = match attr.mode {
+            set_mode3::mode(m) => m & 0o7777,
+            set_mode3::Void => 0o644,
+        };
+
+        // Convert NFS file type to SDK mode constant
+        let type_mode = match ftype {
+            ftype3::NF3CHR => S_IFCHR,
+            ftype3::NF3BLK => S_IFBLK,
+            ftype3::NF3SOCK => S_IFSOCK,
+            ftype3::NF3FIFO => S_IFIFO,
+            _ => return Err(nfsstat3::NFS3ERR_BADTYPE),
+        };
+
+        // Convert rdev from specdata3 (major/minor) to u64
+        let rdev_val = libc::makedev(rdev.specdata1 as _, rdev.specdata2 as _) as u64;
+
+        let new_fs_ino = {
+            let fs = self.fs.lock().await;
+
+            let stats = fs
+                .mknod(
+                    dir_fs_ino,
+                    name,
+                    type_mode | perm_mode,
+                    rdev_val,
+                    auth.uid,
+                    auth.gid,
+                )
                 .await
                 .map_err(error_to_nfsstat)?;
 

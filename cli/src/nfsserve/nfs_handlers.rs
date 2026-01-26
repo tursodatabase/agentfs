@@ -154,11 +154,11 @@ pub async fn handle_nfs(
         NFSProgram::NFSPROC3_MKDIR => nfsproc3_mkdir(xid, input, output, context).await?,
         NFSProgram::NFSPROC3_SYMLINK => nfsproc3_symlink(xid, input, output, context).await?,
         NFSProgram::NFSPROC3_READLINK => nfsproc3_readlink(xid, input, output, context).await?,
+        NFSProgram::NFSPROC3_MKNOD => nfsproc3_mknod(xid, input, output, context).await?,
         _ => {
             warn!("Unimplemented message {:?}", prog);
             proc_unavail_reply_message(xid).serialize(output)?;
         } /*
-          NFSPROC3_MKNOD,
           NFSPROC3_LINK,
           NFSPROC3_COMMIT,
           INVALID*/
@@ -2583,5 +2583,182 @@ pub async fn nfsproc3_readlink(
             symlink_attr.serialize(output)?;
         }
     }
+    Ok(())
+}
+
+/*
+ MKNOD3res NFSPROC3_MKNOD(MKNOD3args) = 11;
+
+ struct devicedata3 {
+    sattr3     dev_attributes;
+    specdata3  spec;
+ };
+
+ union mknoddata3 switch (ftype3 type) {
+ case NF3CHR:
+ case NF3BLK:
+    devicedata3  device;
+ case NF3SOCK:
+ case NF3FIFO:
+    sattr3       pipe_attributes;
+ default:
+    void;
+ };
+
+ struct MKNOD3args {
+    diropargs3   where;
+    mknoddata3   what;
+ };
+
+ struct MKNOD3resok {
+    post_op_fh3   obj;
+    post_op_attr  obj_attributes;
+    wcc_data      dir_wcc;
+ };
+
+ struct MKNOD3resfail {
+    wcc_data      dir_wcc;
+ };
+
+ union MKNOD3res switch (nfsstat3 status) {
+ case NFS3_OK:
+    MKNOD3resok   resok;
+ default:
+    MKNOD3resfail resfail;
+ };
+*/
+pub async fn nfsproc3_mknod(
+    xid: u32,
+    input: &mut impl Read,
+    output: &mut impl Write,
+    context: &RPCContext,
+) -> Result<(), anyhow::Error> {
+    // if we do not have write capabilities
+    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+        warn!("No write capabilities.");
+        make_success_reply(xid).serialize(output)?;
+        nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
+        return Ok(());
+    }
+
+    // Read diropargs3 (where to create)
+    let mut dirops = nfs::diropargs3::default();
+    dirops.deserialize(input)?;
+
+    // Read ftype3 (what type of node to create)
+    let mut ftype: u32 = 0;
+    ftype.deserialize(input)?;
+    let ftype = nfs::ftype3::from_u32(ftype).unwrap_or(nfs::ftype3::NF3REG);
+
+    // Read type-specific data
+    let (attr, rdev) = match ftype {
+        nfs::ftype3::NF3CHR | nfs::ftype3::NF3BLK => {
+            // devicedata3: sattr3 + specdata3
+            let mut attr = nfs::sattr3::default();
+            attr.deserialize(input)?;
+            let mut rdev = nfs::specdata3::default();
+            rdev.deserialize(input)?;
+            (attr, rdev)
+        }
+        nfs::ftype3::NF3SOCK | nfs::ftype3::NF3FIFO => {
+            // pipe_attributes: just sattr3
+            let mut attr = nfs::sattr3::default();
+            attr.deserialize(input)?;
+            (attr, nfs::specdata3::default())
+        }
+        _ => {
+            // Invalid type for mknod
+            make_success_reply(xid).serialize(output)?;
+            nfs::nfsstat3::NFS3ERR_BADTYPE.serialize(output)?;
+            nfs::wcc_data::default().serialize(output)?;
+            return Ok(());
+        }
+    };
+
+    debug!("nfsproc3_mknod({:?}, {:?}, {:?}) ", xid, dirops, ftype);
+
+    // find the directory we are supposed to create the node in
+    let dirid = context.vfs.fh_to_id(&dirops.dir);
+    if let Err(stat) = dirid {
+        make_success_reply(xid).serialize(output)?;
+        stat.serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
+        error!("Directory does not exist");
+        return Ok(());
+    }
+    let dirid = dirid.unwrap();
+
+    // get the directory attributes before the operation
+    let dir_attr = match context.vfs.getattr(dirid).await {
+        Ok(v) => v,
+        Err(stat) => {
+            error!("Cannot stat directory");
+            make_success_reply(xid).serialize(output)?;
+            stat.serialize(output)?;
+            nfs::wcc_data::default().serialize(output)?;
+            return Ok(());
+        }
+    };
+
+    let pre_dir_attr = nfs::pre_op_attr::attributes(nfs::wcc_attr {
+        size: dir_attr.size,
+        mtime: dir_attr.mtime,
+        ctime: dir_attr.ctime,
+    });
+
+    // Check write and execute permission on parent directory
+    if !permissions::can_modify_directory(&context.auth, &dir_attr) {
+        debug!(
+            "mknod permission denied for uid={} on directory",
+            context.auth.uid
+        );
+        let post_dir_attr = match context.vfs.getattr(dirid).await {
+            Ok(v) => nfs::post_op_attr::attributes(v),
+            Err(_) => nfs::post_op_attr::Void,
+        };
+        make_success_reply(xid).serialize(output)?;
+        nfs::nfsstat3::NFS3ERR_ACCES.serialize(output)?;
+        nfs::wcc_data {
+            before: pre_dir_attr,
+            after: post_dir_attr,
+        }
+        .serialize(output)?;
+        return Ok(());
+    }
+
+    let res = context
+        .vfs
+        .mknod(dirid, &dirops.name, ftype, attr, rdev, &context.auth)
+        .await;
+
+    // Re-read dir attributes for post op attr
+    let post_dir_attr = match context.vfs.getattr(dirid).await {
+        Ok(v) => nfs::post_op_attr::attributes(v),
+        Err(_) => nfs::post_op_attr::Void,
+    };
+    let wcc_res = nfs::wcc_data {
+        before: pre_dir_attr,
+        after: post_dir_attr,
+    };
+
+    match res {
+        Ok((fid, fattr)) => {
+            debug!("mknod success --> {:?}, {:?}", fid, fattr);
+            make_success_reply(xid).serialize(output)?;
+            nfs::nfsstat3::NFS3_OK.serialize(output)?;
+            let fh = context.vfs.id_to_fh(fid);
+            nfs::post_op_fh3::handle(fh).serialize(output)?;
+            nfs::post_op_attr::attributes(fattr).serialize(output)?;
+            wcc_res.serialize(output)?;
+        }
+        Err(e) => {
+            debug!("mknod error --> {:?}", e);
+            make_success_reply(xid).serialize(output)?;
+            e.serialize(output)?;
+            wcc_res.serialize(output)?;
+        }
+    }
+
     Ok(())
 }

@@ -165,6 +165,20 @@ pub trait NFSFileSystem: Sync {
         auth: &auth_unix,
     ) -> Result<(fileid3, fattr3), nfsstat3>;
 
+    /// Creates a special file (device, fifo, socket) with the given attributes.
+    /// If not supported due to readonly file system
+    /// this should return Err(nfsstat3::NFS3ERR_ROFS)
+    /// The auth parameter contains the caller's credentials for ownership.
+    async fn mknod(
+        &self,
+        dirid: fileid3,
+        filename: &filename3,
+        ftype: ftype3,
+        attr: sattr3,
+        rdev: specdata3,
+        auth: &auth_unix,
+    ) -> Result<(fileid3, fattr3), nfsstat3>;
+
     /// Removes a file.
     /// If not supported due to readonly file system
     /// this should return Err(nfsstat3::NFS3ERR_ROFS)
