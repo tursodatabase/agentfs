@@ -70,9 +70,9 @@ type DirEntry struct {
  */
 type FilesystemStats struct {
 	/** Total number of inodes (files, directories, symlinks) */
-	inodes int
+	Inodes int
 	/** Total bytes used by file contents */
-	bytesUsed int
+	BytesUsed int
 }
 
 /**
@@ -226,11 +226,11 @@ type FileSystem interface {
 	/**
 	 * Get filesystem statistics.
 	 */
-	Statfs() (FilesystemStats, error)
+	Statfs() (*FilesystemStats, error)
 
 	/**
 	 * Open a file and return a file handle for I/O operations.
 	 * @throws {ErrnoException} ENOENT if file does not exist
 	 */
-	Open(string) (FileHandle, error)
+	Open(string) (*FileHandle, error)
 }

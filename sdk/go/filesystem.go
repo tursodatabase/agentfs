@@ -1447,3 +1447,566 @@ func (this *AgentFS) rmDirContentsRecursive(dirIno int) error {
 	}
 	return nil
 }
+
+func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
+	oldNormalized := this.normalizePath(oldPath)
+	newNormalized := this.normalizePath(newPath)
+	if oldNormalized == newNormalized {
+		return nil
+	}
+	err = assertNotRoot(oldNormalized, Rename)
+	if err != nil {
+		return
+	}
+	err = assertNotRoot(newNormalized, Rename)
+	if err != nil {
+		return
+	}
+	oldParent, err := this.resolveParent(oldNormalized)
+	if err != nil {
+		scall := Rename
+		message := "operation not permitted"
+		return &ErrnoException{
+			Code:    ErrPerm,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &oldNormalized,
+		}
+	}
+	newParent, err := this.resolveParent(newNormalized)
+	if err != nil {
+		scall := Rename
+		message := "operation not permitted"
+		return &ErrnoException{
+			Code:    ErrPerm,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &newNormalized,
+		}
+	}
+
+	err = assertInodeIsDirectory(this.db, newParent.parentIno, Rename, newNormalized)
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	_, err = this.db.ExecContext(ctx, "BEGIN")
+	if err != nil {
+		return
+	}
+	oldResolved, err := this.resolvePathOrThrow(oldNormalized, Rename)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	oldIno := oldResolved.ino
+	oldMode, err := getInodeModeOrThrow(this.db, oldIno, Rename, oldNormalized)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	oldIsDir := (oldMode & S_IFMT) == S_IFDIR
+	if oldIsDir && strings.HasPrefix(newNormalized, oldNormalized+"/") {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		scall := Rename
+		message := "invalid argument"
+		return &ErrnoException{
+			Code:    ErrInvalid,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &newNormalized,
+		}
+	}
+	newIno, err := this.resolvePath(newNormalized)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	newMode, err := getInodeModeOrThrow(this.db, newIno, Rename, newNormalized)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	err = assertNotSymlinkMode(newMode, Rename, newNormalized)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	newIsDir := (newMode & S_IFMT) == S_IFDIR
+	if newIsDir && !oldIsDir {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		scall := Rename
+		message := "illegal operation on a directory"
+		return &ErrnoException{
+			Code:    ErrIsDir,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &newNormalized,
+		}
+	}
+	if !newIsDir && oldIsDir {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		scall := Rename
+		message := "not a directory"
+		return &ErrnoException{
+			Code:    ErrNotDir,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &newNormalized,
+		}
+	}
+	if newIsDir {
+		stmt, err := this.db.PrepareContext(ctx, `
+           SELECT 1 as one FROM fs_dentry
+           WHERE parent_ino = ?
+           LIMIT 1
+         `)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		row := stmt.QueryRowContext(ctx, newIno)
+		var child struct {
+			one int
+		}
+		err = row.Scan(&child)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		if err == nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			scall := Rename
+			message := "directory not empty"
+			return &ErrnoException{
+				Code:    ErrNotEmpty,
+				Syscall: &scall,
+				Message: &message,
+				Path:    &newNormalized,
+			}
+		}
+		err = this.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		err = stmt.Close()
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+	}
+	stmt, err := this.db.PrepareContext(ctx, `
+      UPDATE fs_dentry
+      SET parent_ino = ?, name = ?
+       WHERE parent_ino = ? AND name = ?
+     `)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	_, err = stmt.ExecContext(ctx, newParent.parentIno, newParent.name, oldParent.parentIno, oldParent.name)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	updatInodeCtimeStmt, err := this.db.PrepareContext(ctx, `
+       UPDATE fs_inode
+       SET ctime = ?
+       WHERE ino = ?
+     `)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	defer func() { err = updatInodeCtimeStmt.Close() }()
+	_, err = updatInodeCtimeStmt.ExecContext(ctx, now, oldIno)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	updateDirTimeStmt, err := this.db.PrepareContext(ctx, `
+       UPDATE fs_inode
+       SET mtime = ?, ctime = ?
+       WHERE ino = ?
+     `)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	defer func() { err = updateDirTimeStmt.Close() }()
+	_, err = updateDirTimeStmt.ExecContext(ctx, now, now, oldParent.parentIno)
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	if newParent.parentIno != oldParent.parentIno {
+		_, err := updateDirTimeStmt.ExecContext(ctx, now, now, newParent.parentIno)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+	}
+	_, err = this.db.ExecContext(ctx, "COMMIT")
+	return
+}
+
+func (this *AgentFS) CopyFile(src string, dest string) (err error) {
+	srcNormalized := this.normalizePath(src)
+	destNormalized := this.normalizePath(dest)
+	if srcNormalized == destNormalized {
+		scall := CopyFile
+		message := "invalid argument"
+		return &ErrnoException{
+			Code:    ErrInvalid,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &destNormalized,
+		}
+	}
+	srcResolved, err := this.resolvePathOrThrow(srcNormalized, CopyFile)
+	if err != nil {
+		return
+	}
+	srcIno := srcResolved.ino
+	err = assertReadableExistingInode(this.db, srcIno, CopyFile, srcNormalized)
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	stmt, err := this.db.PrepareContext(ctx, "SELECT mode, uid, gid, size FROM fs_inode WHERE ino = ?")
+	if err != nil {
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	row := stmt.QueryRowContext(ctx, srcIno)
+	var srcRow struct {
+		mode int
+		uid  int
+		gid  int
+		size int
+	}
+	err = row.Scan(&srcRow)
+	if err != nil && errors.Is(err, sql.ErrNoRows) {
+		scall := CopyFile
+		message := "no such file or directory"
+		return &ErrnoException{
+			Code:    ErrNoEnt,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &srcNormalized,
+		}
+	} else if err != nil {
+		return
+	}
+	destParent, err := this.resolveParent(destNormalized)
+	if err != nil {
+		scall := CopyFile
+		message := "no such file or directory"
+		return &ErrnoException{
+			Code:    ErrNoEnt,
+			Message: &message,
+			Path:    &destNormalized,
+			Syscall: &scall,
+		}
+	}
+	err = assertInodeIsDirectory(this.db, destParent.parentIno, CopyFile, destNormalized)
+	_, err = this.db.ExecContext(ctx, "BEGIN")
+	if err != nil {
+		return
+	}
+	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	destIno, err := this.resolvePath(destNormalized)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	} else if err != nil && errors.Is(err, sql.ErrNoRows) {
+		destMode, err := getInodeModeOrThrow(this.db, destIno, CopyFile, destNormalized)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		err = assertNotSymlinkMode(destMode, CopyFile, destNormalized)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		if (destMode & S_IFMT) == S_IFDIR {
+			scall := CopyFile
+			message := "illegal operation on a directory"
+			return &ErrnoException{
+				Code:    ErrIsDir,
+				Message: &message,
+				Syscall: &scall,
+				Path:    &destNormalized,
+			}
+		}
+		deleteStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		defer func() { err = deleteStmt.Close() }()
+		_, err = deleteStmt.ExecContext(ctx, destIno)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		copyStmt, err := this.db.PrepareContext(ctx, `
+         INSERT INTO fs_data (ino, chunk_index, data)
+         SELECT ?, chunk_index, data
+         FROM fs_data
+         WHERE ino = ?
+         ORDER BY chunk_index ASC
+       `)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		defer func() { err = copyStmt.Close() }()
+		_, err = copyStmt.ExecContext(ctx, srcIno)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		updateStmt, err := this.db.PrepareContext(ctx, `
+         UPDATE fs_inode
+         SET mode = ?, uid = ?, gid = ?, size = ?, mtime = ?, ctime = ?
+         WHERE ino = ?
+       `)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		_, err = updateStmt.ExecContext(ctx, srcRow.mode, srcRow.uid, srcRow.gid, srcRow.size, now, now, destIno)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+	} else {
+		destInoCreated, err := this.createInode(srcRow.mode, srcRow.uid, srcRow.gid)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		err = this.createDentry(destParent.parentIno, destParent.name, destInoCreated)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		copyStmt, err := this.db.PrepareContext(ctx, `
+	         INSERT INTO fs_data (ino, chunk_index, data)
+	         SELECT ?, chunk_index, data
+	         FROM fs_data
+	         WHERE ino = ?
+	         ORDER BY chunk_index ASC
+       `)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		defer func() { err = copyStmt.Close() }()
+		_, err = copyStmt.ExecContext(ctx, destInoCreated, srcIno)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		updateStmt, err := this.db.PrepareContext(ctx, `
+         UPDATE fs_inode
+         SET size = ?, mtime = ?, ctime = ?
+         WHERE ino = ?
+       `)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+		_, err = updateStmt.ExecContext(ctx, srcRow.size, now, now, destInoCreated)
+		if err != nil {
+			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
+			return err
+		}
+	}
+	_, err = this.db.ExecContext(ctx, "COMMIT")
+	if err != nil {
+		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
+		return
+	}
+	return
+}
+
+func (this *AgentFS) Access(path string) error {
+	normalizedPath := this.normalizePath(path)
+	_, err := this.resolvePath(normalizedPath)
+	if err != nil {
+		scall := Access
+		message := "no such file or directory"
+		return &ErrnoException{
+			Code:    ErrNoEnt,
+			Syscall: &scall,
+			Path:    &normalizedPath,
+			Message: &message,
+		}
+	}
+	return nil
+}
+
+func (this *AgentFS) Statfs() (FilesystemStats, error) {
+	ctx := context.Background()
+	inodeStmt, err := this.db.PrepareContext(ctx, "SELECT COUNT(*) as count FROM fs_inode")
+	if err != nil {
+		return FilesystemStats{}, err
+	}
+	row := inodeStmt.QueryRowContext(ctx)
+	var inodeRow struct {
+		count int
+	}
+	defer func() { err = inodeStmt.Close() }()
+	err = row.Scan(&inodeRow)
+	if err != nil {
+		return FilesystemStats{}, err
+	}
+
+	bytesStmt, err := this.db.PrepareContext(ctx, "SELECT COALESCE(SUM(LENGTH(data)), 0) as total FROM fs_data")
+	if err != nil {
+		return FilesystemStats{}, err
+	}
+	defer func() { err = bytesStmt.Close() }()
+	bRow := bytesStmt.QueryRowContext(ctx)
+	var bytesRow struct {
+		total int
+	}
+	err = bRow.Scan(&bytesRow)
+	if err != nil {
+		return FilesystemStats{}, err
+	}
+
+	return FilesystemStats{
+		Inodes:    inodeRow.count,
+		BytesUsed: bytesRow.total,
+	}, nil
+}
+
+func (this *AgentFS) Open(path string) (FileHandle, error) {
+	resolvedPath, err := this.resolvePathOrThrow(path, Open)
+	if err != nil {
+		return nil, err
+	}
+	ino := resolvedPath.ino
+	normalizedPath := resolvedPath.normalizedPath
+	err = assertReadableExistingInode(this.db, ino, Open, normalizedPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AgentFSFile{db: this.db, ino: ino, chunkSize: this.chunkSize}, nil
+}
