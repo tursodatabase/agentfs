@@ -2636,10 +2636,11 @@ impl FileSystem for AgentFS {
         // Preserve file type bits (upper bits), replace permission bits (lower 12 bits)
         let new_mode = (current_mode & S_IFMT) | (mode & 0o7777);
 
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
         let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET mode = ? WHERE ino = ?")
+            .prepare_cached("UPDATE fs_inode SET mode = ?, ctime = ? WHERE ino = ?")
             .await?;
-        stmt.execute((new_mode as i64, ino)).await?;
+        stmt.execute((new_mode as i64, now, ino)).await?;
 
         Ok(())
     }
@@ -2673,6 +2674,10 @@ impl FileSystem for AgentFS {
             updates.push("gid = ?");
             values.push(Value::Integer(gid as i64));
         }
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        updates.push("ctime = ?");
+        values.push(Value::Integer(now));
 
         values.push(Value::Integer(ino));
         let sql = format!("UPDATE fs_inode SET {} WHERE ino = ?", updates.join(", "));
