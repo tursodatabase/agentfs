@@ -289,12 +289,12 @@ impl File for AgentFSFile {
             // For extending (new_size > current_size), we just update the size
             // The sparse regions will be handled by pread returning zeros
 
-            // Update the inode size and mtime
+            // Update the inode size, mtime, and ctime
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
             let mut stmt = conn
-                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
+                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ?, ctime = ? WHERE ino = ?")
                 .await?;
-            stmt.execute((new_size as i64, now, self.ino)).await?;
+            stmt.execute((new_size as i64, now, now, self.ino)).await?;
 
             Ok(())
         }
