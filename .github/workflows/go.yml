@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["1.24", "1.25"]
+        go-version: ["1.24", "1.25"]
     defaults:
       run:
         working-directory: sdk/go
@@ -23,12 +23,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.python-version }}
+          go-version: ${{ matrix.go-version }}
 
       - name: Install GolangCI
         uses: golangci/golangci-lint-action@v8
         with:
           version: "latest"
+          working-directory: sdk/go
 
       - name: Format
         run: gofmt -l *.go
