@@ -1,0 +1,37 @@
+name: Golang CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go-format-lint:
+    name: Format and Lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["1.24", "1.25"]
+    defaults:
+      run:
+        working-directory: sdk/go
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install GolangCI
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: "latest"
+
+      - name: Format
+        run: gofmt -l *.go
+
+      - name: Lint
+        run: golangci-lint run -v
