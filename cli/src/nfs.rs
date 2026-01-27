@@ -13,6 +13,7 @@ use crate::nfsserve::nfs::{
 };
 use crate::nfsserve::vfs::{auth_unix, DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use agentfs_sdk::error::Error as SdkError;
+use agentfs_sdk::filesystem::FsError;
 use agentfs_sdk::{
     FileSystem, Stats, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
 };
@@ -30,6 +31,16 @@ const FS_ROOT_INO: i64 = 1;
 /// should retry the operation later. Other errors map to NFS3ERR_IO.
 fn error_to_nfsstat(e: SdkError) -> nfsstat3 {
     match e {
+        SdkError::Fs(ref fs_err) => match fs_err {
+            FsError::NotFound => nfsstat3::NFS3ERR_NOENT,
+            FsError::AlreadyExists => nfsstat3::NFS3ERR_EXIST,
+            FsError::NotEmpty => nfsstat3::NFS3ERR_NOTEMPTY,
+            FsError::NotADirectory => nfsstat3::NFS3ERR_NOTDIR,
+            FsError::IsADirectory => nfsstat3::NFS3ERR_ISDIR,
+            FsError::NameTooLong => nfsstat3::NFS3ERR_NAMETOOLONG,
+            FsError::RootOperation => nfsstat3::NFS3ERR_ACCES,
+            _ => nfsstat3::NFS3ERR_IO,
+        },
         SdkError::ConnectionPoolTimeout => nfsstat3::NFS3ERR_JUKEBOX,
         _ => nfsstat3::NFS3ERR_IO,
     }

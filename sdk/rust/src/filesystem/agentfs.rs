@@ -10,7 +10,7 @@ use turso::{Builder, Connection, Value};
 
 use super::{
     BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, DEFAULT_DIR_MODE,
-    DEFAULT_FILE_MODE, S_IFLNK, S_IFMT, S_IFREG,
+    DEFAULT_FILE_MODE, MAX_NAME_LEN, S_IFLNK, S_IFMT, S_IFREG,
 };
 use crate::connection_pool::ConnectionPool;
 
@@ -2380,6 +2380,9 @@ impl AgentFS {
 #[async_trait]
 impl FileSystem for AgentFS {
     async fn lookup(&self, parent_ino: i64, name: &str) -> Result<Option<Stats>> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Look up the child inode
@@ -2699,6 +2702,9 @@ impl FileSystem for AgentFS {
     }
 
     async fn mkdir(&self, parent_ino: i64, name: &str, uid: u32, gid: u32) -> Result<Stats> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Check if already exists
@@ -2761,6 +2767,9 @@ impl FileSystem for AgentFS {
         uid: u32,
         gid: u32,
     ) -> Result<(Stats, BoxedFile)> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Check if already exists
@@ -2831,6 +2840,9 @@ impl FileSystem for AgentFS {
         uid: u32,
         gid: u32,
     ) -> Result<Stats> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Check if already exists
@@ -2893,6 +2905,9 @@ impl FileSystem for AgentFS {
         uid: u32,
         gid: u32,
     ) -> Result<Stats> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Check if entry already exists
@@ -2960,6 +2975,9 @@ impl FileSystem for AgentFS {
     }
 
     async fn unlink(&self, parent_ino: i64, name: &str) -> Result<()> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Look up the child inode
@@ -3027,6 +3045,9 @@ impl FileSystem for AgentFS {
     }
 
     async fn rmdir(&self, parent_ino: i64, name: &str) -> Result<()> {
+        if name.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Look up the child inode
@@ -3104,6 +3125,9 @@ impl FileSystem for AgentFS {
     }
 
     async fn link(&self, ino: i64, newparent_ino: i64, newname: &str) -> Result<Stats> {
+        if newname.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Check if source inode exists and is not a directory
@@ -3165,6 +3189,9 @@ impl FileSystem for AgentFS {
         newparent_ino: i64,
         newname: &str,
     ) -> Result<()> {
+        if newname.len() > MAX_NAME_LEN {
+            return Err(FsError::NameTooLong.into());
+        }
         let conn = self.pool.get_connection().await?;
 
         // Get source inode

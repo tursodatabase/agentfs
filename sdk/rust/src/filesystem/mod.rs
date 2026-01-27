@@ -50,6 +50,9 @@ pub enum FsError {
 
     #[error("Cannot rename directory into its own subdirectory")]
     InvalidRename,
+
+    #[error("Filename too long")]
+    NameTooLong,
 }
 
 impl FsError {
@@ -66,9 +69,13 @@ impl FsError {
             FsError::RootOperation => libc::EPERM,
             FsError::SymlinkLoop => libc::ELOOP,
             FsError::InvalidRename => libc::EINVAL,
+            FsError::NameTooLong => libc::ENAMETOOLONG,
         }
     }
 }
+
+/// Maximum filename length in bytes.
+pub const MAX_NAME_LEN: usize = 255;
 
 // File types for mode field
 pub const S_IFMT: u32 = 0o170000; // File type mask
