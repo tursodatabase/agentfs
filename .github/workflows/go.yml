@@ -23,7 +23,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          go-version: ${{ matrix.python-version }}
 
       - name: Install GolangCI
         uses: golangci/golangci-lint-action@v8
