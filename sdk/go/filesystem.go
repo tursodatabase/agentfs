@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,8 +35,8 @@ func NewAgentFSFile(db *sql.DB, ino, chunkSize int) *AgentFSFile {
 
 func (f *AgentFSFile) Pread(offset, size int) (data []byte, err error) {
 	ctx := context.Background()
-	startChunk := int(math.Floor(float64(offset / f.chunkSize)))
-	endChunk := int(math.Floor(float64((offset + size - 1) / f.chunkSize)))
+	startChunk := offset / f.chunkSize
+	endChunk := (offset + size - 1) / f.chunkSize
 	stmt, err := f.db.PrepareContext(ctx, `
       SELECT chunk_index, data FROM fs_data
       WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ?
@@ -119,7 +118,7 @@ func (f *AgentFSFile) Pwrite(offset int, data []byte) (err error) {
 		return
 	}
 	newSize := max(currentSize, offset+len(data))
-	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	now := int64(time.Now().UnixMilli() / 1000)
 	updateStmt, err := f.db.PrepareContext(ctx, `UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?`)
 	if err != nil {
 		return
@@ -131,8 +130,8 @@ func (f *AgentFSFile) Pwrite(offset int, data []byte) (err error) {
 
 func (f *AgentFSFile) writeDataAtOffset(offset int, data []byte) (err error) {
 	ctx := context.Background()
-	startChunk := int(math.Floor(float64(offset / f.chunkSize)))
-	endChunk := int(math.Floor(float64(offset+len(data)-1) / float64(f.chunkSize)))
+	startChunk := offset / f.chunkSize
+	endChunk := (offset + len(data) - 1) / f.chunkSize
 	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
 		chunkStart := chunkIdx * f.chunkSize
 		chunkEnd := chunkStart + f.chunkSize
@@ -176,6 +175,9 @@ func (f *AgentFSFile) writeDataAtOffset(offset int, data []byte) (err error) {
 			return err
 		}
 		_, err = upsertStmt.ExecContext(ctx, f.ino, chunkIdx, chunkData)
+		if err != nil {
+			return err
+		}
 		err = selectStmt.Close()
 		if err != nil {
 			return err
@@ -216,34 +218,62 @@ func (f *AgentFSFile) Truncate(newSize int) (err error) {
 	if newSize == 0 {
 		deleteStmt, err := f.db.PrepareContext(ctx, `DELETE FROM fs_data WHERE ino = ?`)
 		if err != nil {
+			_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
 			return err
 		}
 		_, err = deleteStmt.ExecContext(ctx, f.ino)
 		if err != nil {
+			_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
 			return err
 		}
 		err = deleteStmt.Close()
 		if err != nil {
+			_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
 			return err
 		}
 	} else if newSize < currentSize {
-		lastChunkId := int(math.Floor((float64((newSize - 1) / f.chunkSize))))
+		lastChunkId := (newSize - 1) / f.chunkSize
 		deleteStmt, err := f.db.PrepareContext(ctx, `DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?`)
 		if err != nil {
+			_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
 			return err
 		}
 		_, err = deleteStmt.ExecContext(ctx, f.ino, lastChunkId)
 		if err != nil {
+			_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
 			return err
 		}
 		err = deleteStmt.Close()
 		if err != nil {
+			_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+			if errRoll != nil {
+				return errRoll
+			}
 			return err
 		}
 		offsetInChunk := newSize % f.chunkSize
 		if offsetInChunk > 0 {
 			selectStmt, err := f.db.PrepareContext(ctx, `SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?`)
 			if err != nil {
+				_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+				if errRoll != nil {
+					return errRoll
+				}
 				return err
 			}
 			row := selectStmt.QueryRowContext(ctx, f.ino, lastChunkId)
@@ -254,6 +284,10 @@ func (f *AgentFSFile) Truncate(newSize int) (err error) {
 				if errors.Is(err, sql.ErrNoRows) {
 					dataToUse = nil
 				} else {
+					_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+					if errRoll != nil {
+						return errRoll
+					}
 					return err
 				}
 			} else {
@@ -263,27 +297,47 @@ func (f *AgentFSFile) Truncate(newSize int) (err error) {
 				trunkatedChunk := dataToUse[:offsetInChunk]
 				updateStmt, err := f.db.PrepareContext(ctx, `UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?`)
 				if err != nil {
+					_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+					if errRoll != nil {
+						return errRoll
+					}
 					return err
 				}
 				_, err = updateStmt.ExecContext(ctx, trunkatedChunk, f.ino, lastChunkId)
 				if err != nil {
+					_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+					if errRoll != nil {
+						return errRoll
+					}
 					return err
 				}
 				err = updateStmt.Close()
 				if err != nil {
+					_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+					if errRoll != nil {
+						return errRoll
+					}
 					return err
 				}
 			}
 		}
 	}
-	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	now := int64(time.Now().UnixMilli() / 1000)
 	updateStmt, err := f.db.PrepareContext(ctx, `UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?`)
 	if err != nil {
+		_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
 		return
 	}
 	defer func() { err = updateStmt.Close() }()
 	_, err = updateStmt.ExecContext(ctx, newSize, now, f.ino)
 	if err != nil {
+		_, errRoll := f.db.ExecContext(ctx, "ROLLBACK")
+		if errRoll != nil {
+			return errRoll
+		}
 		return
 	}
 	_, err = f.db.ExecContext(ctx, "COMMIT")
@@ -337,23 +391,26 @@ func NewAgentFS(db *sql.DB) *AgentFS {
 	}
 }
 
-func AgentFSFromDabatase(db *sql.DB) *AgentFS {
+func NewAgentFSFromDabatase(db *sql.DB) (*AgentFS, error) {
 	agentfs := &AgentFS{
 		db:        db,
 		rootIno:   1,
 		chunkSize: DefaultChunkSize,
 	}
-	agentfs.initialize()
-	return agentfs
+	err := agentfs.initialize()
+	if err != nil {
+		return nil, err
+	}
+	return agentfs, nil
 }
 
-func (this *AgentFS) GetChunkSize() int {
-	return this.chunkSize
+func (agentfs *AgentFS) GetChunkSize() int {
+	return agentfs.chunkSize
 }
 
-func (this *AgentFS) initialize() (err error) {
+func (agentfs *AgentFS) initialize() (err error) {
 	ctx := context.Background()
-	_, err = this.db.ExecContext(ctx, `
+	_, err = agentfs.db.ExecContext(ctx, `
       CREATE TABLE IF NOT EXISTS fs_config (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -363,7 +420,7 @@ func (this *AgentFS) initialize() (err error) {
 		return
 	}
 
-	_, err = this.db.ExecContext(ctx, `
+	_, err = agentfs.db.ExecContext(ctx, `
       CREATE TABLE IF NOT EXISTS fs_inode (
         ino INTEGER PRIMARY KEY AUTOINCREMENT,
         mode INTEGER NOT NULL,
@@ -380,7 +437,7 @@ func (this *AgentFS) initialize() (err error) {
 		return
 	}
 
-	_, err = this.db.ExecContext(ctx, `
+	_, err = agentfs.db.ExecContext(ctx, `
       CREATE TABLE IF NOT EXISTS fs_dentry (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -392,7 +449,7 @@ func (this *AgentFS) initialize() (err error) {
 	if err != nil {
 		return
 	}
-	_, err = this.db.ExecContext(ctx, `
+	_, err = agentfs.db.ExecContext(ctx, `
       CREATE INDEX IF NOT EXISTS idx_fs_dentry_parent
       ON fs_dentry(parent_ino, name)
     `)
@@ -400,7 +457,7 @@ func (this *AgentFS) initialize() (err error) {
 		return
 	}
 
-	_, err = this.db.ExecContext(ctx, `
+	_, err = agentfs.db.ExecContext(ctx, `
       CREATE TABLE IF NOT EXISTS fs_data (
         ino INTEGER NOT NULL,
         chunk_index INTEGER NOT NULL,
@@ -412,7 +469,7 @@ func (this *AgentFS) initialize() (err error) {
 		return
 	}
 
-	_, err = this.db.ExecContext(ctx, `
+	_, err = agentfs.db.ExecContext(ctx, `
       CREATE TABLE IF NOT EXISTS fs_symlink (
         ino INTEGER PRIMARY KEY,
         target TEXT NOT NULL
@@ -422,13 +479,13 @@ func (this *AgentFS) initialize() (err error) {
 		return
 	}
 
-	this.chunkSize, err = this.ensureRoot()
+	agentfs.chunkSize, err = agentfs.ensureRoot()
 	return
 }
 
-func (this *AgentFS) ensureRoot() (chunkSize int, err error) {
+func (agentfs *AgentFS) ensureRoot() (chunkSize int, err error) {
 	ctx := context.Background()
-	configStmt, err := this.db.PrepareContext(ctx,
+	configStmt, err := agentfs.db.PrepareContext(ctx,
 		"SELECT value FROM fs_config WHERE key = 'chunk_size'",
 	)
 	if err != nil {
@@ -443,7 +500,7 @@ func (this *AgentFS) ensureRoot() (chunkSize int, err error) {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return
 		} else {
-			insertConfigStmt, err := this.db.PrepareContext(ctx, `
+			insertConfigStmt, err := agentfs.db.PrepareContext(ctx, `
 			     INSERT INTO fs_config (key, value) VALUES ('chunk_size', ?)
 			   `)
 			if err != nil {
@@ -453,7 +510,6 @@ func (this *AgentFS) ensureRoot() (chunkSize int, err error) {
 			if err != nil {
 				return 0, err
 			}
-			chunkSize = DefaultChunkSize
 			err = insertConfigStmt.Close()
 			if err != nil {
 				return 0, err
@@ -464,25 +520,25 @@ func (this *AgentFS) ensureRoot() (chunkSize int, err error) {
 	if err != nil {
 		return
 	}
-	stmt, err := this.db.PrepareContext(ctx, "SELECT ino FROM fs_inode WHERE ino = ?")
+	stmt, err := agentfs.db.PrepareContext(ctx, "SELECT ino FROM fs_inode WHERE ino = ?")
 	if err != nil {
 		return
 	}
 	defer func() { err = stmt.Close() }()
-	rootRow := stmt.QueryRowContext(ctx, this.rootIno)
+	rootRow := stmt.QueryRowContext(ctx, agentfs.rootIno)
 	var ino int
 	err = rootRow.Scan(&ino)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			now := int(math.Floor(float64(time.Now().UnixMilli() / 1000)))
-			insertStmt, err := this.db.PrepareContext(ctx, `
+			now := time.Now().UnixMilli() / 1000
+			insertStmt, err := agentfs.db.PrepareContext(ctx, `
 			     INSERT INTO fs_inode (ino, mode, nlink, uid, gid, size, atime, mtime, ctime)
 			     VALUES (?, ?, 1, 0, 0, 0, ?, ?, ?)
 			   `)
 			if err != nil {
 				return 0, err
 			}
-			_, err = insertStmt.ExecContext(ctx, this.rootIno, DEFAULT_DIR_MODE, now, now, now)
+			_, err = insertStmt.ExecContext(ctx, agentfs.rootIno, DEFAULT_DIR_MODE, now, now, now)
 			if err != nil {
 				return 0, err
 			}
@@ -497,7 +553,7 @@ func (this *AgentFS) ensureRoot() (chunkSize int, err error) {
 	return
 }
 
-func (this *AgentFS) normalizePath(path string) string {
+func (agentfs *AgentFS) normalizePath(path string) string {
 	normalized := strings.TrimRight(path, "/")
 	if normalized == "" {
 		normalized = "/"
@@ -508,8 +564,8 @@ func (this *AgentFS) normalizePath(path string) string {
 	return normalized
 }
 
-func (this *AgentFS) splitPath(path string) []string {
-	normalized := this.normalizePath(path)
+func (agentfs *AgentFS) splitPath(path string) []string {
+	normalized := agentfs.normalizePath(path)
 	if normalized == "/" {
 		return []string{}
 	}
@@ -520,15 +576,15 @@ func (this *AgentFS) splitPath(path string) []string {
 	return parts
 }
 
-func (this *AgentFS) resolvePathOrThrow(
+func (agentfs *AgentFS) resolvePathOrThrow(
 	path string,
 	syscall FsSyscall,
 ) (*struct {
 	normalizedPath string
 	ino            int
 }, error) {
-	normalizedPath := this.normalizePath(path)
-	ino, err := this.resolvePath(normalizedPath)
+	normalizedPath := agentfs.normalizePath(path)
+	ino, err := agentfs.resolvePath(normalizedPath)
 	if err != nil {
 		message := "no such file or directory"
 		return nil, &ErrnoException{
@@ -547,19 +603,19 @@ func (this *AgentFS) resolvePathOrThrow(
 	}, nil
 }
 
-func (this *AgentFS) resolvePath(path string) (int, error) {
+func (agentfs *AgentFS) resolvePath(path string) (int, error) {
 	ctx := context.Background()
-	normalized := this.normalizePath(path)
+	normalized := agentfs.normalizePath(path)
 
 	if normalized == "/" {
-		return this.rootIno, nil
+		return agentfs.rootIno, nil
 	}
 
-	parts := this.splitPath(normalized)
-	currentIno := this.rootIno
+	parts := agentfs.splitPath(normalized)
+	currentIno := agentfs.rootIno
 
 	for _, name := range parts {
-		stmt, err := this.db.PrepareContext(ctx, `
+		stmt, err := agentfs.db.PrepareContext(ctx, `
       SELECT ino FROM fs_dentry
       WHERE parent_ino = ? AND name = ?
     `)
@@ -584,15 +640,15 @@ func (this *AgentFS) resolvePath(path string) (int, error) {
 	return currentIno, nil
 }
 
-func (this *AgentFS) resolveParent(path string) (*struct {
+func (agentfs *AgentFS) resolveParent(path string) (*struct {
 	parentIno int
 	name      string
 }, error) {
-	normalized := this.normalizePath(path)
+	normalized := agentfs.normalizePath(path)
 	if normalized == "/" {
 		return nil, nil
 	}
-	parts := this.splitPath(normalized)
+	parts := agentfs.splitPath(normalized)
 	name := parts[len(parts)-1]
 	var parentPath string
 	if len(parts) == 1 {
@@ -600,7 +656,7 @@ func (this *AgentFS) resolveParent(path string) (*struct {
 	} else {
 		parentPath = "/" + strings.Join(parts[0:len(parts)-1], "/")
 	}
-	parentIno, err := this.resolvePath(parentPath)
+	parentIno, err := agentfs.resolvePath(parentPath)
 	if err != nil {
 		return nil, err
 	}
@@ -610,14 +666,14 @@ func (this *AgentFS) resolveParent(path string) (*struct {
 	}{parentIno: parentIno, name: name}, nil
 }
 
-func (this *AgentFS) createInode(
+func (agentfs *AgentFS) createInode(
 	mode int,
 	uid int,
 	gid int,
 ) (int, error) {
 	ctx := context.Background()
-	now := int(math.Floor(float64(time.Now().UnixMilli() / 1000)))
-	insertStmt, err := this.db.PrepareContext(ctx, `
+	now := time.Now().UnixMilli() / 1000
+	insertStmt, err := agentfs.db.PrepareContext(ctx, `
   		INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
     	VALUES (?, ?, ?, 0, ?, ?, ?)
      	RETURNING ino
@@ -638,13 +694,13 @@ func (this *AgentFS) createInode(
 	return ino, nil
 }
 
-func (this *AgentFS) createDentry(
+func (agentfs *AgentFS) createDentry(
 	parentIno int,
 	name string,
 	ino int,
 ) (err error) {
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
      INSERT INTO fs_dentry (name, parent_ino, ino)
      VALUES (?, ?, ?)
    `)
@@ -652,11 +708,11 @@ func (this *AgentFS) createDentry(
 		return
 	}
 	defer func() { err = stmt.Close() }()
-	_, err = stmt.ExecContext(ctx, parentIno, ino)
+	_, err = stmt.ExecContext(ctx, name, parentIno, ino)
 	if err != nil {
 		return
 	}
-	updateStmt, err := this.db.PrepareContext(ctx, "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
+	updateStmt, err := agentfs.db.PrepareContext(ctx, "UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?")
 	if err != nil {
 		return
 	}
@@ -665,13 +721,13 @@ func (this *AgentFS) createDentry(
 	return
 }
 
-func (this *AgentFS) ensureParentDirs(path string) error {
-	parts := this.splitPath(path)
+func (agentfs *AgentFS) ensureParentDirs(path string) error {
+	parts := agentfs.splitPath(path)
 	parts = parts[:len(parts)-1]
 	ctx := context.Background()
-	currentIno := this.rootIno
+	currentIno := agentfs.rootIno
 	for _, name := range parts {
-		stmt, err := this.db.PrepareContext(ctx, `
+		stmt, err := agentfs.db.PrepareContext(ctx, `
        	SELECT ino FROM fs_dentry
         WHERE parent_ino = ? AND name = ?
        `)
@@ -685,16 +741,19 @@ func (this *AgentFS) ensureParentDirs(path string) error {
 		err = row.Scan(&result)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				dirIno, err := this.createInode(DEFAULT_DIR_MODE, 0, 0)
+				dirIno, err := agentfs.createInode(DEFAULT_DIR_MODE, 0, 0)
 				if err != nil {
 					return err
 				}
-				this.createDentry(currentIno, name, dirIno)
+				err = agentfs.createDentry(currentIno, name, dirIno)
+				if err != nil {
+					return err
+				}
 			} else {
 				return err
 			}
 		}
-		err = assertInodeIsDirectory(this.db, result.ino, Open, this.normalizePath(path))
+		err = assertInodeIsDirectory(agentfs.db, result.ino, Open, agentfs.normalizePath(path))
 		if err != nil {
 			return err
 		}
@@ -703,9 +762,9 @@ func (this *AgentFS) ensureParentDirs(path string) error {
 	return nil
 }
 
-func (this *AgentFS) getLinkCount(ino int) (int, error) {
+func (agentfs *AgentFS) getLinkCount(ino int) (int, error) {
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, "SELECT nlink FROM fs_inode WHERE ino = ?")
+	stmt, err := agentfs.db.PrepareContext(ctx, "SELECT nlink FROM fs_inode WHERE ino = ?")
 	if err != nil {
 		return 0, err
 	}
@@ -724,9 +783,12 @@ func (this *AgentFS) getLinkCount(ino int) (int, error) {
 	return result.nlink, nil
 }
 
-func (this *AgentFS) getInodeMode(ino int) (int, error) {
+func (agentfs *AgentFS) getInodeMode(ino int) (int, error) {
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, "SELECT mode FROM fs_inode WHERE ino = ?")
+	stmt, err := agentfs.db.PrepareContext(ctx, "SELECT mode FROM fs_inode WHERE ino = ?")
+	if err != nil {
+		return 0, err
+	}
 	var result struct {
 		mode int
 	}
@@ -742,28 +804,31 @@ func (this *AgentFS) getInodeMode(ino int) (int, error) {
 	return result.mode, nil
 }
 
-func (this *AgentFS) WriteFile(
+func (agentfs *AgentFS) WriteFile(
 	path string,
 	content []byte,
 ) (err error) {
-	err = this.ensureParentDirs(path)
+	err = agentfs.ensureParentDirs(path)
 	if err != nil {
 		return
 	}
-	normalizedPath := this.normalizePath(path)
-	ino, err := this.resolvePath(path)
+	normalizedPath := agentfs.normalizePath(path)
+	ino, err := agentfs.resolvePath(path)
 	var parent struct {
 		parentIno int
 		name      string
 	}
 	if err != nil {
-		assertWritableExistingInode(this.db, ino, Open, normalizedPath)
-		err := this.updateFileContent(ino, content)
+		err := assertWritableExistingInode(agentfs.db, ino, Open, normalizedPath)
+		if err != nil {
+			return err
+		}
+		err = agentfs.updateFileContent(ino, content)
 		if err != nil {
 			return err
 		}
 	} else {
-		parentPtr, err := this.resolveParent(path)
+		parentPtr, err := agentfs.resolveParent(path)
 		if err != nil {
 			scall := Open
 			message := "no such file or directory"
@@ -776,36 +841,36 @@ func (this *AgentFS) WriteFile(
 		}
 		parent = *parentPtr
 	}
-	err = assertInodeIsDirectory(this.db, parent.parentIno, Open, normalizedPath)
+	err = assertInodeIsDirectory(agentfs.db, parent.parentIno, Open, normalizedPath)
 	if err != nil {
 		return
 	}
-	fileIno, err := this.createInode(DEFAULT_FILE_MODE, 0, 0)
+	fileIno, err := agentfs.createInode(DEFAULT_FILE_MODE, 0, 0)
 	if err != nil {
 		return
 	}
-	err = this.createDentry(parent.parentIno, parent.name, fileIno)
+	err = agentfs.createDentry(parent.parentIno, parent.name, fileIno)
 	if err != nil {
 		return
 	}
-	return this.updateFileContent(fileIno, content)
+	return agentfs.updateFileContent(fileIno, content)
 
 }
 
-func (this *AgentFS) updateFileContent(
+func (agentfs *AgentFS) updateFileContent(
 	ino int,
 	content []byte,
 ) (err error) {
-	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	now := int64(time.Now().UnixMilli() / 1000)
 	ctx := context.Background()
-	deleteStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
+	deleteStmt, err := agentfs.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
 	if err != nil {
 		return
 	}
 	defer func() { err = deleteStmt.Close() }()
 	_, err = deleteStmt.ExecContext(ctx, ino)
 	if len(content) > 0 {
-		stmt, err := this.db.PrepareContext(ctx, `
+		stmt, err := agentfs.db.PrepareContext(ctx, `
 			INSERT INTO fs_data (ino, chunk_index, data)
        		VALUES (?, ?, ?)
          `)
@@ -813,8 +878,8 @@ func (this *AgentFS) updateFileContent(
 			return err
 		}
 		chunkIndex := 0
-		for offset := 0; offset < len(content); offset += this.chunkSize {
-			maxIdx := min(offset+this.chunkSize, len(content))
+		for offset := 0; offset < len(content); offset += agentfs.chunkSize {
+			maxIdx := min(offset+agentfs.chunkSize, len(content))
 			chunk := content[offset:maxIdx]
 			_, err := stmt.ExecContext(ctx, ino, chunkIndex, chunk)
 			if err != nil {
@@ -827,7 +892,7 @@ func (this *AgentFS) updateFileContent(
 			return err
 		}
 	}
-	updateStmt, err := this.db.PrepareContext(ctx, `
+	updateStmt, err := agentfs.db.PrepareContext(ctx, `
       UPDATE fs_inode
       SET size = ?, mtime = ?
       WHERE ino = ?
@@ -840,19 +905,19 @@ func (this *AgentFS) updateFileContent(
 	return
 }
 
-func (this *AgentFS) ReadFile(path string) ([]byte, error) {
-	s, err := this.resolvePathOrThrow(path, Open)
+func (agentfs *AgentFS) ReadFile(path string) ([]byte, error) {
+	s, err := agentfs.resolvePathOrThrow(path, Open)
 	if err != nil {
 		return nil, err
 	}
 	normalizedPath := s.normalizedPath
 	ino := s.ino
-	err = assertReadableExistingInode(this.db, ino, Open, normalizedPath)
+	err = assertReadableExistingInode(agentfs.db, ino, Open, normalizedPath)
 	if err != nil {
 		return nil, err
 	}
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
      SELECT data FROM fs_data
      WHERE ino = ?
      ORDER BY chunk_index ASC
@@ -882,8 +947,8 @@ func (this *AgentFS) ReadFile(path string) ([]byte, error) {
 			buffer = append(buffer, d.data...)
 		}
 	}
-	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
-	updateStmt, err := this.db.PrepareContext(ctx, "UPDATE fs_inode SET atime = ? WHERE ino = ?")
+	now := int64(time.Now().UnixMilli() / 1000)
+	updateStmt, err := agentfs.db.PrepareContext(ctx, "UPDATE fs_inode SET atime = ? WHERE ino = ?")
 	if err != nil {
 		return nil, err
 	}
@@ -895,19 +960,19 @@ func (this *AgentFS) ReadFile(path string) ([]byte, error) {
 	return buffer, nil
 }
 
-func (this *AgentFS) Readdir(path string) ([]string, error) {
-	s, err := this.resolvePathOrThrow(path, Open)
+func (agentfs *AgentFS) Readdir(path string) ([]string, error) {
+	s, err := agentfs.resolvePathOrThrow(path, Open)
 	if err != nil {
 		return nil, err
 	}
 	normalizedPath := s.normalizedPath
 	ino := s.ino
-	err = assertReaddirTargetInode(this.db, ino, normalizedPath)
+	err = assertReaddirTargetInode(agentfs.db, ino, normalizedPath)
 	if err != nil {
 		return nil, err
 	}
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
      SELECT name FROM fs_dentry
      WHERE parent_ino = ?
      ORDER BY name ASC
@@ -932,19 +997,19 @@ func (this *AgentFS) Readdir(path string) ([]string, error) {
 	return names, nil
 }
 
-func (this *AgentFS) ReaddirPlus(path string) ([]DirEntry, error) {
-	s, err := this.resolvePathOrThrow(path, Open)
+func (agentfs *AgentFS) ReaddirPlus(path string) ([]DirEntry, error) {
+	s, err := agentfs.resolvePathOrThrow(path, Open)
 	if err != nil {
 		return nil, err
 	}
 	normalizedPath := s.normalizedPath
 	ino := s.ino
-	err = assertReaddirTargetInode(this.db, ino, normalizedPath)
+	err = assertReaddirTargetInode(agentfs.db, ino, normalizedPath)
 	if err != nil {
 		return nil, err
 	}
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
      SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime
      FROM fs_dentry d
      JOIN fs_inode i ON d.ino = i.ino
@@ -1010,15 +1075,15 @@ func (this *AgentFS) ReaddirPlus(path string) ([]DirEntry, error) {
 	return dirEntries, nil
 }
 
-func (this *AgentFS) Stat(path string) (Stats, error) {
-	s, err := this.resolvePathOrThrow(path, Stat)
+func (agentfs *AgentFS) Stat(path string) (Stats, error) {
+	s, err := agentfs.resolvePathOrThrow(path, Stat)
 	if err != nil {
 		return nil, err
 	}
 	normalizedPath := s.normalizedPath
 	ino := s.ino
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
      SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
      FROM fs_inode
      WHERE ino = ?
@@ -1062,13 +1127,13 @@ func (this *AgentFS) Stat(path string) (Stats, error) {
 	), nil
 }
 
-func (this *AgentFS) Lstat(path string) (Stats, error) {
-	return this.Stat(path)
+func (agentfs *AgentFS) Lstat(path string) (Stats, error) {
+	return agentfs.Stat(path)
 }
 
-func (this *AgentFS) Mkdir(path string) error {
-	normalizedPath := this.normalizePath(path)
-	_, err := this.resolvePath(normalizedPath)
+func (agentfs *AgentFS) Mkdir(path string) error {
+	normalizedPath := agentfs.normalizePath(path)
+	_, err := agentfs.resolvePath(normalizedPath)
 	if err == nil {
 		scall := Mkdir
 		message := "file already exists"
@@ -1079,7 +1144,7 @@ func (this *AgentFS) Mkdir(path string) error {
 			Message: &message,
 		}
 	}
-	parent, err := this.resolveParent(normalizedPath)
+	parent, err := agentfs.resolveParent(normalizedPath)
 	if err != nil {
 		scall := Mkdir
 		message := "no such file or directory"
@@ -1090,15 +1155,15 @@ func (this *AgentFS) Mkdir(path string) error {
 			Syscall: &scall,
 		}
 	}
-	err = assertInodeIsDirectory(this.db, parent.parentIno, Mkdir, normalizedPath)
+	err = assertInodeIsDirectory(agentfs.db, parent.parentIno, Mkdir, normalizedPath)
 	if err != nil {
 		return err
 	}
-	dirIno, err := this.createInode(DEFAULT_DIR_MODE, 0, 0)
+	dirIno, err := agentfs.createInode(DEFAULT_DIR_MODE, 0, 0)
 	if err != nil {
 		return err
 	}
-	err = this.createDentry(parent.parentIno, parent.name, dirIno)
+	err = agentfs.createDentry(parent.parentIno, parent.name, dirIno)
 	if err != nil {
 		scall := Mkdir
 		message := "file already exists"
@@ -1112,16 +1177,19 @@ func (this *AgentFS) Mkdir(path string) error {
 	return nil
 }
 
-func (this *AgentFS) Rmdir(path string) error {
-	normalizedPath := this.normalizePath(path)
-	assertNotRoot(path, Rmdir)
-	s, err := this.resolvePathOrThrow(normalizedPath, Rmdir)
+func (agentfs *AgentFS) Rmdir(path string) error {
+	normalizedPath := agentfs.normalizePath(path)
+	err := assertNotRoot(path, Rmdir)
+	if err != nil {
+		return err
+	}
+	s, err := agentfs.resolvePathOrThrow(normalizedPath, Rmdir)
 	if err != nil {
 		return err
 	}
 	ino := s.ino
 	mode, err := getInodeModeOrThrow(
-		this.db,
+		agentfs.db,
 		ino,
 		Rmdir,
 		normalizedPath,
@@ -1144,7 +1212,7 @@ func (this *AgentFS) Rmdir(path string) error {
 		}
 	}
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
      SELECT 1 as one FROM fs_dentry
      WHERE parent_ino = ?
      LIMIT 1
@@ -1170,7 +1238,7 @@ func (this *AgentFS) Rmdir(path string) error {
 			Message: &message,
 		}
 	}
-	parent, err := this.resolveParent(normalizedPath)
+	parent, err := agentfs.resolveParent(normalizedPath)
 	if err != nil {
 		scall := Rmdir
 		message := "operation not permitted"
@@ -1181,16 +1249,16 @@ func (this *AgentFS) Rmdir(path string) error {
 			Path:    &normalizedPath,
 		}
 	}
-	return this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
+	return agentfs.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
 }
 
-func (this *AgentFS) removeDentryAndMaybeInode(
+func (agentfs *AgentFS) removeDentryAndMaybeInode(
 	parentIno int,
 	name string,
 	ino int,
 ) error {
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
     DELETE FROM fs_dentry
     WHERE parent_ino = ? AND name = ?
   `)
@@ -1203,7 +1271,7 @@ func (this *AgentFS) removeDentryAndMaybeInode(
 		return err
 	}
 
-	decrementStmt, err := this.db.PrepareContext(ctx,
+	decrementStmt, err := agentfs.db.PrepareContext(ctx,
 		"UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?",
 	)
 	if err != nil {
@@ -1215,14 +1283,14 @@ func (this *AgentFS) removeDentryAndMaybeInode(
 		return err
 	}
 
-	linkCount, err := this.getLinkCount(ino)
+	linkCount, err := agentfs.getLinkCount(ino)
 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 
 	if linkCount == 0 {
-		deleteInodeStmt, err := this.db.PrepareContext(ctx,
+		deleteInodeStmt, err := agentfs.db.PrepareContext(ctx,
 			"DELETE FROM fs_inode WHERE ino = ?",
 		)
 		if err != nil {
@@ -1237,7 +1305,7 @@ func (this *AgentFS) removeDentryAndMaybeInode(
 			return err
 		}
 
-		deleteDataStmt, err := this.db.PrepareContext(ctx,
+		deleteDataStmt, err := agentfs.db.PrepareContext(ctx,
 			"DELETE FROM fs_data WHERE ino = ?",
 		)
 		if err != nil {
@@ -1252,7 +1320,7 @@ func (this *AgentFS) removeDentryAndMaybeInode(
 			return err
 		}
 
-		deleteSymlinkStmt, err := this.db.PrepareContext(ctx,
+		deleteSymlinkStmt, err := agentfs.db.PrepareContext(ctx,
 			"DELETE FROM fs_symlink WHERE ino = ?",
 		)
 		if err != nil {
@@ -1266,27 +1334,27 @@ func (this *AgentFS) removeDentryAndMaybeInode(
 	return nil
 }
 
-func (this *AgentFS) Unlink(path string) error {
-	normalizedPath := this.normalizePath(path)
+func (agentfs *AgentFS) Unlink(path string) error {
+	normalizedPath := agentfs.normalizePath(path)
 	err := assertNotRoot(normalizedPath, Unlink)
 	if err != nil {
 		return err
 	}
-	s, err := this.resolvePathOrThrow(normalizedPath, Unlink)
+	s, err := agentfs.resolvePathOrThrow(normalizedPath, Unlink)
 	if err != nil {
 		return err
 	}
 	ino := s.ino
-	err = assertUnlinkTargetInode(this.db, ino, normalizedPath)
+	err = assertUnlinkTargetInode(agentfs.db, ino, normalizedPath)
 	if err != nil {
 		return err
 	}
-	parent, err := this.resolveParent(normalizedPath)
+	parent, err := agentfs.resolveParent(normalizedPath)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
      DELETE FROM fs_dentry
      WHERE parent_ino = ? AND name = ?
    `)
@@ -1295,7 +1363,7 @@ func (this *AgentFS) Unlink(path string) error {
 	}
 	defer func() { err = stmt.Close() }()
 	_, err = stmt.ExecContext(ctx, parent.parentIno, parent.name)
-	decrementStmt, err := this.db.PrepareContext(ctx, "UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?")
+	decrementStmt, err := agentfs.db.PrepareContext(ctx, "UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?")
 	if err != nil {
 		return err
 	}
@@ -1304,13 +1372,13 @@ func (this *AgentFS) Unlink(path string) error {
 	if err != nil {
 		return err
 	}
-	linkCount, err := this.getLinkCount(ino)
+	linkCount, err := agentfs.getLinkCount(ino)
 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if linkCount == 0 {
-		deleteInoStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_inode WHERE ino = ?")
+		deleteInoStmt, err := agentfs.db.PrepareContext(ctx, "DELETE FROM fs_inode WHERE ino = ?")
 		if err != nil {
 			return err
 		}
@@ -1322,7 +1390,7 @@ func (this *AgentFS) Unlink(path string) error {
 		if err != nil {
 			return err
 		}
-		deleteDataStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
+		deleteDataStmt, err := agentfs.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
 		if err != nil {
 			return err
 		}
@@ -1338,19 +1406,22 @@ func (this *AgentFS) Unlink(path string) error {
 	return nil
 }
 
-func (this *AgentFS) Rm(path string, rmOptions ...RmOptions) error {
-	normalizedPath := this.normalizePath(path)
+func (agentfs *AgentFS) Rm(path string, rmOptions ...RmOptions) error {
+	normalizedPath := agentfs.normalizePath(path)
 	rmOption := normalizeRmOptions(rmOptions...)
 	err := assertNotRoot(normalizedPath, Rm)
 	if err != nil {
 		return err
 	}
-	ino, err := this.resolvePath(normalizedPath)
+	ino, err := agentfs.resolvePath(normalizedPath)
 	if err != nil {
-		throwENOENTUnlessForce(normalizedPath, Rm, rmOption.Force)
+		errNoEnt := throwENOENTUnlessForce(normalizedPath, Rm, rmOption.Force)
+		if errNoEnt != nil {
+			return errNoEnt
+		}
 		return err
 	}
-	mode, err := getInodeModeOrThrow(this.db, ino, Rm, normalizedPath)
+	mode, err := getInodeModeOrThrow(agentfs.db, ino, Rm, normalizedPath)
 	if err != nil {
 		return err
 	}
@@ -1358,7 +1429,7 @@ func (this *AgentFS) Rm(path string, rmOptions ...RmOptions) error {
 	if err != nil {
 		return err
 	}
-	parent, err := this.resolveParent(normalizedPath)
+	parent, err := agentfs.resolveParent(normalizedPath)
 	if err != nil {
 		scall := Rm
 		message := "operation not permitted"
@@ -1380,22 +1451,22 @@ func (this *AgentFS) Rm(path string, rmOptions ...RmOptions) error {
 				Code:    ErrIsDir,
 			}
 		}
-		err := this.rmDirContentsRecursive(ino)
+		err := agentfs.rmDirContentsRecursive(ino)
 		if err != nil {
 			return err
 		}
-		err = this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
+		err = agentfs.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
 		if err != nil {
 			return err
 		}
 		return nil
 	}
-	return this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
+	return agentfs.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino)
 }
 
-func (this *AgentFS) rmDirContentsRecursive(dirIno int) error {
+func (agentfs *AgentFS) rmDirContentsRecursive(dirIno int) error {
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
     SELECT name, ino FROM fs_dentry
     WHERE parent_ino = ?
     ORDER BY name ASC
@@ -1425,32 +1496,35 @@ func (this *AgentFS) rmDirContentsRecursive(dirIno int) error {
 	}
 
 	for _, child := range children {
-		mode, err := this.getInodeMode(child.ino)
+		mode, err := agentfs.getInodeMode(child.ino)
 		if err != nil {
 			continue
 		}
 
 		if (mode & S_IFMT) == S_IFDIR {
-			err := this.rmDirContentsRecursive(child.ino)
+			err := agentfs.rmDirContentsRecursive(child.ino)
 			if err != nil {
 				return err
 			}
-			err = this.removeDentryAndMaybeInode(dirIno, child.name, child.ino)
+			err = agentfs.removeDentryAndMaybeInode(dirIno, child.name, child.ino)
 			if err != nil {
 				return err
 			}
 		} else {
-			assertNotSymlinkMode(mode, "rm", "<symlink>")
-			err = this.removeDentryAndMaybeInode(dirIno, child.name, child.ino)
+			err := assertNotSymlinkMode(mode, Rm, "<symlink>")
+			if err != nil {
+				return err
+			}
+			err = agentfs.removeDentryAndMaybeInode(dirIno, child.name, child.ino)
 			return err
 		}
 	}
 	return nil
 }
 
-func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
-	oldNormalized := this.normalizePath(oldPath)
-	newNormalized := this.normalizePath(newPath)
+func (agentfs *AgentFS) Rename(oldPath string, newPath string) (err error) {
+	oldNormalized := agentfs.normalizePath(oldPath)
+	newNormalized := agentfs.normalizePath(newPath)
 	if oldNormalized == newNormalized {
 		return nil
 	}
@@ -1462,7 +1536,7 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	if err != nil {
 		return
 	}
-	oldParent, err := this.resolveParent(oldNormalized)
+	oldParent, err := agentfs.resolveParent(oldNormalized)
 	if err != nil {
 		scall := Rename
 		message := "operation not permitted"
@@ -1473,7 +1547,7 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 			Path:    &oldNormalized,
 		}
 	}
-	newParent, err := this.resolveParent(newNormalized)
+	newParent, err := agentfs.resolveParent(newNormalized)
 	if err != nil {
 		scall := Rename
 		message := "operation not permitted"
@@ -1485,27 +1559,27 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 		}
 	}
 
-	err = assertInodeIsDirectory(this.db, newParent.parentIno, Rename, newNormalized)
+	err = assertInodeIsDirectory(agentfs.db, newParent.parentIno, Rename, newNormalized)
 	if err != nil {
 		return
 	}
 	ctx := context.Background()
-	_, err = this.db.ExecContext(ctx, "BEGIN")
+	_, err = agentfs.db.ExecContext(ctx, "BEGIN")
 	if err != nil {
 		return
 	}
-	oldResolved, err := this.resolvePathOrThrow(oldNormalized, Rename)
+	oldResolved, err := agentfs.resolvePathOrThrow(oldNormalized, Rename)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
 		return
 	}
 	oldIno := oldResolved.ino
-	oldMode, err := getInodeModeOrThrow(this.db, oldIno, Rename, oldNormalized)
+	oldMode, err := getInodeModeOrThrow(agentfs.db, oldIno, Rename, oldNormalized)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1513,7 +1587,7 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	}
 	oldIsDir := (oldMode & S_IFMT) == S_IFDIR
 	if oldIsDir && strings.HasPrefix(newNormalized, oldNormalized+"/") {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1526,17 +1600,17 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 			Path:    &newNormalized,
 		}
 	}
-	newIno, err := this.resolvePath(newNormalized)
+	newIno, err := agentfs.resolvePath(newNormalized)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
 		return
 	}
-	newMode, err := getInodeModeOrThrow(this.db, newIno, Rename, newNormalized)
+	newMode, err := getInodeModeOrThrow(agentfs.db, newIno, Rename, newNormalized)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1544,7 +1618,7 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	}
 	err = assertNotSymlinkMode(newMode, Rename, newNormalized)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1552,7 +1626,7 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	}
 	newIsDir := (newMode & S_IFMT) == S_IFDIR
 	if newIsDir && !oldIsDir {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1566,7 +1640,7 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 		}
 	}
 	if !newIsDir && oldIsDir {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1580,13 +1654,13 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 		}
 	}
 	if newIsDir {
-		stmt, err := this.db.PrepareContext(ctx, `
+		stmt, err := agentfs.db.PrepareContext(ctx, `
            SELECT 1 as one FROM fs_dentry
            WHERE parent_ino = ?
            LIMIT 1
          `)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1598,14 +1672,14 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 		}
 		err = row.Scan(&child)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
 		if err == nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1618,9 +1692,9 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 				Path:    &newNormalized,
 			}
 		}
-		err = this.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno)
+		err = agentfs.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1628,20 +1702,20 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 		}
 		err = stmt.Close()
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
 	}
-	stmt, err := this.db.PrepareContext(ctx, `
+	stmt, err := agentfs.db.PrepareContext(ctx, `
       UPDATE fs_dentry
       SET parent_ino = ?, name = ?
        WHERE parent_ino = ? AND name = ?
      `)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1650,20 +1724,20 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	defer func() { err = stmt.Close() }()
 	_, err = stmt.ExecContext(ctx, newParent.parentIno, newParent.name, oldParent.parentIno, oldParent.name)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
 		return
 	}
-	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
-	updatInodeCtimeStmt, err := this.db.PrepareContext(ctx, `
+	now := int64(time.Now().UnixMilli() / 1000)
+	updatInodeCtimeStmt, err := agentfs.db.PrepareContext(ctx, `
        UPDATE fs_inode
        SET ctime = ?
        WHERE ino = ?
      `)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1672,19 +1746,19 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	defer func() { err = updatInodeCtimeStmt.Close() }()
 	_, err = updatInodeCtimeStmt.ExecContext(ctx, now, oldIno)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
 		return
 	}
-	updateDirTimeStmt, err := this.db.PrepareContext(ctx, `
+	updateDirTimeStmt, err := agentfs.db.PrepareContext(ctx, `
        UPDATE fs_inode
        SET mtime = ?, ctime = ?
        WHERE ino = ?
      `)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1693,7 +1767,7 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	defer func() { err = updateDirTimeStmt.Close() }()
 	_, err = updateDirTimeStmt.ExecContext(ctx, now, now, oldParent.parentIno)
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1702,20 +1776,20 @@ func (this *AgentFS) Rename(oldPath string, newPath string) (err error) {
 	if newParent.parentIno != oldParent.parentIno {
 		_, err := updateDirTimeStmt.ExecContext(ctx, now, now, newParent.parentIno)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
 	}
-	_, err = this.db.ExecContext(ctx, "COMMIT")
+	_, err = agentfs.db.ExecContext(ctx, "COMMIT")
 	return
 }
 
-func (this *AgentFS) CopyFile(src string, dest string) (err error) {
-	srcNormalized := this.normalizePath(src)
-	destNormalized := this.normalizePath(dest)
+func (agentfs *AgentFS) CopyFile(src string, dest string) (err error) {
+	srcNormalized := agentfs.normalizePath(src)
+	destNormalized := agentfs.normalizePath(dest)
 	if srcNormalized == destNormalized {
 		scall := CopyFile
 		message := "invalid argument"
@@ -1726,17 +1800,17 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 			Path:    &destNormalized,
 		}
 	}
-	srcResolved, err := this.resolvePathOrThrow(srcNormalized, CopyFile)
+	srcResolved, err := agentfs.resolvePathOrThrow(srcNormalized, CopyFile)
 	if err != nil {
 		return
 	}
 	srcIno := srcResolved.ino
-	err = assertReadableExistingInode(this.db, srcIno, CopyFile, srcNormalized)
+	err = assertReadableExistingInode(agentfs.db, srcIno, CopyFile, srcNormalized)
 	if err != nil {
 		return
 	}
 	ctx := context.Background()
-	stmt, err := this.db.PrepareContext(ctx, "SELECT mode, uid, gid, size FROM fs_inode WHERE ino = ?")
+	stmt, err := agentfs.db.PrepareContext(ctx, "SELECT mode, uid, gid, size FROM fs_inode WHERE ino = ?")
 	if err != nil {
 		return
 	}
@@ -1761,7 +1835,7 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 	} else if err != nil {
 		return
 	}
-	destParent, err := this.resolveParent(destNormalized)
+	destParent, err := agentfs.resolveParent(destNormalized)
 	if err != nil {
 		scall := CopyFile
 		message := "no such file or directory"
@@ -1772,23 +1846,23 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 			Syscall: &scall,
 		}
 	}
-	err = assertInodeIsDirectory(this.db, destParent.parentIno, CopyFile, destNormalized)
-	_, err = this.db.ExecContext(ctx, "BEGIN")
+	err = assertInodeIsDirectory(agentfs.db, destParent.parentIno, CopyFile, destNormalized)
+	_, err = agentfs.db.ExecContext(ctx, "BEGIN")
 	if err != nil {
 		return
 	}
-	now := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
-	destIno, err := this.resolvePath(destNormalized)
+	now := int64(time.Now().UnixMilli() / 1000)
+	destIno, err := agentfs.resolvePath(destNormalized)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
 		return
 	} else if err != nil && errors.Is(err, sql.ErrNoRows) {
-		destMode, err := getInodeModeOrThrow(this.db, destIno, CopyFile, destNormalized)
+		destMode, err := getInodeModeOrThrow(agentfs.db, destIno, CopyFile, destNormalized)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1796,7 +1870,7 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 		}
 		err = assertNotSymlinkMode(destMode, CopyFile, destNormalized)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1812,9 +1886,9 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 				Path:    &destNormalized,
 			}
 		}
-		deleteStmt, err := this.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
+		deleteStmt, err := agentfs.db.PrepareContext(ctx, "DELETE FROM fs_data WHERE ino = ?")
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1823,13 +1897,13 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 		defer func() { err = deleteStmt.Close() }()
 		_, err = deleteStmt.ExecContext(ctx, destIno)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
-		copyStmt, err := this.db.PrepareContext(ctx, `
+		copyStmt, err := agentfs.db.PrepareContext(ctx, `
          INSERT INTO fs_data (ino, chunk_index, data)
          SELECT ?, chunk_index, data
          FROM fs_data
@@ -1837,7 +1911,7 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
          ORDER BY chunk_index ASC
        `)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1846,19 +1920,19 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 		defer func() { err = copyStmt.Close() }()
 		_, err = copyStmt.ExecContext(ctx, srcIno)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
-		updateStmt, err := this.db.PrepareContext(ctx, `
+		updateStmt, err := agentfs.db.PrepareContext(ctx, `
          UPDATE fs_inode
          SET mode = ?, uid = ?, gid = ?, size = ?, mtime = ?, ctime = ?
          WHERE ino = ?
        `)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1866,30 +1940,30 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 		}
 		_, err = updateStmt.ExecContext(ctx, srcRow.mode, srcRow.uid, srcRow.gid, srcRow.size, now, now, destIno)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
 	} else {
-		destInoCreated, err := this.createInode(srcRow.mode, srcRow.uid, srcRow.gid)
+		destInoCreated, err := agentfs.createInode(srcRow.mode, srcRow.uid, srcRow.gid)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
-		err = this.createDentry(destParent.parentIno, destParent.name, destInoCreated)
+		err = agentfs.createDentry(destParent.parentIno, destParent.name, destInoCreated)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
-		copyStmt, err := this.db.PrepareContext(ctx, `
+		copyStmt, err := agentfs.db.PrepareContext(ctx, `
 	         INSERT INTO fs_data (ino, chunk_index, data)
 	         SELECT ?, chunk_index, data
 	         FROM fs_data
@@ -1897,7 +1971,7 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 	         ORDER BY chunk_index ASC
        `)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1906,19 +1980,19 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 		defer func() { err = copyStmt.Close() }()
 		_, err = copyStmt.ExecContext(ctx, destInoCreated, srcIno)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
-		updateStmt, err := this.db.PrepareContext(ctx, `
+		updateStmt, err := agentfs.db.PrepareContext(ctx, `
          UPDATE fs_inode
          SET size = ?, mtime = ?, ctime = ?
          WHERE ino = ?
        `)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
@@ -1926,16 +2000,16 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 		}
 		_, err = updateStmt.ExecContext(ctx, srcRow.size, now, now, destInoCreated)
 		if err != nil {
-			_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+			_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 			if errRoll != nil {
 				return errRoll
 			}
 			return err
 		}
 	}
-	_, err = this.db.ExecContext(ctx, "COMMIT")
+	_, err = agentfs.db.ExecContext(ctx, "COMMIT")
 	if err != nil {
-		_, errRoll := this.db.ExecContext(ctx, "ROLLBACK")
+		_, errRoll := agentfs.db.ExecContext(ctx, "ROLLBACK")
 		if errRoll != nil {
 			return errRoll
 		}
@@ -1944,9 +2018,9 @@ func (this *AgentFS) CopyFile(src string, dest string) (err error) {
 	return
 }
 
-func (this *AgentFS) Access(path string) error {
-	normalizedPath := this.normalizePath(path)
-	_, err := this.resolvePath(normalizedPath)
+func (agentfs *AgentFS) Access(path string) error {
+	normalizedPath := agentfs.normalizePath(path)
+	_, err := agentfs.resolvePath(normalizedPath)
 	if err != nil {
 		scall := Access
 		message := "no such file or directory"
@@ -1960,9 +2034,9 @@ func (this *AgentFS) Access(path string) error {
 	return nil
 }
 
-func (this *AgentFS) Statfs() (FilesystemStats, error) {
+func (agentfs *AgentFS) Statfs() (FilesystemStats, error) {
 	ctx := context.Background()
-	inodeStmt, err := this.db.PrepareContext(ctx, "SELECT COUNT(*) as count FROM fs_inode")
+	inodeStmt, err := agentfs.db.PrepareContext(ctx, "SELECT COUNT(*) as count FROM fs_inode")
 	if err != nil {
 		return FilesystemStats{}, err
 	}
@@ -1976,7 +2050,7 @@ func (this *AgentFS) Statfs() (FilesystemStats, error) {
 		return FilesystemStats{}, err
 	}
 
-	bytesStmt, err := this.db.PrepareContext(ctx, "SELECT COALESCE(SUM(LENGTH(data)), 0) as total FROM fs_data")
+	bytesStmt, err := agentfs.db.PrepareContext(ctx, "SELECT COALESCE(SUM(LENGTH(data)), 0) as total FROM fs_data")
 	if err != nil {
 		return FilesystemStats{}, err
 	}
@@ -1996,17 +2070,123 @@ func (this *AgentFS) Statfs() (FilesystemStats, error) {
 	}, nil
 }
 
-func (this *AgentFS) Open(path string) (FileHandle, error) {
-	resolvedPath, err := this.resolvePathOrThrow(path, Open)
+func (agentfs *AgentFS) Open(path string) (FileHandle, error) {
+	resolvedPath, err := agentfs.resolvePathOrThrow(path, Open)
 	if err != nil {
 		return nil, err
 	}
 	ino := resolvedPath.ino
 	normalizedPath := resolvedPath.normalizedPath
-	err = assertReadableExistingInode(this.db, ino, Open, normalizedPath)
+	err = assertReadableExistingInode(agentfs.db, ino, Open, normalizedPath)
 	if err != nil {
 		return nil, err
 	}
 
-	return &AgentFSFile{db: this.db, ino: ino, chunkSize: this.chunkSize}, nil
+	return &AgentFSFile{db: agentfs.db, ino: ino, chunkSize: agentfs.chunkSize}, nil
+}
+
+// Deprecated
+func (agentfs *AgentFS) DeleteFile(path string) error {
+	return agentfs.Unlink(path)
+}
+
+func (agentfs *AgentFS) Symlink(target string, linkpath string) (err error) {
+	normalizedLinkedPath := agentfs.normalizePath(linkpath)
+	_, err = agentfs.resolvePath(normalizedLinkedPath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return
+	} else if err == nil {
+		scall := Open
+		message := "file already exists"
+		return &ErrnoException{
+			Code:    ErrExist,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &normalizedLinkedPath,
+		}
+	}
+	parent, err := agentfs.resolveParent(normalizedLinkedPath)
+	if err != nil {
+		scall := Open
+		message := "no such file or directory"
+		return &ErrnoException{
+			Code:    ErrNoEnt,
+			Syscall: &scall,
+			Path:    &normalizedLinkedPath,
+			Message: &message,
+		}
+	}
+	err = assertInodeIsDirectory(agentfs.db, parent.parentIno, Open, normalizedLinkedPath)
+	if err != nil {
+		return
+	}
+	mode := S_IFLNK | 0o777
+	simlinlkIno, err := agentfs.createInode(mode, 0, 0)
+	if err != nil {
+		return
+	}
+	err = agentfs.createDentry(parent.parentIno, parent.name, simlinlkIno)
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	stmt, err := agentfs.db.PrepareContext(ctx, "INSERT INTO fs_symlink (ino, target) VALUES (?, ?)")
+	if err != nil {
+		return
+	}
+	defer func() { err = stmt.Close() }()
+	_, err = stmt.ExecContext(ctx, simlinlkIno, target)
+	if err != nil {
+		return
+	}
+	updateStmt, err := agentfs.db.PrepareContext(ctx, "UPDATE fs_inode SET size = ? WHERE ino = ?")
+	if err != nil {
+		return
+	}
+	defer func() { err = updateStmt.Close() }()
+	_, err = updateStmt.ExecContext(ctx, len(target), simlinlkIno)
+	return
+}
+
+func (agentfs *AgentFS) Readlink(path string) (string, error) {
+	s, err := agentfs.resolvePathOrThrow(path, Open)
+	if err != nil {
+		return "", err
+	}
+	normalizedPath := s.normalizedPath
+	ino := s.ino
+	mode, err := agentfs.getInodeMode(ino)
+	if err != nil || (mode&S_IFMT) != S_IFLNK {
+		scall := Open
+		message := "invalid argument"
+		return "", &ErrnoException{
+			Code:    ErrInvalid,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &normalizedPath,
+		}
+	}
+	ctx := context.Background()
+	stmt, err := agentfs.db.PrepareContext(
+		ctx,
+		"SELECT target FROM fs_symlink WHERE ino = ?",
+	)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = stmt.Close() }()
+	row := stmt.QueryRowContext(ctx, ino)
+	var data struct{ target string }
+	err = row.Scan(&data)
+	if err != nil {
+		message := "no such file or directory"
+		scall := Open
+		return "", &ErrnoException{
+			Code:    ErrNoEnt,
+			Syscall: &scall,
+			Message: &message,
+			Path:    &normalizedPath,
+		}
+	}
+	return data.target, nil
 }

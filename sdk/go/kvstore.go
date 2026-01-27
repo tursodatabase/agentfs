@@ -24,10 +24,13 @@ func NewKvStore(db *sql.DB) *KvStore {
 	}
 }
 
-func NewKvStoreFromDatabase(db *sql.DB) *KvStore {
+func NewKvStoreFromDatabase(db *sql.DB) (*KvStore, error) {
 	kvStore := NewKvStore(db)
-	kvStore.Initialize()
-	return kvStore
+	err := kvStore.Initialize()
+	if err != nil {
+		return nil, err
+	}
+	return kvStore, nil
 }
 
 func (kv *KvStore) Initialize() (err error) {

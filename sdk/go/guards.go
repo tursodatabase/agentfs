@@ -85,8 +85,7 @@ func assertExistingNonDirNonSymlinkInode(
 			Message: &message,
 		}
 	}
-	assertNotSymlinkMode(mode, syscall, fullPathForError)
-	return nil
+	return assertNotSymlinkMode(mode, syscall, fullPathForError)
 }
 
 func assertNotSymlinkMode(mode int, syscall FsSyscall, path string) error {

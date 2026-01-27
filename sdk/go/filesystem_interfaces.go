@@ -226,11 +226,11 @@ type FileSystem interface {
 	/**
 	 * Get filesystem statistics.
 	 */
-	Statfs() (*FilesystemStats, error)
+	Statfs() (FilesystemStats, error)
 
 	/**
 	 * Open a file and return a file handle for I/O operations.
 	 * @throws {ErrnoException} ENOENT if file does not exist
 	 */
-	Open(string) (*FileHandle, error)
+	Open(string) (FileHandle, error)
 }

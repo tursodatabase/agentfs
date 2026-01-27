@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"time"
 
 	_ "turso.tech/database/tursogo"
@@ -49,10 +48,13 @@ func NewToolCalls(db *sql.DB) *ToolCalls {
 	}
 }
 
-func NewToolCallsFromDatabase(db *sql.DB) *ToolCalls {
+func NewToolCallsFromDatabase(db *sql.DB) (*ToolCalls, error) {
 	toolCalls := NewToolCalls(db)
-	toolCalls.Initialize()
-	return toolCalls
+	err := toolCalls.Initialize()
+	if err != nil {
+		return nil, err
+	}
+	return toolCalls, nil
 }
 
 func (tc *ToolCalls) Initialize() (err error) {
@@ -101,7 +103,7 @@ func (tc *ToolCalls) Start(name string, parameters any) (id int, err error) {
 		serParamsStr := string(serParams)
 		serializedParameters = &serParamsStr
 	}
-	startedAt := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	startedAt := int64(time.Now().UnixMilli() / 1000)
 	ctx := context.Background()
 	stmt, err := tc.db.PrepareContext(ctx, `
       INSERT INTO tool_calls (name, parameters, status, started_at)
@@ -130,7 +132,7 @@ func (tc *ToolCalls) Success(id int, result any) (err error) {
 		serResStr := string(serRes)
 		serializedRes = &serResStr
 	}
-	completedAt := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	completedAt := int64(time.Now().UnixMilli() / 1000)
 	ctx := context.Background()
 	stmt, err := tc.db.PrepareContext(ctx, `SELECT started_at FROM tool_calls WHERE id = ?`)
 	if err != nil {
@@ -158,7 +160,7 @@ func (tc *ToolCalls) Success(id int, result any) (err error) {
 }
 
 func (tc *ToolCalls) Error(id int, errorMsg string) (err error) {
-	completedAt := int64(math.Floor(float64(time.Now().UnixMilli() / 1000)))
+	completedAt := int64(time.Now().UnixMilli() / 1000)
 	ctx := context.Background()
 	stmt, err := tc.db.PrepareContext(ctx, `SELECT started_at FROM tool_calls WHERE id = ?`)
 	if err != nil {
