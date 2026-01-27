@@ -376,9 +376,15 @@ impl OverlayFS {
             };
 
             // Create directory in delta
-            let new_stats =
-                FileSystem::mkdir(&self.delta, current_parent_ino, component, dir_uid, dir_gid)
-                    .await?;
+            let new_stats = FileSystem::mkdir(
+                &self.delta,
+                current_parent_ino,
+                component,
+                0o755,
+                dir_uid,
+                dir_gid,
+            )
+            .await?;
             current_parent_ino = new_stats.ino;
         }
 
@@ -456,6 +462,7 @@ impl OverlayFS {
                 &self.delta,
                 parent_ino,
                 name,
+                base_stats.mode & 0o7777,
                 base_stats.uid,
                 base_stats.gid,
             )
@@ -812,7 +819,14 @@ impl FileSystem for OverlayFS {
         FileSystem::open(&self.delta, delta_ino).await
     }
 
-    async fn mkdir(&self, parent_ino: i64, name: &str, uid: u32, gid: u32) -> Result<Stats> {
+    async fn mkdir(
+        &self,
+        parent_ino: i64,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Stats> {
         trace!("OverlayFS::mkdir: parent_ino={}, name={}", parent_ino, name);
 
         let parent_info = self.get_inode_info(parent_ino).ok_or(FsError::NotFound)?;
@@ -843,7 +857,8 @@ impl FileSystem for OverlayFS {
             ino
         };
 
-        let mut stats = FileSystem::mkdir(&self.delta, delta_parent_ino, name, uid, gid).await?;
+        let mut stats =
+            FileSystem::mkdir(&self.delta, delta_parent_ino, name, mode, uid, gid).await?;
         let overlay_ino = self.get_or_create_overlay_ino(Layer::Delta, stats.ino, &path);
         stats.ino = overlay_ino;
 
@@ -1615,7 +1630,7 @@ mod tests {
         let c_stats = overlay.lookup(b_stats.ino, "c").await?.unwrap();
 
         // Create a new subdirectory in the deeply nested directory
-        let new_dir_stats = overlay.mkdir(c_stats.ino, "newdir", 0, 0).await?;
+        let new_dir_stats = overlay.mkdir(c_stats.ino, "newdir", 0o755, 0, 0).await?;
         assert!(new_dir_stats.is_directory());
 
         // Verify we can create a file inside the new directory
@@ -1659,7 +1674,9 @@ mod tests {
 
         // Step 2: Create "debug" inside "target"
         // This should create /target in delta, then /target/debug in delta
-        let debug_stats = overlay.mkdir(target_stats.ino, "debug", 0, 0).await?;
+        let debug_stats = overlay
+            .mkdir(target_stats.ino, "debug", 0o755, 0, 0)
+            .await?;
         assert!(debug_stats.is_directory());
 
         // Step 3: Lookup "debug" inside "target" - this is where the bug manifests!

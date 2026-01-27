@@ -147,13 +147,14 @@ impl agentfs_sdk::FileSystem for MutexFsAdapter {
         &self,
         parent_ino: i64,
         name: &str,
+        mode: u32,
         uid: u32,
         gid: u32,
     ) -> std::result::Result<agentfs_sdk::Stats, agentfs_sdk::error::Error> {
         self.inner
             .lock()
             .await
-            .mkdir(parent_ino, name, uid, gid)
+            .mkdir(parent_ino, name, mode, uid, gid)
             .await
     }
 

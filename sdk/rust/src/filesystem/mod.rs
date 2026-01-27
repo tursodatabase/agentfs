@@ -216,7 +216,14 @@ pub trait FileSystem: Send + Sync {
     /// Create a directory with the specified ownership.
     ///
     /// Returns the stats of the newly created directory.
-    async fn mkdir(&self, parent_ino: i64, name: &str, uid: u32, gid: u32) -> Result<Stats>;
+    async fn mkdir(
+        &self,
+        parent_ino: i64,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Stats>;
 
     /// Create a new empty file with the specified mode and ownership.
     ///

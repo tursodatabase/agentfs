@@ -535,11 +535,16 @@ impl Filesystem for AgentFSFuse {
         req: &Request,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        tracing::debug!("FUSE::mkdir: parent={}, name={:?}", parent, name);
+        tracing::debug!(
+            "FUSE::mkdir: parent={}, name={:?}, mode={:o}",
+            parent,
+            name,
+            mode
+        );
 
         let Some(name_str) = name.to_str() else {
             reply.error(libc::EINVAL);
@@ -552,7 +557,7 @@ impl Filesystem for AgentFSFuse {
         let name_owned = name_str.to_string();
         let result = self
             .runtime
-            .block_on(async move { fs.mkdir(parent as i64, &name_owned, uid, gid).await });
+            .block_on(async move { fs.mkdir(parent as i64, &name_owned, mode, uid, gid).await });
 
         match result {
             Ok(stats) => {

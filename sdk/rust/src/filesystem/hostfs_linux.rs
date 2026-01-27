@@ -631,11 +631,18 @@ impl FileSystem for HostFS {
         Ok(Arc::new(HostFSFile { fd: real_fd }))
     }
 
-    async fn mkdir(&self, parent_ino: i64, name: &str, _uid: u32, _gid: u32) -> Result<Stats> {
+    async fn mkdir(
+        &self,
+        parent_ino: i64,
+        name: &str,
+        mode: u32,
+        _uid: u32,
+        _gid: u32,
+    ) -> Result<Stats> {
         let parent_fd = self.get_inode_fd(parent_ino)?;
         let c_name = CString::new(name).map_err(|_| FsError::InvalidPath)?;
 
-        let result = unsafe { libc::mkdirat(parent_fd, c_name.as_ptr(), 0o755) };
+        let result = unsafe { libc::mkdirat(parent_fd, c_name.as_ptr(), mode as libc::mode_t) };
         if result < 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EEXIST) {
@@ -945,7 +952,7 @@ mod tests {
         let fs = HostFS::new(dir.path())?;
 
         // Create directory
-        let subdir_stats = fs.mkdir(ROOT_INO, "subdir", 0, 0).await?;
+        let subdir_stats = fs.mkdir(ROOT_INO, "subdir", 0o755, 0, 0).await?;
         assert!(subdir_stats.is_directory());
 
         // Create files in subdirectory

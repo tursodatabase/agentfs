@@ -325,20 +325,9 @@ impl NFSFileSystem for AgentNFS {
         let fs = self.fs.lock().await;
 
         let stats = fs
-            .mkdir(dir_fs_ino, name, auth.uid, auth.gid)
+            .mkdir(dir_fs_ino, name, mode, auth.uid, auth.gid)
             .await
             .map_err(error_to_nfsstat)?;
-
-        // Set the mode after creation (SDK mkdir doesn't take mode)
-        fs.chmod(stats.ino, S_IFDIR | mode)
-            .await
-            .map_err(error_to_nfsstat)?;
-
-        let stats = fs
-            .getattr(stats.ino)
-            .await
-            .map_err(error_to_nfsstat)?
-            .ok_or(nfsstat3::NFS3ERR_NOENT)?;
 
         let ino = stats.ino as fileid3;
         let fattr = self.stats_to_fattr(&stats);

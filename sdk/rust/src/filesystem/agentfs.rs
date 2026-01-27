@@ -1021,7 +1021,7 @@ impl AgentFS {
             return Err(FsError::AlreadyExists.into());
         }
 
-        // Create inode
+        // Create inode with default directory mode (path-based API doesn't accept mode)
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
         let mut stmt = conn
             .prepare_cached(
@@ -2727,7 +2727,14 @@ impl FileSystem for AgentFS {
         }))
     }
 
-    async fn mkdir(&self, parent_ino: i64, name: &str, uid: u32, gid: u32) -> Result<Stats> {
+    async fn mkdir(
+        &self,
+        parent_ino: i64,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Stats> {
         if name.len() > MAX_NAME_LEN {
             return Err(FsError::NameTooLong.into());
         }
@@ -2746,8 +2753,9 @@ impl FileSystem for AgentFS {
                 VALUES (?, ?, ?, 0, ?, ?, ?) RETURNING ino",
             )
             .await?;
+        let dir_mode = super::S_IFDIR | (mode & 0o7777);
         let row = stmt
-            .query_row((DEFAULT_DIR_MODE as i64, uid, gid, now, now, now))
+            .query_row((dir_mode as i64, uid, gid, now, now, now))
             .await?;
 
         let ino = row
@@ -2768,12 +2776,18 @@ impl FileSystem for AgentFS {
             .await?;
         stmt.execute((ino,)).await?;
 
+        // Update parent directory ctime and mtime
+        let mut stmt = conn
+            .prepare_cached("UPDATE fs_inode SET ctime = ?, mtime = ? WHERE ino = ?")
+            .await?;
+        stmt.execute((now, now, parent_ino)).await?;
+
         // Populate dentry cache
         self.dentry_cache.insert(parent_ino, name, ino);
 
         Ok(Stats {
             ino,
-            mode: DEFAULT_DIR_MODE,
+            mode: dir_mode,
             nlink: 1,
             uid,
             gid,
