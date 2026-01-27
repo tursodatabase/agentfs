@@ -580,6 +580,46 @@ impl FileSystem for HostFS {
         Ok(())
     }
 
+    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
+        let path = self.get_inode_path(ino)?;
+
+        let stat = Self::lstat_path(&path)?;
+
+        let atime_ts = libc::timespec {
+            tv_sec: atime.unwrap_or(stat.st_atime) as _,
+            tv_nsec: if atime.is_some() {
+                0
+            } else {
+                libc::UTIME_OMIT as _
+            },
+        };
+        let mtime_ts = libc::timespec {
+            tv_sec: mtime.unwrap_or(stat.st_mtime) as _,
+            tv_nsec: if mtime.is_some() {
+                0
+            } else {
+                libc::UTIME_OMIT as _
+            },
+        };
+
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::Internal("invalid path".to_string()))?;
+
+        let times = [atime_ts, mtime_ts];
+        let result = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c_path.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
     async fn open(&self, ino: i64) -> Result<BoxedFile> {
         let path = self.get_inode_path(ino)?;
         let real_fd = Self::open_path(&path, libc::O_RDWR)?;

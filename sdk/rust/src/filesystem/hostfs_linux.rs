@@ -622,6 +622,44 @@ impl FileSystem for HostFS {
         Ok(())
     }
 
+    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
+        let fd = self.get_inode_fd(ino)?;
+
+        // Get current stat for unchanged fields
+        let stat = Self::fstatat_empty_path(fd)?;
+
+        let atime_ts = libc::timespec {
+            tv_sec: atime.unwrap_or(stat.st_atime) as _,
+            tv_nsec: if atime.is_some() {
+                0
+            } else {
+                libc::UTIME_OMIT as _
+            },
+        };
+        let mtime_ts = libc::timespec {
+            tv_sec: mtime.unwrap_or(stat.st_mtime) as _,
+            tv_nsec: if mtime.is_some() {
+                0
+            } else {
+                libc::UTIME_OMIT as _
+            },
+        };
+
+        let times = [atime_ts, mtime_ts];
+        let result = unsafe {
+            libc::utimensat(
+                fd,
+                c"".as_ptr(),
+                times.as_ptr(),
+                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
     async fn open(&self, ino: i64) -> Result<BoxedFile> {
         let fd = self.get_inode_fd(ino)?;
 

@@ -210,6 +210,12 @@ pub trait FileSystem: Send + Sync {
     /// Change file ownership by inode.
     async fn chown(&self, ino: i64, uid: Option<u32>, gid: Option<u32>) -> Result<()>;
 
+    /// Set file timestamps by inode.
+    ///
+    /// Updates atime and/or mtime. `None` means "don't change".
+    /// ctime is always updated to the current time when any timestamp changes (POSIX requirement).
+    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()>;
+
     /// Open a file by inode and return a file handle for I/O operations.
     async fn open(&self, ino: i64) -> Result<BoxedFile>;
 

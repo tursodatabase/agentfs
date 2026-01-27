@@ -136,6 +136,15 @@ impl agentfs_sdk::FileSystem for MutexFsAdapter {
         self.inner.lock().await.chown(ino, uid, gid).await
     }
 
+    async fn set_times(
+        &self,
+        ino: i64,
+        atime: Option<i64>,
+        mtime: Option<i64>,
+    ) -> std::result::Result<(), agentfs_sdk::error::Error> {
+        self.inner.lock().await.set_times(ino, atime, mtime).await
+    }
+
     async fn open(
         &self,
         ino: i64,

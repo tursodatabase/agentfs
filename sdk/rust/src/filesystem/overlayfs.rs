@@ -806,6 +806,24 @@ impl FileSystem for OverlayFS {
         self.delta.chown(delta_ino, uid, gid).await
     }
 
+    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
+        trace!(
+            "OverlayFS::set_times: ino={}, atime={:?}, mtime={:?}",
+            ino,
+            atime,
+            mtime
+        );
+
+        let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
+
+        let delta_ino = match info.layer {
+            Layer::Delta => info.underlying_ino,
+            Layer::Base => self.copy_up_and_update_mapping(ino, &info).await?,
+        };
+
+        self.delta.set_times(delta_ino, atime, mtime).await
+    }
+
     async fn open(&self, ino: i64) -> Result<BoxedFile> {
         trace!("OverlayFS::open: ino={}", ino);
 

@@ -2759,6 +2759,49 @@ impl FileSystem for AgentFS {
         Ok(())
     }
 
+    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
+        if atime.is_none() && mtime.is_none() {
+            return Ok(());
+        }
+
+        let conn = self.pool.get_connection().await?;
+
+        // Verify inode exists
+        let mut stmt = conn
+            .prepare_cached("SELECT ino FROM fs_inode WHERE ino = ?")
+            .await?;
+        let mut rows = stmt.query((ino,)).await?;
+
+        if rows.next().await?.is_none() {
+            return Err(FsError::NotFound.into());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        let mut updates = Vec::new();
+        let mut values: Vec<Value> = Vec::new();
+
+        if let Some(atime) = atime {
+            updates.push("atime = ?");
+            values.push(Value::Integer(atime));
+        }
+        if let Some(mtime) = mtime {
+            updates.push("mtime = ?");
+            values.push(Value::Integer(mtime));
+        }
+        // Always update ctime (POSIX requirement)
+        updates.push("ctime = ?");
+        values.push(Value::Integer(now));
+
+        values.push(Value::Integer(ino));
+        let sql = format!("UPDATE fs_inode SET {} WHERE ino = ?", updates.join(", "));
+        conn.execute(&sql, values).await?;
+
+        Ok(())
+    }
+
     async fn open(&self, ino: i64) -> Result<BoxedFile> {
         let conn = self.pool.get_connection().await?;
 

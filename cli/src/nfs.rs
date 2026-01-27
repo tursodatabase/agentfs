@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use crate::nfsserve::nfs::{
-    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, set_gid3, set_mode3,
-    set_size3, set_uid3, specdata3,
+    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_gid3,
+    set_mode3, set_mtime, set_size3, set_uid3, specdata3,
 };
 use crate::nfsserve::vfs::{auth_unix, DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use agentfs_sdk::error::Error as SdkError;
@@ -190,6 +190,28 @@ impl NFSFileSystem for AgentNFS {
         };
         if new_uid.is_some() || new_gid.is_some() {
             fs.chown(fs_ino, new_uid, new_gid)
+                .await
+                .map_err(error_to_nfsstat)?;
+        }
+
+        // Handle atime/mtime changes
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let new_atime = match setattr.atime {
+            set_atime::SET_TO_CLIENT_TIME(t) => Some(t.seconds as i64),
+            set_atime::SET_TO_SERVER_TIME => Some(now),
+            set_atime::DONT_CHANGE => None,
+        };
+        let new_mtime = match setattr.mtime {
+            set_mtime::SET_TO_CLIENT_TIME(t) => Some(t.seconds as i64),
+            set_mtime::SET_TO_SERVER_TIME => Some(now),
+            set_mtime::DONT_CHANGE => None,
+        };
+        if new_atime.is_some() || new_mtime.is_some() {
+            fs.set_times(fs_ino, new_atime, new_mtime)
                 .await
                 .map_err(error_to_nfsstat)?;
         }
