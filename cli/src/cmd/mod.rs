@@ -3,6 +3,7 @@ pub mod fs;
 pub mod init;
 pub mod mcp_server;
 pub mod ps;
+pub mod snapshot;
 pub mod sync;
 pub mod timeline;
 

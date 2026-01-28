@@ -313,6 +313,23 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Command::Snapshot {
+            id_or_path,
+            dest_path,
+            key,
+            cipher,
+        } => {
+            let encryption = parse_encryption(key, cipher);
+            let rt = get_runtime();
+            if let Err(e) = rt.block_on(cmd::snapshot::handle_snapshot_command(
+                id_or_path,
+                &dest_path,
+                encryption.as_ref().map(|(k, c)| (k.as_str(), c.as_str())),
+            )) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
         Command::Prune { command } => match command {
             PruneCommand::Mounts { force } => {
                 if let Err(e) = cmd::mount::prune_mounts(force) {
