@@ -3120,11 +3120,18 @@ impl FileSystem for AgentFS {
         // Invalidate cache
         self.dentry_cache.remove(parent_ino, name);
 
-        // Decrement link count
+        // Update parent directory mtime and ctime
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
         let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?")
+            .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?")
             .await?;
-        stmt.execute((ino,)).await?;
+        stmt.execute((now, now, parent_ino)).await?;
+
+        // Decrement link count and update ctime
+        let mut stmt = conn
+            .prepare_cached("UPDATE fs_inode SET nlink = nlink - 1, ctime = ? WHERE ino = ?")
+            .await?;
+        stmt.execute((now, ino)).await?;
 
         // Check if this was the last link to the inode
         let link_count = self.get_link_count(&conn, ino).await?;
