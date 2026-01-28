@@ -1,4 +1,4 @@
-use super::{BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats};
+use super::{BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, TimeChange};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -158,6 +158,9 @@ fn stat_to_stats(stat: &libc::stat) -> Stats {
         atime: stat.st_atime,
         mtime: stat.st_mtime,
         ctime: stat.st_ctime,
+        atime_nsec: stat.st_atime_nsec as u32,
+        mtime_nsec: stat.st_mtime_nsec as u32,
+        ctime_nsec: stat.st_ctime_nsec as u32,
         rdev: stat.st_rdev,
     }
 }
@@ -622,38 +625,35 @@ impl FileSystem for HostFS {
         Ok(())
     }
 
-    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
+    async fn utimens(&self, ino: i64, atime: TimeChange, mtime: TimeChange) -> Result<()> {
         let fd = self.get_inode_fd(ino)?;
 
-        // Get current stat for unchanged fields
-        let stat = Self::fstatat_empty_path(fd)?;
-
-        let atime_ts = libc::timespec {
-            tv_sec: atime.unwrap_or(stat.st_atime) as _,
-            tv_nsec: if atime.is_some() {
-                0
-            } else {
-                libc::UTIME_OMIT as _
-            },
-        };
-        let mtime_ts = libc::timespec {
-            tv_sec: mtime.unwrap_or(stat.st_mtime) as _,
-            tv_nsec: if mtime.is_some() {
-                0
-            } else {
-                libc::UTIME_OMIT as _
-            },
+        let to_timespec = |tc: TimeChange, current: libc::timespec| -> libc::timespec {
+            match tc {
+                TimeChange::Set(secs, nsec) => libc::timespec {
+                    tv_sec: secs as libc::time_t,
+                    tv_nsec: nsec as libc::c_long,
+                },
+                TimeChange::Now => libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: libc::UTIME_NOW,
+                },
+                TimeChange::Omit => current,
+            }
         };
 
-        let times = [atime_ts, mtime_ts];
-        let result = unsafe {
-            libc::utimensat(
-                fd,
-                c"".as_ptr(),
-                times.as_ptr(),
-                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
-            )
+        let omit_spec = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
         };
+
+        let times = [to_timespec(atime, omit_spec), to_timespec(mtime, omit_spec)];
+
+        let proc_path = CString::new(format!("/proc/self/fd/{}", fd))
+            .map_err(|_| Error::Internal("invalid path".to_string()))?;
+
+        let result =
+            unsafe { libc::utimensat(libc::AT_FDCWD, proc_path.as_ptr(), times.as_ptr(), 0) };
         if result < 0 {
             return Err(std::io::Error::last_os_error().into());
         }

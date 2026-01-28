@@ -4,7 +4,7 @@
 //! O_PATH file descriptors. macOS doesn't support O_PATH or AT_EMPTY_PATH,
 //! so we use a path-based approach similar to libfuse's passthrough.c example.
 
-use super::{BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats};
+use super::{BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, TimeChange};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -161,6 +161,9 @@ fn stat_to_stats(stat: &libc::stat) -> Stats {
         atime: stat.st_atime,
         mtime: stat.st_mtime,
         ctime: stat.st_ctime,
+        atime_nsec: stat.st_atime_nsec as u32,
+        mtime_nsec: stat.st_mtime_nsec as u32,
+        ctime_nsec: stat.st_ctime_nsec as u32,
         rdev: stat.st_rdev as u64,
     }
 }
@@ -580,32 +583,31 @@ impl FileSystem for HostFS {
         Ok(())
     }
 
-    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
+    async fn utimens(&self, ino: i64, atime: TimeChange, mtime: TimeChange) -> Result<()> {
         let path = self.get_inode_path(ino)?;
 
-        let stat = Self::lstat_path(&path)?;
+        let to_timespec = |tc: TimeChange| -> libc::timespec {
+            match tc {
+                TimeChange::Set(secs, nsec) => libc::timespec {
+                    tv_sec: secs as libc::time_t,
+                    tv_nsec: nsec as libc::c_long,
+                },
+                TimeChange::Now => libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: libc::UTIME_NOW,
+                },
+                TimeChange::Omit => libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: libc::UTIME_OMIT,
+                },
+            }
+        };
 
-        let atime_ts = libc::timespec {
-            tv_sec: atime.unwrap_or(stat.st_atime) as _,
-            tv_nsec: if atime.is_some() {
-                0
-            } else {
-                libc::UTIME_OMIT as _
-            },
-        };
-        let mtime_ts = libc::timespec {
-            tv_sec: mtime.unwrap_or(stat.st_mtime) as _,
-            tv_nsec: if mtime.is_some() {
-                0
-            } else {
-                libc::UTIME_OMIT as _
-            },
-        };
+        let times = [to_timespec(atime), to_timespec(mtime)];
 
         let c_path = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| Error::Internal("invalid path".to_string()))?;
 
-        let times = [atime_ts, mtime_ts];
         let result = unsafe {
             libc::utimensat(
                 libc::AT_FDCWD,

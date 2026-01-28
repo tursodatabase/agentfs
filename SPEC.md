@@ -10,7 +10,7 @@ The Agent Filesystem Specification defines a SQLite schema for representing agen
 2. **Virtual Filesystem**: Stores agent artifacts (files, documents, outputs) using a Unix-like inode design with support for hard links, proper metadata, and efficient file operations
 3. **Key-Value Store**: Provides simple get/set operations for agent context, preferences, and structured state that doesn't fit into the filesystem model
 
-All timestamps in this specification use Unix epoch format (seconds since 1970-01-01 00:00:00 UTC).
+All timestamps in this specification use Unix epoch format (seconds since 1970-01-01 00:00:00 UTC) with optional nanosecond precision via separate `_nsec` columns.
 
 ## Tool Calls
 
@@ -171,7 +171,10 @@ CREATE TABLE fs_inode (
   atime INTEGER NOT NULL,
   mtime INTEGER NOT NULL,
   ctime INTEGER NOT NULL,
-  rdev INTEGER NOT NULL DEFAULT 0
+  rdev INTEGER NOT NULL DEFAULT 0,
+  atime_nsec INTEGER NOT NULL DEFAULT 0,
+  mtime_nsec INTEGER NOT NULL DEFAULT 0,
+  ctime_nsec INTEGER NOT NULL DEFAULT 0
 )
 ```
 
@@ -187,6 +190,9 @@ CREATE TABLE fs_inode (
 - `mtime` - Last modification time (Unix timestamp, seconds)
 - `ctime` - Creation/change time (Unix timestamp, seconds)
 - `rdev` - Device number for character and block devices (major/minor encoded)
+- `atime_nsec` - Nanosecond component of last access time (0–999999999)
+- `mtime_nsec` - Nanosecond component of last modification time (0–999999999)
+- `ctime_nsec` - Nanosecond component of creation/change time (0–999999999)
 
 **Mode Encoding:**
 
@@ -423,7 +429,8 @@ To read `length` bytes starting at byte offset `offset`:
 1. Resolve path to inode
 2. Query inode (includes link count):
    ```sql
-   SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev
+   SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev,
+          atime_nsec, mtime_nsec, ctime_nsec
    FROM fs_inode WHERE ino = ?
    ```
 
@@ -693,6 +700,9 @@ Such extensions SHOULD use separate tables to maintain referential integrity.
 
 ### Version 0.4
 
+- Added nanosecond timestamp precision for `atime`, `mtime`, and `ctime`
+- Added `atime_nsec`, `mtime_nsec`, `ctime_nsec` columns to `fs_inode` table (DEFAULT 0 for backward compatibility)
+- Nanosecond precision enables correct NFS `wcc_data` cache invalidation when multiple operations occur within the same second
 - Added POSIX special file support (FIFOs, character devices, block devices, sockets)
 - Added `rdev` column to `fs_inode` table for device major/minor numbers
 - Added `S_IFIFO`, `S_IFCHR`, `S_IFBLK`, `S_IFSOCK` file type constants to Mode Encoding

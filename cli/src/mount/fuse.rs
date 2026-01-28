@@ -136,13 +136,13 @@ impl agentfs_sdk::FileSystem for MutexFsAdapter {
         self.inner.lock().await.chown(ino, uid, gid).await
     }
 
-    async fn set_times(
+    async fn utimens(
         &self,
         ino: i64,
-        atime: Option<i64>,
-        mtime: Option<i64>,
+        atime: agentfs_sdk::TimeChange,
+        mtime: agentfs_sdk::TimeChange,
     ) -> std::result::Result<(), agentfs_sdk::error::Error> {
-        self.inner.lock().await.set_times(ino, atime, mtime).await
+        self.inner.lock().await.utimens(ino, atime, mtime).await
     }
 
     async fn open(

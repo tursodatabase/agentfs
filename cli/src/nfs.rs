@@ -14,7 +14,8 @@ use crate::nfsserve::vfs::{auth_unix, DirEntry, NFSFileSystem, ReadDirResult, VF
 use agentfs_sdk::error::Error as SdkError;
 use agentfs_sdk::filesystem::FsError;
 use agentfs_sdk::{
-    FileSystem, Stats, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
+    FileSystem, Stats, TimeChange, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG,
+    S_IFSOCK,
 };
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -92,15 +93,15 @@ impl AgentNFS {
             fileid: stats.ino as fileid3,
             atime: nfstime3 {
                 seconds: stats.atime as u32,
-                nseconds: 0,
+                nseconds: stats.atime_nsec,
             },
             mtime: nfstime3 {
                 seconds: stats.mtime as u32,
-                nseconds: 0,
+                nseconds: stats.mtime_nsec,
             },
             ctime: nfstime3 {
                 seconds: stats.ctime as u32,
-                nseconds: 0,
+                nseconds: stats.ctime_nsec,
             },
         }
     }
@@ -194,32 +195,27 @@ impl NFSFileSystem for AgentNFS {
                 .map_err(error_to_nfsstat)?;
         }
 
-        // Handle atime/mtime changes
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let new_atime = match setattr.atime {
-            set_atime::SET_TO_CLIENT_TIME(t) => Some(t.seconds as i64),
-            set_atime::SET_TO_SERVER_TIME => Some(now),
-            set_atime::DONT_CHANGE => None,
-        };
-        let new_mtime = match setattr.mtime {
-            set_mtime::SET_TO_CLIENT_TIME(t) => Some(t.seconds as i64),
-            set_mtime::SET_TO_SERVER_TIME => Some(now),
-            set_mtime::DONT_CHANGE => None,
-        };
-        if new_atime.is_some() || new_mtime.is_some() {
-            fs.set_times(fs_ino, new_atime, new_mtime)
-                .await
-                .map_err(error_to_nfsstat)?;
-        }
-
         // Handle size change (truncate)
         if let set_size3::size(size) = setattr.size {
             let file = fs.open(fs_ino).await.map_err(error_to_nfsstat)?;
             file.truncate(size).await.map_err(error_to_nfsstat)?;
+        }
+
+        // Handle atime/mtime changes (utimensat)
+        let new_atime = match setattr.atime {
+            set_atime::SET_TO_CLIENT_TIME(t) => TimeChange::Set(t.seconds as i64, t.nseconds),
+            set_atime::SET_TO_SERVER_TIME => TimeChange::Now,
+            set_atime::DONT_CHANGE => TimeChange::Omit,
+        };
+        let new_mtime = match setattr.mtime {
+            set_mtime::SET_TO_CLIENT_TIME(t) => TimeChange::Set(t.seconds as i64, t.nseconds),
+            set_mtime::SET_TO_SERVER_TIME => TimeChange::Now,
+            set_mtime::DONT_CHANGE => TimeChange::Omit,
+        };
+        if !matches!(new_atime, TimeChange::Omit) || !matches!(new_mtime, TimeChange::Omit) {
+            fs.utimens(fs_ino, new_atime, new_mtime)
+                .await
+                .map_err(error_to_nfsstat)?;
         }
 
         // Get updated stats

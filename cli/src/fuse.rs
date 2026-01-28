@@ -9,7 +9,7 @@ use crate::fuser::{
 };
 use agentfs_sdk::error::Error as SdkError;
 use agentfs_sdk::filesystem::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFSOCK};
-use agentfs_sdk::{BoxedFile, FileSystem, Stats};
+use agentfs_sdk::{BoxedFile, FileSystem, Stats, TimeChange};
 use parking_lot::Mutex;
 use std::{
     collections::HashMap,
@@ -289,33 +289,28 @@ impl Filesystem for AgentFSFuse {
             }
         }
 
-        // Handle atime/mtime (utimensat)
+        // Handle atime/mtime changes (utimensat)
         if atime.is_some() || mtime.is_some() {
-            let atime_secs = atime.map(|t| match t {
-                crate::fuser::TimeOrNow::SpecificTime(st) => st
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
-                crate::fuser::TimeOrNow::Now => SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
-            });
-            let mtime_secs = mtime.map(|t| match t {
-                crate::fuser::TimeOrNow::SpecificTime(st) => st
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
-                crate::fuser::TimeOrNow::Now => SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
-            });
+            let new_atime = match atime {
+                Some(crate::fuser::TimeOrNow::SpecificTime(t)) => {
+                    let dur = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+                    TimeChange::Set(dur.as_secs() as i64, dur.subsec_nanos())
+                }
+                Some(crate::fuser::TimeOrNow::Now) => TimeChange::Now,
+                None => TimeChange::Omit,
+            };
+            let new_mtime = match mtime {
+                Some(crate::fuser::TimeOrNow::SpecificTime(t)) => {
+                    let dur = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+                    TimeChange::Set(dur.as_secs() as i64, dur.subsec_nanos())
+                }
+                Some(crate::fuser::TimeOrNow::Now) => TimeChange::Now,
+                None => TimeChange::Omit,
+            };
             let fs = self.fs.clone();
             let result = self
                 .runtime
-                .block_on(async move { fs.set_times(ino as i64, atime_secs, mtime_secs).await });
-
+                .block_on(async move { fs.utimens(ino as i64, new_atime, new_mtime).await });
             if let Err(e) = result {
                 reply.error(error_to_errno(&e));
                 return;
@@ -1131,9 +1126,9 @@ fn fillattr(stats: &Stats) -> FileAttr {
         ino: stats.ino as u64,
         size,
         blocks: size.div_ceil(512),
-        atime: UNIX_EPOCH + Duration::from_secs(stats.atime as u64),
-        mtime: UNIX_EPOCH + Duration::from_secs(stats.mtime as u64),
-        ctime: UNIX_EPOCH + Duration::from_secs(stats.ctime as u64),
+        atime: UNIX_EPOCH + Duration::new(stats.atime as u64, stats.atime_nsec),
+        mtime: UNIX_EPOCH + Duration::new(stats.mtime as u64, stats.mtime_nsec),
+        ctime: UNIX_EPOCH + Duration::new(stats.ctime as u64, stats.ctime_nsec),
         crtime: UNIX_EPOCH,
         kind,
         perm: (stats.mode & 0o7777) as u16,

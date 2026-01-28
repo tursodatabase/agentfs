@@ -11,7 +11,9 @@ use std::{
 use tracing::trace;
 use turso::{Connection, Value};
 
-use super::{agentfs::AgentFS, BoxedFile, DirEntry, FileSystem, FilesystemStats, FsError, Stats};
+use super::{
+    agentfs::AgentFS, BoxedFile, DirEntry, FileSystem, FilesystemStats, FsError, Stats, TimeChange,
+};
 
 /// Root inode number (matches FUSE convention)
 const ROOT_INO: i64 = 1;
@@ -806,13 +808,8 @@ impl FileSystem for OverlayFS {
         self.delta.chown(delta_ino, uid, gid).await
     }
 
-    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
-        trace!(
-            "OverlayFS::set_times: ino={}, atime={:?}, mtime={:?}",
-            ino,
-            atime,
-            mtime
-        );
+    async fn utimens(&self, ino: i64, atime: TimeChange, mtime: TimeChange) -> Result<()> {
+        trace!("OverlayFS::utimens: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
 
@@ -821,7 +818,7 @@ impl FileSystem for OverlayFS {
             Layer::Base => self.copy_up_and_update_mapping(ino, &info).await?,
         };
 
-        self.delta.set_times(delta_ino, atime, mtime).await
+        self.delta.utimens(delta_ino, atime, mtime).await
     }
 
     async fn open(&self, ino: i64) -> Result<BoxedFile> {

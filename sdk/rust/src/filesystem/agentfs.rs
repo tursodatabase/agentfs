@@ -9,8 +9,8 @@ use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Builder, Connection, Value};
 
 use super::{
-    BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, DEFAULT_DIR_MODE,
-    DEFAULT_FILE_MODE, MAX_NAME_LEN, S_IFLNK, S_IFMT, S_IFREG,
+    BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, TimeChange,
+    DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, MAX_NAME_LEN, S_IFLNK, S_IFMT, S_IFREG,
 };
 use crate::connection_pool::ConnectionPool;
 
@@ -216,11 +216,14 @@ impl File for AgentFSFile {
 
         // Update file size and mtime
         let new_size = std::cmp::max(current_size, offset + data.len() as u64);
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
+            .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ?, mtime_nsec = ? WHERE ino = ?")
             .await?;
-        stmt.execute((new_size as i64, now, self.ino)).await?;
+        stmt.execute((new_size as i64, now_secs, now_nsec, self.ino))
+            .await?;
         txn.commit().await?;
 
         Ok(())
@@ -290,11 +293,13 @@ impl File for AgentFSFile {
             // The sparse regions will be handled by pread returning zeros
 
             // Update the inode size, mtime, and ctime
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+            let now_secs = dur.as_secs() as i64;
+            let now_nsec = dur.subsec_nanos() as i64;
             let mut stmt = conn
-                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ?, ctime = ? WHERE ino = ?")
+                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ?, ctime = ?, mtime_nsec = ?, ctime_nsec = ? WHERE ino = ?")
                 .await?;
-            stmt.execute((new_size as i64, now, now, self.ino)).await?;
+            stmt.execute((new_size as i64, now_secs, now_secs, now_nsec, now_nsec, self.ino)).await?;
 
             Ok(())
         }
@@ -326,7 +331,7 @@ impl File for AgentFSFile {
     async fn fstat(&self) -> Result<Stats> {
         let conn = self.pool.get_connection().await?;
         let mut stmt = conn
-            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?")
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((self.ino,)).await?;
 
@@ -496,6 +501,26 @@ impl AgentFS {
         )
         .await?;
 
+        // Add nanosecond timestamp columns (backward compatible migration)
+        conn.execute(
+            "ALTER TABLE fs_inode ADD COLUMN atime_nsec INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await
+        .ok();
+        conn.execute(
+            "ALTER TABLE fs_inode ADD COLUMN mtime_nsec INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await
+        .ok();
+        conn.execute(
+            "ALTER TABLE fs_inode ADD COLUMN ctime_nsec INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await
+        .ok();
+
         // Create directory entry table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS fs_dentry (
@@ -564,11 +589,13 @@ impl AgentFS {
         let (uid, gid) = (0u32, 0u32);
 
         if rows.next().await?.is_none() {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+            let now_secs = dur.as_secs() as i64;
+            let now_nsec = dur.subsec_nanos() as i64;
             conn.execute(
-                "INSERT INTO fs_inode (ino, mode, nlink, uid, gid, size, atime, mtime, ctime)
-                VALUES (?, ?, 2, ?, ?, 0, ?, ?, ?)",
-                (ROOT_INO, DEFAULT_DIR_MODE as i64, uid, gid, now, now, now),
+                "INSERT INTO fs_inode (ino, mode, nlink, uid, gid, size, atime, mtime, ctime, atime_nsec, mtime_nsec, ctime_nsec)
+                VALUES (?, ?, 2, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                (ROOT_INO, DEFAULT_DIR_MODE as i64, uid, gid, now_secs, now_secs, now_secs, now_nsec, now_nsec, now_nsec),
             )
             .await?;
         } else {
@@ -710,7 +737,7 @@ impl AgentFS {
     /// Get file attributes by inode using an existing connection
     async fn getattr_with_conn(&self, conn: &Connection, ino: i64) -> Result<Option<Stats>> {
         let mut stmt = conn
-            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?")
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
 
@@ -773,6 +800,21 @@ impl AgentFS {
                 .ok()
                 .and_then(|v| v.as_integer().copied())
                 .unwrap_or(0),
+            atime_nsec: row
+                .get_value(10)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u32,
+            mtime_nsec: row
+                .get_value(11)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u32,
+            ctime_nsec: row
+                .get_value(12)
+                .ok()
+                .and_then(|v| v.as_integer().copied())
+                .unwrap_or(0) as u32,
             rdev: row
                 .get_value(9)
                 .ok()
@@ -857,7 +899,7 @@ impl AgentFS {
         };
 
         let mut stmt = conn
-            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?")
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
 
@@ -879,7 +921,7 @@ impl AgentFS {
         let max_symlink_depth = 40; // Standard limit for symlink following
 
         let mut stmt = conn.prepare_cached(
-            "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?",
+            "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec FROM fs_inode WHERE ino = ?",
         ).await?;
         for _ in 0..max_symlink_depth {
             let ino = match self.resolve_path_with_conn(&conn, &current_path).await? {
@@ -947,7 +989,7 @@ impl AgentFS {
 
             let mut rows = conn
                 .query(
-                    "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?",
+                    "SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec FROM fs_inode WHERE ino = ?",
                     (ino,),
                 )
                 .await?;
@@ -1022,15 +1064,27 @@ impl AgentFS {
         }
 
         // Create inode with default directory mode (path-based API doesn't accept mode)
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
-                VALUES (?, ?, ?, 0, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, atime_nsec, mtime_nsec, ctime_nsec)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let row = stmt
-            .query_row((DEFAULT_DIR_MODE as i64, uid, gid, now, now, now))
+            .query_row((
+                DEFAULT_DIR_MODE as i64,
+                uid,
+                gid,
+                now_secs,
+                now_secs,
+                now_secs,
+                now_nsec,
+                now_nsec,
+                now_nsec,
+            ))
             .await?;
 
         let ino = row
@@ -1054,10 +1108,11 @@ impl AgentFS {
         // Increment parent nlink (new directory's ".." link) and update timestamps
         let mut stmt = conn
             .prepare_cached(
-                "UPDATE fs_inode SET nlink = nlink + 1, ctime = ?, mtime = ? WHERE ino = ?",
+                "UPDATE fs_inode SET nlink = nlink + 1, ctime = ?, mtime = ?, ctime_nsec = ?, mtime_nsec = ? WHERE ino = ?",
             )
             .await?;
-        stmt.execute((now, now, parent_ino)).await?;
+        stmt.execute((now_secs, now_secs, now_nsec, now_nsec, parent_ino))
+            .await?;
 
         // Populate dentry cache
         self.dentry_cache.insert(parent_ino, name, ino);
@@ -1094,15 +1149,28 @@ impl AgentFS {
         }
 
         // Create inode with mode and rdev
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, rdev)
-                VALUES (?, ?, ?, 0, ?, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let row = stmt
-            .query_row((mode as i64, uid, gid, now, now, now, rdev as i64))
+            .query_row((
+                mode as i64,
+                uid,
+                gid,
+                now_secs,
+                now_secs,
+                now_secs,
+                rdev as i64,
+                now_nsec,
+                now_nsec,
+                now_nsec,
+            ))
             .await?;
 
         let ino = row
@@ -1168,8 +1236,8 @@ impl AgentFS {
         // Prepare statements before starting the transaction
         let mut inode_stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime)
-                 VALUES (?, 1, ?, ?, 0, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime, atime_nsec, mtime_nsec, ctime_nsec)
+                 VALUES (?, 1, ?, ?, 0, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let mut dentry_stmt = conn
@@ -1178,11 +1246,23 @@ impl AgentFS {
 
         let txn = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).await?;
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let file_mode = S_IFREG | (mode & 0o7777);
 
         let row = inode_stmt
-            .query_row((file_mode as i64, uid, gid, now, now, now))
+            .query_row((
+                file_mode as i64,
+                uid,
+                gid,
+                now_secs,
+                now_secs,
+                now_secs,
+                now_nsec,
+                now_nsec,
+                now_nsec,
+            ))
             .await?;
 
         let ino = row
@@ -1206,9 +1286,12 @@ impl AgentFS {
             uid,
             gid,
             size: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
+            atime: now_secs,
+            mtime: now_secs,
+            ctime: now_secs,
+            atime_nsec: now_nsec as u32,
+            mtime_nsec: now_nsec as u32,
+            ctime_nsec: now_nsec as u32,
             rdev: 0,
         };
 
@@ -1347,16 +1430,18 @@ impl AgentFS {
                     (ino, size, false)
                 } else {
                     // Create new inode with correct size upfront
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+                    let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+                    let now_secs = dur.as_secs() as i64;
+                    let now_nsec = dur.subsec_nanos() as i64;
                     let new_size = write_end as i64;
                     let mut stmt = conn
                         .prepare_cached(
-                            "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, nlink)
-                        VALUES (?, 0, 0, ?, ?, ?, ?, 1) RETURNING ino",
+                            "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, nlink, atime_nsec, mtime_nsec, ctime_nsec)
+                        VALUES (?, 0, 0, ?, ?, ?, ?, 1, ?, ?, ?) RETURNING ino",
                         )
                         .await?;
                     let row = stmt
-                        .query_row((DEFAULT_FILE_MODE as i64, new_size, now, now, now))
+                        .query_row((DEFAULT_FILE_MODE as i64, new_size, now_secs, now_secs, now_secs, now_nsec, now_nsec, now_nsec))
                         .await?;
 
                     let ino = row
@@ -1378,10 +1463,12 @@ impl AgentFS {
 
             // Handle empty writes - just update mtime
             if data.is_empty() {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-                conn.prepare_cached("UPDATE fs_inode SET mtime = ? WHERE ino = ?")
+                let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+                let now_secs = dur.as_secs() as i64;
+                let now_nsec = dur.subsec_nanos() as i64;
+                conn.prepare_cached("UPDATE fs_inode SET mtime = ?, mtime_nsec = ? WHERE ino = ?")
                     .await?
-                    .execute((now, ino))
+                    .execute((now_secs, now_nsec, ino))
                     .await?;
                 return Ok(());
             }
@@ -1469,11 +1556,13 @@ impl AgentFS {
             // Update size and mtime (only if not new, since new inodes already have correct values)
             if !is_new {
                 let new_size = std::cmp::max(current_size, write_end);
-                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+                let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+                let now_secs = dur.as_secs() as i64;
+                let now_nsec = dur.subsec_nanos() as i64;
                 let mut stmt = conn
-                    .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
+                    .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ?, mtime_nsec = ? WHERE ino = ?")
                     .await?;
-                stmt.execute((new_size as i64, now, ino)).await?;
+                stmt.execute((new_size as i64, now_secs, now_nsec, ino)).await?;
             }
 
             Ok(())
@@ -1622,11 +1711,13 @@ impl AgentFS {
             // else: new_size == current_size, nothing to do for data
 
             // Update size and mtime
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+            let now_secs = dur.as_secs() as i64;
+            let now_nsec = dur.subsec_nanos() as i64;
             let mut stmt = conn
-                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?")
+                .prepare_cached("UPDATE fs_inode SET size = ?, mtime = ?, mtime_nsec = ? WHERE ino = ?")
                 .await?;
-            stmt.execute((new_size as i64, now, ino)).await?;
+            stmt.execute((new_size as i64, now_secs, now_nsec, ino)).await?;
 
             Ok(())
         }
@@ -1680,7 +1771,7 @@ impl AgentFS {
     /// Returns entries with their stats in a single JOIN query, avoiding N+1 queries.
     pub async fn readdir_plus(&self, ino: i64) -> Result<Option<Vec<DirEntry>>> {
         let conn = self.pool.get_connection().await?;
-        let mut stmt = conn.prepare_cached("SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev
+        let mut stmt = conn.prepare_cached("SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev, i.atime_nsec, i.mtime_nsec, i.ctime_nsec
             FROM fs_dentry d
             JOIN fs_inode i ON d.ino = i.ino
             WHERE d.parent_ino = ?
@@ -1757,6 +1848,21 @@ impl AgentFS {
                     .ok()
                     .and_then(|v| v.as_integer().copied())
                     .unwrap_or(0),
+                atime_nsec: row
+                    .get_value(11)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32,
+                mtime_nsec: row
+                    .get_value(12)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32,
+                ctime_nsec: row
+                    .get_value(13)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32,
                 rdev: row
                     .get_value(10)
                     .ok()
@@ -1800,22 +1906,23 @@ impl AgentFS {
         }
 
         // Create inode for symlink
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
 
         let mode = S_IFLNK | 0o777; // Symlinks typically have 777 permissions
         let size = target.len() as i64;
 
         let mut stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
-                 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, atime_nsec, mtime_nsec, ctime_nsec)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let row = stmt
-            .query_row((mode, uid, gid, size, now, now, now))
+            .query_row((
+                mode, uid, gid, size, now_secs, now_secs, now_secs, now_nsec, now_nsec, now_nsec,
+            ))
             .await?;
 
         // Get the newly created inode
@@ -2059,13 +2166,16 @@ impl AgentFS {
 
         // If removing a directory, decrement parent nlink (removed dir's ".." link)
         if stats.is_directory() {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+            let now_secs = dur.as_secs() as i64;
+            let now_nsec = dur.subsec_nanos() as i64;
             let mut stmt = conn
                 .prepare_cached(
-                    "UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, mtime = ? WHERE ino = ?",
+                    "UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, mtime = ?, ctime_nsec = ?, mtime_nsec = ? WHERE ino = ?",
                 )
                 .await?;
-            stmt.execute((now, now, parent_ino)).await?;
+            stmt.execute((now_secs, now_secs, now_nsec, now_nsec, parent_ino))
+                .await?;
         }
 
         // Check if this was the last link to the inode
@@ -2288,28 +2398,29 @@ impl AgentFS {
             }
 
             // Update ctime of the inode
-            let now = SystemTime::now()
+            let dur = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+                .unwrap_or_default();
+            let now_secs = dur.as_secs() as i64;
+            let now_nsec = dur.subsec_nanos() as i64;
 
             let mut stmt = conn
-                .prepare_cached("UPDATE fs_inode SET ctime = ? WHERE ino = ?")
+                .prepare_cached("UPDATE fs_inode SET ctime = ?, ctime_nsec = ? WHERE ino = ?")
                 .await?;
-            stmt.execute((now, src_ino)).await?;
+            stmt.execute((now_secs, now_nsec, src_ino)).await?;
 
             // Update source parent directory timestamps
             let mut stmt = conn
-                .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?")
+                .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ?, mtime_nsec = ?, ctime_nsec = ? WHERE ino = ?")
                 .await?;
-            stmt.execute((now, now, src_parent_ino)).await?;
+            stmt.execute((now_secs, now_secs, now_nsec, now_nsec, src_parent_ino)).await?;
 
             // Update destination parent directory timestamps
             if dst_parent_ino != src_parent_ino {
                 let mut stmt = conn
-                    .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?")
+                    .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ?, mtime_nsec = ?, ctime_nsec = ? WHERE ino = ?")
                     .await?;
-                stmt.execute((now, now, dst_parent_ino)).await?;
+                stmt.execute((now_secs, now_secs, now_nsec, now_nsec, dst_parent_ino)).await?;
             }
 
             Ok(())
@@ -2466,7 +2577,7 @@ impl FileSystem for AgentFS {
 
         // Get stats for the child inode
         let mut stmt = conn
-            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev FROM fs_inode WHERE ino = ?")
+            .prepare_cached("SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((child_ino,)).await?;
 
@@ -2601,7 +2712,7 @@ impl FileSystem for AgentFS {
             return Ok(None);
         }
 
-        let mut stmt = conn.prepare_cached("SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev
+        let mut stmt = conn.prepare_cached("SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev, i.atime_nsec, i.mtime_nsec, i.ctime_nsec
             FROM fs_dentry d
             JOIN fs_inode i ON d.ino = i.ino
             WHERE d.parent_ino = ?
@@ -2675,6 +2786,21 @@ impl FileSystem for AgentFS {
                     .ok()
                     .and_then(|v| v.as_integer().copied())
                     .unwrap_or(0),
+                atime_nsec: row
+                    .get_value(11)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32,
+                mtime_nsec: row
+                    .get_value(12)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32,
+                ctime_nsec: row
+                    .get_value(13)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(0) as u32,
                 rdev: row
                     .get_value(10)
                     .ok()
@@ -2709,11 +2835,14 @@ impl FileSystem for AgentFS {
         // Preserve file type bits (upper bits), replace permission bits (lower 12 bits)
         let new_mode = (current_mode & S_IFMT) | (mode & 0o7777);
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET mode = ?, ctime = ? WHERE ino = ?")
+            .prepare_cached("UPDATE fs_inode SET mode = ?, ctime = ?, ctime_nsec = ? WHERE ino = ?")
             .await?;
-        stmt.execute((new_mode as i64, now, ino)).await?;
+        stmt.execute((new_mode as i64, now_secs, now_nsec, ino))
+            .await?;
 
         Ok(())
     }
@@ -2748,9 +2877,13 @@ impl FileSystem for AgentFS {
             values.push(Value::Integer(gid as i64));
         }
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         updates.push("ctime = ?");
-        values.push(Value::Integer(now));
+        values.push(Value::Integer(now_secs));
+        updates.push("ctime_nsec = ?");
+        values.push(Value::Integer(now_nsec));
 
         values.push(Value::Integer(ino));
         let sql = format!("UPDATE fs_inode SET {} WHERE ino = ?", updates.join(", "));
@@ -2759,11 +2892,7 @@ impl FileSystem for AgentFS {
         Ok(())
     }
 
-    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()> {
-        if atime.is_none() && mtime.is_none() {
-            return Ok(());
-        }
-
+    async fn utimens(&self, ino: i64, atime: TimeChange, mtime: TimeChange) -> Result<()> {
         let conn = self.pool.get_connection().await?;
 
         // Verify inode exists
@@ -2771,29 +2900,50 @@ impl FileSystem for AgentFS {
             .prepare_cached("SELECT ino FROM fs_inode WHERE ino = ?")
             .await?;
         let mut rows = stmt.query((ino,)).await?;
-
         if rows.next().await?.is_none() {
             return Err(FsError::NotFound.into());
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64;
-
         let mut updates = Vec::new();
         let mut values: Vec<Value> = Vec::new();
 
-        if let Some(atime) = atime {
+        let resolve = |tc: TimeChange| -> (i64, i64) {
+            match tc {
+                TimeChange::Set(secs, nsec) => (secs, nsec as i64),
+                TimeChange::Now => {
+                    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                    (dur.as_secs() as i64, dur.subsec_nanos() as i64)
+                }
+                TimeChange::Omit => unreachable!(),
+            }
+        };
+
+        if !matches!(atime, TimeChange::Omit) {
+            let (secs, nsec) = resolve(atime);
             updates.push("atime = ?");
-            values.push(Value::Integer(atime));
+            values.push(Value::Integer(secs));
+            updates.push("atime_nsec = ?");
+            values.push(Value::Integer(nsec));
         }
-        if let Some(mtime) = mtime {
+
+        if !matches!(mtime, TimeChange::Omit) {
+            let (secs, nsec) = resolve(mtime);
             updates.push("mtime = ?");
-            values.push(Value::Integer(mtime));
+            values.push(Value::Integer(secs));
+            updates.push("mtime_nsec = ?");
+            values.push(Value::Integer(nsec));
         }
-        // Always update ctime (POSIX requirement)
+
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        // Also update ctime
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
         updates.push("ctime = ?");
-        values.push(Value::Integer(now));
+        values.push(Value::Integer(dur.as_secs() as i64));
+        updates.push("ctime_nsec = ?");
+        values.push(Value::Integer(dur.subsec_nanos() as i64));
 
         values.push(Value::Integer(ino));
         let sql = format!("UPDATE fs_inode SET {} WHERE ino = ?", updates.join(", "));
@@ -2841,16 +2991,28 @@ impl FileSystem for AgentFS {
         }
 
         // Create inode
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
-                VALUES (?, ?, ?, 0, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, atime_nsec, mtime_nsec, ctime_nsec)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let dir_mode = super::S_IFDIR | (mode & 0o7777);
         let row = stmt
-            .query_row((dir_mode as i64, uid, gid, now, now, now))
+            .query_row((
+                dir_mode as i64,
+                uid,
+                gid,
+                now_secs,
+                now_secs,
+                now_secs,
+                now_nsec,
+                now_nsec,
+                now_nsec,
+            ))
             .await?;
 
         let ino = row
@@ -2874,10 +3036,11 @@ impl FileSystem for AgentFS {
         // Increment parent nlink (new directory's ".." link) and update timestamps
         let mut stmt = conn
             .prepare_cached(
-                "UPDATE fs_inode SET nlink = nlink + 1, ctime = ?, mtime = ? WHERE ino = ?",
+                "UPDATE fs_inode SET nlink = nlink + 1, ctime = ?, mtime = ?, ctime_nsec = ?, mtime_nsec = ? WHERE ino = ?",
             )
             .await?;
-        stmt.execute((now, now, parent_ino)).await?;
+        stmt.execute((now_secs, now_secs, now_nsec, now_nsec, parent_ino))
+            .await?;
 
         // Populate dentry cache
         self.dentry_cache.insert(parent_ino, name, ino);
@@ -2889,9 +3052,12 @@ impl FileSystem for AgentFS {
             uid,
             gid,
             size: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
+            atime: now_secs,
+            mtime: now_secs,
+            ctime: now_secs,
+            atime_nsec: now_nsec as u32,
+            mtime_nsec: now_nsec as u32,
+            ctime_nsec: now_nsec as u32,
             rdev: 0,
         })
     }
@@ -2917,8 +3083,8 @@ impl FileSystem for AgentFS {
         // Prepare statements before starting the transaction
         let mut inode_stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime)
-                 VALUES (?, 1, ?, ?, 0, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime, atime_nsec, mtime_nsec, ctime_nsec)
+                 VALUES (?, 1, ?, ?, 0, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let mut dentry_stmt = conn
@@ -2927,11 +3093,23 @@ impl FileSystem for AgentFS {
 
         let txn = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).await?;
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let file_mode = S_IFREG | (mode & 0o7777);
 
         let row = inode_stmt
-            .query_row((file_mode as i64, uid, gid, now, now, now))
+            .query_row((
+                file_mode as i64,
+                uid,
+                gid,
+                now_secs,
+                now_secs,
+                now_secs,
+                now_nsec,
+                now_nsec,
+                now_nsec,
+            ))
             .await?;
 
         let ino = row
@@ -2944,8 +3122,8 @@ impl FileSystem for AgentFS {
 
         // Update parent directory ctime and mtime
         conn.execute(
-            "UPDATE fs_inode SET ctime = ?, mtime = ? WHERE ino = ?",
-            (now, now, parent_ino),
+            "UPDATE fs_inode SET ctime = ?, mtime = ?, ctime_nsec = ?, mtime_nsec = ? WHERE ino = ?",
+            (now_secs, now_secs, now_nsec, now_nsec, parent_ino),
         )
         .await?;
 
@@ -2960,9 +3138,12 @@ impl FileSystem for AgentFS {
             uid,
             gid,
             size: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
+            atime: now_secs,
+            mtime: now_secs,
+            ctime: now_secs,
+            atime_nsec: now_nsec as u32,
+            mtime_nsec: now_nsec as u32,
+            ctime_nsec: now_nsec as u32,
             rdev: 0,
         };
 
@@ -2995,15 +3176,28 @@ impl FileSystem for AgentFS {
         }
 
         // Create inode with mode and rdev
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, rdev)
-                VALUES (?, ?, ?, 0, ?, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, rdev, atime_nsec, mtime_nsec, ctime_nsec)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let row = stmt
-            .query_row((mode as i64, uid, gid, now, now, now, rdev as i64))
+            .query_row((
+                mode as i64,
+                uid,
+                gid,
+                now_secs,
+                now_secs,
+                now_secs,
+                rdev as i64,
+                now_nsec,
+                now_nsec,
+                now_nsec,
+            ))
             .await?;
 
         let ino = row
@@ -3026,9 +3220,10 @@ impl FileSystem for AgentFS {
 
         // Update parent directory ctime and mtime
         let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET ctime = ?, mtime = ? WHERE ino = ?")
+            .prepare_cached("UPDATE fs_inode SET ctime = ?, mtime = ?, ctime_nsec = ?, mtime_nsec = ? WHERE ino = ?")
             .await?;
-        stmt.execute((now, now, parent_ino)).await?;
+        stmt.execute((now_secs, now_secs, now_nsec, now_nsec, parent_ino))
+            .await?;
 
         // Populate dentry cache
         self.dentry_cache.insert(parent_ino, name, ino);
@@ -3040,9 +3235,12 @@ impl FileSystem for AgentFS {
             uid,
             gid,
             size: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
+            atime: now_secs,
+            mtime: now_secs,
+            ctime: now_secs,
+            atime_nsec: now_nsec as u32,
+            mtime_nsec: now_nsec as u32,
+            ctime_nsec: now_nsec as u32,
             rdev,
         })
     }
@@ -3066,18 +3264,22 @@ impl FileSystem for AgentFS {
         }
 
         // Create inode for symlink
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mode = S_IFLNK | 0o777; // Symlinks typically have 777 permissions
         let size = target.len() as i64;
 
         let mut stmt = conn
             .prepare_cached(
-                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
-                 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ino",
+                "INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime, atime_nsec, mtime_nsec, ctime_nsec)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ino",
             )
             .await?;
         let row = stmt
-            .query_row((mode, uid, gid, size, now, now, now))
+            .query_row((
+                mode, uid, gid, size, now_secs, now_secs, now_secs, now_nsec, now_nsec, now_nsec,
+            ))
             .await?;
 
         let ino = row
@@ -3117,9 +3319,12 @@ impl FileSystem for AgentFS {
             uid,
             gid,
             size,
-            atime: now,
-            mtime: now,
-            ctime: now,
+            atime: now_secs,
+            mtime: now_secs,
+            ctime: now_secs,
+            atime_nsec: now_nsec as u32,
+            mtime_nsec: now_nsec as u32,
+            ctime_nsec: now_nsec as u32,
             rdev: 0,
         })
     }
@@ -3164,24 +3369,22 @@ impl FileSystem for AgentFS {
         self.dentry_cache.remove(parent_ino, name);
 
         // Update parent directory mtime and ctime
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?")
+            .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ?, mtime_nsec = ?, ctime_nsec = ? WHERE ino = ?")
             .await?;
-        stmt.execute((now, now, parent_ino)).await?;
+        stmt.execute((now_secs, now_secs, now_nsec, now_nsec, parent_ino))
+            .await?;
 
         // Decrement link count and update ctime
         let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET nlink = nlink - 1, ctime = ? WHERE ino = ?")
+            .prepare_cached(
+                "UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, ctime_nsec = ? WHERE ino = ?",
+            )
             .await?;
-        stmt.execute((now, ino)).await?;
-
-        // Update parent directory timestamps
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-        let mut stmt = conn
-            .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?")
-            .await?;
-        stmt.execute((now, now, parent_ino)).await?;
+        stmt.execute((now_secs, now_nsec, ino)).await?;
 
         // Check if this was the last link to the inode
         let link_count = self.get_link_count(&conn, ino).await?;
@@ -3277,13 +3480,16 @@ impl FileSystem for AgentFS {
         stmt.execute((ino,)).await?;
 
         // Decrement parent nlink (removed directory's ".." link) and update timestamps
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         let mut stmt = conn
             .prepare_cached(
-                "UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, mtime = ? WHERE ino = ?",
+                "UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, mtime = ?, ctime_nsec = ?, mtime_nsec = ? WHERE ino = ?",
             )
             .await?;
-        stmt.execute((now, now, parent_ino)).await?;
+        stmt.execute((now_secs, now_secs, now_nsec, now_nsec, parent_ino))
+            .await?;
 
         // Delete inode if no more links
         let link_count = self.get_link_count(&conn, ino).await?;
@@ -3340,17 +3546,19 @@ impl FileSystem for AgentFS {
         .await?;
 
         // Increment link count and update ctime
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now_secs = dur.as_secs() as i64;
+        let now_nsec = dur.subsec_nanos() as i64;
         conn.execute(
-            "UPDATE fs_inode SET nlink = nlink + 1, ctime = ? WHERE ino = ?",
-            (now, ino),
+            "UPDATE fs_inode SET nlink = nlink + 1, ctime = ?, ctime_nsec = ? WHERE ino = ?",
+            (now_secs, now_nsec, ino),
         )
         .await?;
 
         // Update parent directory ctime and mtime
         conn.execute(
-            "UPDATE fs_inode SET ctime = ?, mtime = ? WHERE ino = ?",
-            (now, now, newparent_ino),
+            "UPDATE fs_inode SET ctime = ?, mtime = ?, ctime_nsec = ?, mtime_nsec = ? WHERE ino = ?",
+            (now_secs, now_secs, now_nsec, now_nsec, newparent_ino),
         )
         .await?;
 
@@ -3434,14 +3642,15 @@ impl FileSystem for AgentFS {
                 stmt.execute((newparent_ino, newname)).await?;
 
                 // Decrement link count and update ctime on destination inode
-                let now_dec = SystemTime::now()
+                let dur_dec = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
+                    .unwrap_or_default();
+                let now_dec = dur_dec.as_secs() as i64;
+                let now_dec_nsec = dur_dec.subsec_nanos() as i64;
                 let mut stmt = conn
-                    .prepare_cached("UPDATE fs_inode SET nlink = nlink - 1, ctime = ? WHERE ino = ?")
+                    .prepare_cached("UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, ctime_nsec = ? WHERE ino = ?")
                     .await?;
-                stmt.execute((now_dec, dst_ino)).await?;
+                stmt.execute((now_dec, now_dec_nsec, dst_ino)).await?;
 
                 // Clean up destination inode if no more links
                 let link_count = self.get_link_count(&conn, dst_ino).await?;
@@ -3485,28 +3694,29 @@ impl FileSystem for AgentFS {
             }
 
             // Update ctime of the inode
-            let now = SystemTime::now()
+            let dur = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+                .unwrap_or_default();
+            let now_secs = dur.as_secs() as i64;
+            let now_nsec = dur.subsec_nanos() as i64;
 
             let mut stmt = conn
-                .prepare_cached("UPDATE fs_inode SET ctime = ? WHERE ino = ?")
+                .prepare_cached("UPDATE fs_inode SET ctime = ?, ctime_nsec = ? WHERE ino = ?")
                 .await?;
-            stmt.execute((now, src_ino)).await?;
+            stmt.execute((now_secs, now_nsec, src_ino)).await?;
 
             // Update source parent directory timestamps
             let mut stmt = conn
-                .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?")
+                .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ?, mtime_nsec = ?, ctime_nsec = ? WHERE ino = ?")
                 .await?;
-            stmt.execute((now, now, oldparent_ino)).await?;
+            stmt.execute((now_secs, now_secs, now_nsec, now_nsec, oldparent_ino)).await?;
 
             // Update destination parent directory timestamps
             if newparent_ino != oldparent_ino {
                 let mut stmt = conn
-                    .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?")
+                    .prepare_cached("UPDATE fs_inode SET mtime = ?, ctime = ?, mtime_nsec = ?, ctime_nsec = ? WHERE ino = ?")
                     .await?;
-                stmt.execute((now, now, newparent_ino)).await?;
+                stmt.execute((now_secs, now_secs, now_nsec, now_nsec, newparent_ino)).await?;
             }
 
             Ok(())

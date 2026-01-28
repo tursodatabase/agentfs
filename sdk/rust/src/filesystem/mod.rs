@@ -91,6 +91,17 @@ pub const S_IFSOCK: u32 = 0o140000; // Socket
 pub const DEFAULT_FILE_MODE: u32 = S_IFREG | 0o644; // Regular file, rw-r--r--
 pub const DEFAULT_DIR_MODE: u32 = S_IFDIR | 0o755; // Directory, rwxr-xr-x
 
+/// Represents a timestamp change request for utimens.
+#[derive(Debug, Clone, Copy)]
+pub enum TimeChange {
+    /// Do not change this timestamp.
+    Omit,
+    /// Set to the current server time.
+    Now,
+    /// Set to a specific time (seconds, nanoseconds).
+    Set(i64, u32),
+}
+
 /// File statistics
 #[derive(Debug, Clone)]
 pub struct Stats {
@@ -103,6 +114,9 @@ pub struct Stats {
     pub atime: i64,
     pub mtime: i64,
     pub ctime: i64,
+    pub atime_nsec: u32,
+    pub mtime_nsec: u32,
+    pub ctime_nsec: u32,
     pub rdev: u64, // Device ID for special files (char/block devices)
 }
 
@@ -210,11 +224,8 @@ pub trait FileSystem: Send + Sync {
     /// Change file ownership by inode.
     async fn chown(&self, ino: i64, uid: Option<u32>, gid: Option<u32>) -> Result<()>;
 
-    /// Set file timestamps by inode.
-    ///
-    /// Updates atime and/or mtime. `None` means "don't change".
-    /// ctime is always updated to the current time when any timestamp changes (POSIX requirement).
-    async fn set_times(&self, ino: i64, atime: Option<i64>, mtime: Option<i64>) -> Result<()>;
+    /// Set file access and modification times by inode (utimensat semantics).
+    async fn utimens(&self, ino: i64, atime: TimeChange, mtime: TimeChange) -> Result<()>;
 
     /// Open a file by inode and return a file handle for I/O operations.
     async fn open(&self, ino: i64) -> Result<BoxedFile>;
