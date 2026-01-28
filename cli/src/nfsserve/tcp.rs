@@ -11,7 +11,7 @@ use std::{io, net::IpAddr};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 /// A NFS Tcp Connection Handler
 pub struct NFSTcpListener<T: NFSFileSystem + Send + Sync + 'static> {
@@ -157,7 +157,7 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcpListener<T> {
     async fn bind_internal(ip: &str, port: u16, arcfs: Arc<T>) -> io::Result<NFSTcpListener<T>> {
         let ipstr = format!("{ip}:{port}");
         let listener = TcpListener::bind(&ipstr).await?;
-        info!("Listening on {:?}", &ipstr);
+        debug!("Listening on {:?}", &ipstr);
 
         let port = match listener.local_addr().unwrap() {
             SocketAddr::V4(s) => s.port(),
@@ -222,7 +222,7 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcp for NFSTcpListener<T> {
                 export_name: self.export_name.clone(),
                 transaction_tracker: self.transaction_tracker.clone(),
             };
-            info!("Accepting connection from {}", context.client_addr);
+            debug!("Accepting connection from {}", context.client_addr);
             debug!("Accepting socket {:?} {:?}", socket, context);
             tokio::spawn(async move {
                 let _ = process_socket(socket, context).await;
