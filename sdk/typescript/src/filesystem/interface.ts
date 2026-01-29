@@ -70,7 +70,25 @@ export interface FilesystemStats {
   /** Total number of inodes (files, directories, symlinks) */
   inodes: number;
   /** Total bytes used by file contents */
+
   bytesUsed: number;
+  /** Total bytes used by file contents */
+  /**
+   * Maximum number of bytes allowed in the filesystem.
+   *
+   * If no storage limit is configured, this will be `null`.
+   */
+  bytesTotal: number | null;
+
+  /**
+   * Number of bytes still available for storing new data.
+   *
+   * This is calculated as:
+   *   bytesTotal - bytesUsed
+   *
+   * If no storage limit is configured, this will be `null`.
+   */
+  bytesAvailable: number | null;
 }
 
 /**

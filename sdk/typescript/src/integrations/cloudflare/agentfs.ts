@@ -1343,9 +1343,13 @@ export class AgentFS implements FileSystem {
       'SELECT COALESCE(SUM(LENGTH(data)), 0) as total FROM fs_data'
     ).toArray();
 
+
+
     return {
       inodes: inodeRows[0].count,
       bytesUsed: bytesRows[0].total,
+      bytesTotal: null,
+      bytesAvailable: null
     };
   }
 
