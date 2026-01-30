@@ -314,3 +314,37 @@ const (
 		GROUP BY name
 		ORDER BY total_calls DESC`
 )
+
+// Overlay filesystem queries
+const (
+	// Whiteout operations
+	whiteoutInsert = `
+		INSERT OR REPLACE INTO fs_whiteout (path, parent_path, created_at)
+		VALUES (?, ?, ?)`
+
+	whiteoutDelete = `
+		DELETE FROM fs_whiteout WHERE path = ?`
+
+	whiteoutCheck = `
+		SELECT 1 FROM fs_whiteout WHERE path = ? LIMIT 1`
+
+	whiteoutList = `
+		SELECT path FROM fs_whiteout`
+
+	whiteoutListByParent = `
+		SELECT path FROM fs_whiteout WHERE parent_path = ?`
+
+	// Origin tracking operations
+	originInsert = `
+		INSERT OR REPLACE INTO fs_origin (delta_ino, base_ino)
+		VALUES (?, ?)`
+
+	originGet = `
+		SELECT base_ino FROM fs_origin WHERE delta_ino = ?`
+
+	originList = `
+		SELECT delta_ino, base_ino FROM fs_origin`
+
+	originDelete = `
+		DELETE FROM fs_origin WHERE delta_ino = ?`
+)
