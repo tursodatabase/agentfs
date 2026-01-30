@@ -163,7 +163,8 @@ type PoolOptions struct {
 | `Symlink(target, link)`       | Create symbolic link          |
 | `Readlink(path)`              | Read symlink target           |
 | `Chmod(path, mode)`           | Change permissions            |
-| `Utimes(path, atime, mtime)`  | Update timestamps             |
+| `Utimes(path, atime, mtime)`  | Update timestamps (seconds)   |
+| `UtimesNano(path, ...)`       | Update timestamps (nanoseconds) |
 | `Open(path, flags)`           | Open file handle              |
 | `Create(path, mode)`          | Create new file handle        |
 
@@ -212,6 +213,42 @@ io.Copy(f, bytes.NewReader(data))  // Write from bytes.Reader
 | `Size()`                    | Get current file size          |
 | `Offset()`                  | Get current position           |
 | `Close()`                   | Close handle                   |
+
+### Stats Struct
+
+The `Stats` struct returned by `Stat()` and `ReaddirPlus()` includes nanosecond-precision timestamps (SPEC v0.4):
+
+```go
+type Stats struct {
+    Ino       int64  // Inode number
+    Mode      int64  // File type and permissions
+    Nlink     int64  // Number of hard links
+    UID       int64  // Owner user ID
+    GID       int64  // Owner group ID
+    Size      int64  // File size in bytes
+    Atime     int64  // Last access time (seconds)
+    Mtime     int64  // Last modification time (seconds)
+    Ctime     int64  // Change time (seconds)
+    Rdev      int64  // Device number (for special files)
+    AtimeNsec int64  // Nanosecond component of atime (0-999999999)
+    MtimeNsec int64  // Nanosecond component of mtime (0-999999999)
+    CtimeNsec int64  // Nanosecond component of ctime (0-999999999)
+}
+
+// Helper methods for full time.Time values
+stats.AtimeTime()  // Returns time.Time with nanosecond precision
+stats.MtimeTime()  // Returns time.Time with nanosecond precision
+stats.CtimeTime()  // Returns time.Time with nanosecond precision
+
+// File type helpers
+stats.IsDir()          // Is directory?
+stats.IsRegularFile()  // Is regular file?
+stats.IsSymlink()      // Is symbolic link?
+stats.IsFIFO()         // Is FIFO/named pipe?
+stats.IsCharDevice()   // Is character device?
+stats.IsBlockDevice()  // Is block device?
+stats.IsSocket()       // Is socket?
+```
 
 ### Key-Value Store
 

@@ -218,8 +218,8 @@ func (f *File) Pread(ctx context.Context, buf []byte, offset int64) (int, error)
 	}
 
 	// Update atime
-	now := time.Now().Unix()
-	f.fs.db.ExecContext(ctx, updateInodeAtime, now, f.ino)
+	now := time.Now()
+	f.fs.db.ExecContext(ctx, updateInodeAtime, now.Unix(), int64(now.Nanosecond()), f.ino)
 
 	return bytesRead, nil
 }
@@ -315,8 +315,8 @@ func (f *File) Pwrite(ctx context.Context, data []byte, offset int64) (int, erro
 		newSize = endOffset
 	}
 
-	now := time.Now().Unix()
-	if _, err := f.fs.db.ExecContext(ctx, updateInodeSize, newSize, now, f.ino); err != nil {
+	now := time.Now()
+	if _, err := f.fs.db.ExecContext(ctx, updateInodeSize, newSize, now.Unix(), int64(now.Nanosecond()), f.ino); err != nil {
 		return bytesWritten, err
 	}
 
@@ -365,8 +365,8 @@ func (f *File) Truncate(ctx context.Context, size int64) error {
 		// The missing chunks will be treated as zeros on read
 	}
 
-	now := time.Now().Unix()
-	if _, err := f.fs.db.ExecContext(ctx, updateInodeSize, size, now, f.ino); err != nil {
+	now := time.Now()
+	if _, err := f.fs.db.ExecContext(ctx, updateInodeSize, size, now.Unix(), int64(now.Nanosecond()), f.ino); err != nil {
 		return err
 	}
 

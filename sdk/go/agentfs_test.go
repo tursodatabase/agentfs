@@ -371,6 +371,114 @@ func TestFilesystem(t *testing.T) {
 	})
 }
 
+func TestNanosecondTimestamps(t *testing.T) {
+	ctx := context.Background()
+	afs := setupTestDB(t)
+	defer afs.Close()
+	fs := afs.FS
+
+	t.Run("stat includes nanoseconds", func(t *testing.T) {
+		before := time.Now()
+
+		err := fs.WriteFile(ctx, "/nsec_test.txt", []byte("test"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		after := time.Now()
+
+		stats, err := fs.Stat(ctx, "/nsec_test.txt")
+		if err != nil {
+			t.Fatalf("Stat failed: %v", err)
+		}
+
+		// Verify seconds are within range
+		if stats.Mtime < before.Unix() || stats.Mtime > after.Unix() {
+			t.Errorf("Mtime %d not in range [%d, %d]", stats.Mtime, before.Unix(), after.Unix())
+		}
+
+		// Verify nanoseconds are valid (0-999999999)
+		if stats.MtimeNsec < 0 || stats.MtimeNsec > 999999999 {
+			t.Errorf("MtimeNsec %d out of valid range", stats.MtimeNsec)
+		}
+		if stats.AtimeNsec < 0 || stats.AtimeNsec > 999999999 {
+			t.Errorf("AtimeNsec %d out of valid range", stats.AtimeNsec)
+		}
+		if stats.CtimeNsec < 0 || stats.CtimeNsec > 999999999 {
+			t.Errorf("CtimeNsec %d out of valid range", stats.CtimeNsec)
+		}
+
+		// Verify helper methods work
+		mtimeTime := stats.MtimeTime()
+		if mtimeTime.Before(before) || mtimeTime.After(after) {
+			t.Errorf("MtimeTime() %v not in range [%v, %v]", mtimeTime, before, after)
+		}
+	})
+
+	t.Run("UtimesNano sets nanoseconds", func(t *testing.T) {
+		err := fs.WriteFile(ctx, "/utimes_nsec.txt", []byte("test"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		// Set specific nanosecond values
+		atimeSec := int64(1000000000)
+		atimeNsec := int64(123456789)
+		mtimeSec := int64(1000000001)
+		mtimeNsec := int64(987654321)
+
+		err = fs.UtimesNano(ctx, "/utimes_nsec.txt", atimeSec, atimeNsec, mtimeSec, mtimeNsec)
+		if err != nil {
+			t.Fatalf("UtimesNano failed: %v", err)
+		}
+
+		stats, err := fs.Stat(ctx, "/utimes_nsec.txt")
+		if err != nil {
+			t.Fatalf("Stat failed: %v", err)
+		}
+
+		if stats.Atime != atimeSec {
+			t.Errorf("Atime = %d, want %d", stats.Atime, atimeSec)
+		}
+		if stats.AtimeNsec != atimeNsec {
+			t.Errorf("AtimeNsec = %d, want %d", stats.AtimeNsec, atimeNsec)
+		}
+		if stats.Mtime != mtimeSec {
+			t.Errorf("Mtime = %d, want %d", stats.Mtime, mtimeSec)
+		}
+		if stats.MtimeNsec != mtimeNsec {
+			t.Errorf("MtimeNsec = %d, want %d", stats.MtimeNsec, mtimeNsec)
+		}
+	})
+
+	t.Run("readdirPlus includes nanoseconds", func(t *testing.T) {
+		err := fs.Mkdir(ctx, "/nsec_dir", 0o755)
+		if err != nil {
+			t.Fatalf("Mkdir failed: %v", err)
+		}
+
+		err = fs.WriteFile(ctx, "/nsec_dir/file.txt", []byte("test"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		entries, err := fs.ReaddirPlus(ctx, "/nsec_dir")
+		if err != nil {
+			t.Fatalf("ReaddirPlus failed: %v", err)
+		}
+
+		if len(entries) != 1 {
+			t.Fatalf("Expected 1 entry, got %d", len(entries))
+		}
+
+		stats := entries[0].Stats
+		// Verify nanoseconds are valid
+		if stats.MtimeNsec < 0 || stats.MtimeNsec > 999999999 {
+			t.Errorf("MtimeNsec %d out of valid range in ReaddirPlus", stats.MtimeNsec)
+		}
+	})
+}
+
 func TestFileHandle(t *testing.T) {
 	ctx := context.Background()
 	afs := setupTestDB(t)

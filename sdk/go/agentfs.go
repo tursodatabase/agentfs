@@ -90,6 +90,12 @@ func Open(ctx context.Context, opts AgentFSOptions) (*AgentFS, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Apply nanosecond timestamp migrations (backwards-compatible)
+	// These add columns if they don't exist; errors are ignored for existing columns
+	for _, stmt := range nsecMigrations() {
+		db.ExecContext(ctx, stmt) // Ignore errors (column may already exist)
+	}
+
 	// Determine chunk size
 	chunkSize := opts.ChunkSize
 	if chunkSize <= 0 {

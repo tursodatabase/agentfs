@@ -119,6 +119,23 @@ func allSchemaStatements() []string {
 	}
 }
 
+// Nanosecond timestamp migrations (backwards-compatible)
+// These use ALTER TABLE which will fail silently if columns already exist
+const (
+	migrateAddAtimeNsec = `ALTER TABLE fs_inode ADD COLUMN atime_nsec INTEGER NOT NULL DEFAULT 0`
+	migrateAddMtimeNsec = `ALTER TABLE fs_inode ADD COLUMN mtime_nsec INTEGER NOT NULL DEFAULT 0`
+	migrateAddCtimeNsec = `ALTER TABLE fs_inode ADD COLUMN ctime_nsec INTEGER NOT NULL DEFAULT 0`
+)
+
+// nsecMigrations returns the nanosecond column migration statements
+func nsecMigrations() []string {
+	return []string{
+		migrateAddAtimeNsec,
+		migrateAddMtimeNsec,
+		migrateAddCtimeNsec,
+	}
+}
+
 // Initialization queries
 const (
 	initFsConfig = `
@@ -140,25 +157,29 @@ const (
 
 	// Inode operations
 	queryInodeByIno = `
-		SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev
+		SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime, rdev,
+		       atime_nsec, mtime_nsec, ctime_nsec
 		FROM fs_inode WHERE ino = ?`
 
 	insertInode = `
-		INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime, rdev)
-		VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO fs_inode (mode, nlink, uid, gid, size, atime, mtime, ctime, rdev,
+		                      atime_nsec, mtime_nsec, ctime_nsec)
+		VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING ino`
 
 	updateInodeSize = `
-		UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?`
+		UPDATE fs_inode SET size = ?, mtime = ?, mtime_nsec = ? WHERE ino = ?`
 
 	updateInodeTimes = `
-		UPDATE fs_inode SET atime = ?, mtime = ?, ctime = ? WHERE ino = ?`
+		UPDATE fs_inode SET atime = ?, mtime = ?, ctime = ?,
+		                    atime_nsec = ?, mtime_nsec = ?, ctime_nsec = ?
+		WHERE ino = ?`
 
 	updateInodeAtime = `
-		UPDATE fs_inode SET atime = ? WHERE ino = ?`
+		UPDATE fs_inode SET atime = ?, atime_nsec = ? WHERE ino = ?`
 
 	updateInodeMode = `
-		UPDATE fs_inode SET mode = ?, ctime = ? WHERE ino = ?`
+		UPDATE fs_inode SET mode = ?, ctime = ?, ctime_nsec = ? WHERE ino = ?`
 
 	incrementNlink = `
 		UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?`
@@ -180,7 +201,8 @@ const (
 		SELECT name FROM fs_dentry WHERE parent_ino = ? ORDER BY name ASC`
 
 	queryDentriesPlusByParent = `
-		SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev
+		SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev,
+		       i.atime_nsec, i.mtime_nsec, i.ctime_nsec
 		FROM fs_dentry d
 		JOIN fs_inode i ON d.ino = i.ino
 		WHERE d.parent_ino = ?

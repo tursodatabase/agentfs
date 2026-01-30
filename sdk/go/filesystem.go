@@ -98,7 +98,8 @@ func (fs *Filesystem) ReaddirPlus(ctx context.Context, p string) ([]DirEntry, er
 	for rows.Next() {
 		var name string
 		var s Stats
-		if err := rows.Scan(&name, &s.Ino, &s.Mode, &s.Nlink, &s.UID, &s.GID, &s.Size, &s.Atime, &s.Mtime, &s.Ctime, &s.Rdev); err != nil {
+		if err := rows.Scan(&name, &s.Ino, &s.Mode, &s.Nlink, &s.UID, &s.GID, &s.Size, &s.Atime, &s.Mtime, &s.Ctime, &s.Rdev,
+			&s.AtimeNsec, &s.MtimeNsec, &s.CtimeNsec); err != nil {
 			return nil, err
 		}
 		entries = append(entries, DirEntry{Name: name, Stats: &s})
@@ -138,11 +139,13 @@ func (fs *Filesystem) Mkdir(ctx context.Context, p string, mode int64) error {
 	}
 
 	// Create inode
-	now := time.Now().Unix()
+	now := time.Now()
+	nowSec := now.Unix()
+	nowNsec := int64(now.Nanosecond())
 	dirMode := S_IFDIR | (mode & 0o777)
 
 	var ino int64
-	err = fs.db.QueryRowContext(ctx, insertInode, dirMode, 0, 0, 0, now, now, now, 0).Scan(&ino)
+	err = fs.db.QueryRowContext(ctx, insertInode, dirMode, 0, 0, 0, nowSec, nowSec, nowSec, 0, nowNsec, nowNsec, nowNsec).Scan(&ino)
 	if err != nil {
 		return err
 	}
@@ -227,8 +230,8 @@ func (fs *Filesystem) ReadFile(ctx context.Context, p string) ([]byte, error) {
 	}
 
 	// Update atime
-	now := time.Now().Unix()
-	fs.db.ExecContext(ctx, updateInodeAtime, now, ino)
+	now := time.Now()
+	fs.db.ExecContext(ctx, updateInodeAtime, now.Unix(), int64(now.Nanosecond()), ino)
 
 	return data, nil
 }
@@ -250,7 +253,9 @@ func (fs *Filesystem) WriteFile(ctx context.Context, p string, data []byte, mode
 		return err
 	}
 
-	now := time.Now().Unix()
+	now := time.Now()
+	nowSec := now.Unix()
+	nowNsec := int64(now.Nanosecond())
 	fileMode := S_IFREG | (mode & 0o777)
 
 	// Check if file already exists
@@ -276,7 +281,7 @@ func (fs *Filesystem) WriteFile(ctx context.Context, p string, data []byte, mode
 		}
 
 		// Update inode
-		if _, err := fs.db.ExecContext(ctx, updateInodeSize, len(data), now, existingIno); err != nil {
+		if _, err := fs.db.ExecContext(ctx, updateInodeSize, len(data), nowSec, nowNsec, existingIno); err != nil {
 			return err
 		}
 
@@ -285,7 +290,7 @@ func (fs *Filesystem) WriteFile(ctx context.Context, p string, data []byte, mode
 
 	// Create new file
 	var ino int64
-	err = fs.db.QueryRowContext(ctx, insertInode, fileMode, 0, 0, len(data), now, now, now, 0).Scan(&ino)
+	err = fs.db.QueryRowContext(ctx, insertInode, fileMode, 0, 0, len(data), nowSec, nowSec, nowSec, 0, nowNsec, nowNsec, nowNsec).Scan(&ino)
 	if err != nil {
 		return err
 	}
@@ -588,9 +593,11 @@ func (fs *Filesystem) Symlink(ctx context.Context, target, linkPath string) erro
 	}
 
 	// Create inode
-	now := time.Now().Unix()
+	now := time.Now()
+	nowSec := now.Unix()
+	nowNsec := int64(now.Nanosecond())
 	var ino int64
-	err = fs.db.QueryRowContext(ctx, insertInode, S_IFLNK|0o777, 0, 0, len(target), now, now, now, 0).Scan(&ino)
+	err = fs.db.QueryRowContext(ctx, insertInode, S_IFLNK|0o777, 0, 0, len(target), nowSec, nowSec, nowSec, 0, nowNsec, nowNsec, nowNsec).Scan(&ino)
 	if err != nil {
 		return err
 	}
@@ -654,17 +661,23 @@ func (fs *Filesystem) Chmod(ctx context.Context, p string, mode int64) error {
 
 	// Preserve file type, change permissions
 	newMode := (stats.Mode & S_IFMT) | (mode & 0o777)
-	now := time.Now().Unix()
+	now := time.Now()
 
-	if _, err := fs.db.ExecContext(ctx, updateInodeMode, newMode, now, ino); err != nil {
+	if _, err := fs.db.ExecContext(ctx, updateInodeMode, newMode, now.Unix(), int64(now.Nanosecond()), ino); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// Utimes updates file timestamps.
+// Utimes updates file timestamps (seconds precision).
+// For nanosecond precision, use UtimesNano.
 func (fs *Filesystem) Utimes(ctx context.Context, p string, atime, mtime int64) error {
+	return fs.UtimesNano(ctx, p, atime, 0, mtime, 0)
+}
+
+// UtimesNano updates file timestamps with nanosecond precision.
+func (fs *Filesystem) UtimesNano(ctx context.Context, p string, atimeSec, atimeNsec, mtimeSec, mtimeNsec int64) error {
 	p = normalizePath(p)
 
 	ino, err := fs.resolvePath(ctx, p)
@@ -672,8 +685,8 @@ func (fs *Filesystem) Utimes(ctx context.Context, p string, atime, mtime int64) 
 		return err
 	}
 
-	now := time.Now().Unix()
-	if _, err := fs.db.ExecContext(ctx, updateInodeTimes, atime, mtime, now, ino); err != nil {
+	now := time.Now()
+	if _, err := fs.db.ExecContext(ctx, updateInodeTimes, atimeSec, mtimeSec, now.Unix(), atimeNsec, mtimeNsec, int64(now.Nanosecond()), ino); err != nil {
 		return err
 	}
 
@@ -713,8 +726,8 @@ func (fs *Filesystem) Open(ctx context.Context, p string, flags int) (*File, err
 		if _, err := fs.db.ExecContext(ctx, deleteChunksByIno, ino); err != nil {
 			return nil, err
 		}
-		now := time.Now().Unix()
-		if _, err := fs.db.ExecContext(ctx, updateInodeSize, 0, now, ino); err != nil {
+		now := time.Now()
+		if _, err := fs.db.ExecContext(ctx, updateInodeSize, 0, now.Unix(), int64(now.Nanosecond()), ino); err != nil {
 			return nil, err
 		}
 	}
@@ -822,6 +835,7 @@ func (fs *Filesystem) statInode(ctx context.Context, ino int64) (*Stats, error) 
 	var s Stats
 	err := fs.db.QueryRowContext(ctx, queryInodeByIno, ino).Scan(
 		&s.Ino, &s.Mode, &s.Nlink, &s.UID, &s.GID, &s.Size, &s.Atime, &s.Mtime, &s.Ctime, &s.Rdev,
+		&s.AtimeNsec, &s.MtimeNsec, &s.CtimeNsec,
 	)
 	if err == sql.ErrNoRows {
 		return nil, ErrNoent("stat", "")

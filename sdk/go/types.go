@@ -64,16 +64,19 @@ type CacheOptions struct {
 
 // Stats represents file/directory metadata (matches POSIX stat)
 type Stats struct {
-	Ino   int64 `json:"ino"`   // Inode number
-	Mode  int64 `json:"mode"`  // File type and permissions
-	Nlink int64 `json:"nlink"` // Number of hard links
-	UID   int64 `json:"uid"`   // Owner user ID
-	GID   int64 `json:"gid"`   // Owner group ID
-	Size  int64 `json:"size"`  // File size in bytes
-	Atime int64 `json:"atime"` // Last access time (Unix timestamp)
-	Mtime int64 `json:"mtime"` // Last modification time (Unix timestamp)
-	Ctime int64 `json:"ctime"` // Creation/change time (Unix timestamp)
-	Rdev  int64 `json:"rdev"`  // Device number (for special files)
+	Ino       int64 `json:"ino"`        // Inode number
+	Mode      int64 `json:"mode"`       // File type and permissions
+	Nlink     int64 `json:"nlink"`      // Number of hard links
+	UID       int64 `json:"uid"`        // Owner user ID
+	GID       int64 `json:"gid"`        // Owner group ID
+	Size      int64 `json:"size"`       // File size in bytes
+	Atime     int64 `json:"atime"`      // Last access time (Unix timestamp, seconds)
+	Mtime     int64 `json:"mtime"`      // Last modification time (Unix timestamp, seconds)
+	Ctime     int64 `json:"ctime"`      // Creation/change time (Unix timestamp, seconds)
+	Rdev      int64 `json:"rdev"`       // Device number (for special files)
+	AtimeNsec int64 `json:"atime_nsec"` // Nanosecond component of atime (0-999999999)
+	MtimeNsec int64 `json:"mtime_nsec"` // Nanosecond component of mtime (0-999999999)
+	CtimeNsec int64 `json:"ctime_nsec"` // Nanosecond component of ctime (0-999999999)
 }
 
 // IsDir returns true if this is a directory
@@ -119,6 +122,21 @@ func (s *Stats) FileType() int64 {
 // Permissions returns the permission bits of the mode
 func (s *Stats) Permissions() int64 {
 	return s.Mode & 0o777
+}
+
+// AtimeTime returns atime as a time.Time with nanosecond precision
+func (s *Stats) AtimeTime() time.Time {
+	return time.Unix(s.Atime, s.AtimeNsec)
+}
+
+// MtimeTime returns mtime as a time.Time with nanosecond precision
+func (s *Stats) MtimeTime() time.Time {
+	return time.Unix(s.Mtime, s.MtimeNsec)
+}
+
+// CtimeTime returns ctime as a time.Time with nanosecond precision
+func (s *Stats) CtimeTime() time.Time {
+	return time.Unix(s.Ctime, s.CtimeNsec)
 }
 
 // DirEntry represents a directory entry returned by ReaddirPlus
