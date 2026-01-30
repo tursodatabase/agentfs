@@ -14,97 +14,104 @@ go get github.com/tursodatabase/agentfs/sdk/go
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
+	"context"
+	"fmt"
+	"log"
+	"time"
 
-    agentfs "github.com/tursodatabase/agentfs/sdk/go"
+	agentfs "github.com/tursodatabase/agentfs/sdk/go"
 )
 
 func main() {
-    ctx := context.Background()
+	ctx := context.Background()
 
-    // Open or create an AgentFS database
-    afs, err := agentfs.Open(ctx, agentfs.AgentFSOptions{
-        ID: "my-agent",  // Creates ~/.agentfs/my-agent.db
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer afs.Close()
+	// Open or create an AgentFS database
+	afs, err := agentfs.Open(ctx, agentfs.AgentFSOptions{
+		ID: "my-agent", // Creates ~/.agentfs/my-agent.db
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer afs.Close()
 
-    // === Filesystem Operations ===
+	// === Filesystem Operations ===
 
-    // Write a file
-    err = afs.FS.WriteFile(ctx, "/hello.txt", []byte("Hello, World!"), 0o644)
-    if err != nil {
-        log.Fatal(err)
-    }
+	// Write a file
+	err = afs.FS.WriteFile(ctx, "/hello.txt", []byte("Hello, World!"), 0o644)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    // Read a file
-    data, err := afs.FS.ReadFile(ctx, "/hello.txt")
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println(string(data)) // "Hello, World!"
+	// Read a file
+	data, err := afs.FS.ReadFile(ctx, "/hello.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(string(data)) // "Hello, World!"
 
-    // Create directories
-    err = afs.FS.MkdirAll(ctx, "/path/to/dir", 0o755)
+	// Create directories
+	err = afs.FS.MkdirAll(ctx, "/path/to/dir", 0o755)
 
-    // List directory
-    names, err := afs.FS.Readdir(ctx, "/")
+	// List directory
+	names, err := afs.FS.Readdir(ctx, "/")
+	for _, name := range names {
+		fmt.Printf("File name: %s\n", name)
+	}
 
-    // Get file stats
-    stats, err := afs.FS.Stat(ctx, "/hello.txt")
-    fmt.Printf("Size: %d, IsDir: %v\n", stats.Size, stats.IsDir())
+	// Get file stats
+	stats, err := afs.FS.Stat(ctx, "/hello.txt")
+	fmt.Printf("Size: %d, IsDir: %v\n", stats.Size, stats.IsDir())
 
-    // === Key-Value Store ===
+	// === Key-Value Store ===
 
-    // Store values (JSON-serialized)
-    err = afs.KV.Set(ctx, "config:version", "1.0.0")
+	// Store values (JSON-serialized)
+	err = afs.KV.Set(ctx, "config:version", "1.0.0")
 
-    type Settings struct {
-        Theme    string `json:"theme"`
-        FontSize int    `json:"font_size"`
-    }
-    err = afs.KV.Set(ctx, "user:settings", Settings{Theme: "dark", FontSize: 14})
+	type Settings struct {
+		Theme    string `json:"theme"`
+		FontSize int    `json:"font_size"`
+	}
+	err = afs.KV.Set(ctx, "user:settings", Settings{Theme: "dark", FontSize: 14})
 
-    // Retrieve values
-    var version string
-    err = afs.KV.Get(ctx, "config:version", &version)
+	// Retrieve values
+	var version string
+	err = afs.KV.Get(ctx, "config:version", &version)
 
-    var settings Settings
-    err = afs.KV.Get(ctx, "user:settings", &settings)
+	var settings Settings
+	err = afs.KV.Get(ctx, "user:settings", &settings)
 
-    // List keys by prefix
-    keys, err := afs.KV.Keys(ctx, "config:")
+	// List keys by prefix
+	keys, err := afs.KV.Keys(ctx, "config:")
+	for _, key := range keys {
+		fmt.Printf("Key: %s\n", key)
+	}
 
-    // === Tool Call Tracking ===
+	// === Tool Call Tracking ===
 
-    // Start/Success pattern
-    pending, err := afs.Tools.Start(ctx, "web_search", map[string]string{
-        "query": "golang sqlite",
-    })
+	// Start/Success pattern
+	pending, err := afs.Tools.Start(ctx, "web_search", map[string]string{
+		"query": "golang sqlite",
+	})
 
-    // ... perform operation ...
+	// ... perform operation ...
 
-    call, err := pending.Success(ctx, map[string]any{
-        "results": []string{"result1", "result2"},
-    })
-    fmt.Printf("Tool call %d completed in %dms\n", call.ID, call.DurationMs)
+	call, err := pending.Success(ctx, map[string]any{
+		"results": []string{"result1", "result2"},
+	})
+	fmt.Printf("Tool call %d completed in %dms\n", call.ID, call.DurationMs)
 
-    // Or record directly
-    now := time.Now().Unix()
-    call, err = afs.Tools.Record(ctx, "read_file",
-        map[string]string{"path": "/test.txt"},
-        "file contents",
-        nil, // no error
-        now-1, now,
-    )
+	// Or record directly
+	now := time.Now().Unix()
+	call, err = afs.Tools.Record(ctx, "read_file",
+		map[string]string{"path": "/test.txt"},
+		"file contents",
+		nil, // no error
+		now-1, now,
+	)
 
-    // Query tool calls
-    calls, err := afs.Tools.GetByName(ctx, "web_search", 10)
-    stats, err := afs.Tools.GetStats(ctx)
+	// Query tool calls
+	calls, err := afs.Tools.GetByName(ctx, "web_search", 10)
+	stats, err := afs.Tools.GetStats(ctx)
 }
 ```
 
