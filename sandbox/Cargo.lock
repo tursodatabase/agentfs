@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sandbox"
-version = "0.6.0-pre.3"
+version = "0.6.0-pre.4"
 dependencies = [
  "agentfs-sdk",
  "anyhow",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "agentfs-sdk"
-version = "0.6.0-pre.3"
+version = "0.6.0-pre.4"
 dependencies = [
  "aegis",
  "async-trait",
@@ -306,9 +306,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.54"
+version = "1.2.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6354c81bbfd62d9cfa9cb3c773c2b7b2a3a482d569de977fd0e961f6e7c00583"
+checksum = "47b26a0954ae34af09b50f0de26458fa95369a0d478d8236d3f93082b219bd29"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -665,9 +665,9 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8591b0bcc8a98a64310a2fae1bb3e9b8564dd10e381e6e28010fde8e8e8568db"
+checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "flate2"
@@ -2084,7 +2084,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "reverie"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#48f45f8ece31bcaf183082cdf9e9baa2c3c01d82"
+source = "git+https://github.com/facebookexperimental/reverie#67d69c9d1174e328663f7552b767cc958d9c08ff"
 dependencies = [
  "addr2line",
  "anyhow",
@@ -2111,7 +2111,7 @@ dependencies = [
 [[package]]
 name = "reverie-memory"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#48f45f8ece31bcaf183082cdf9e9baa2c3c01d82"
+source = "git+https://github.com/facebookexperimental/reverie#67d69c9d1174e328663f7552b767cc958d9c08ff"
 dependencies = [
  "syscalls",
 ]
@@ -2119,7 +2119,7 @@ dependencies = [
 [[package]]
 name = "reverie-process"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#48f45f8ece31bcaf183082cdf9e9baa2c3c01d82"
+source = "git+https://github.com/facebookexperimental/reverie#67d69c9d1174e328663f7552b767cc958d9c08ff"
 dependencies = [
  "bincode",
  "bitflags 2.10.0",
@@ -2136,7 +2136,7 @@ dependencies = [
 [[package]]
 name = "reverie-ptrace"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#48f45f8ece31bcaf183082cdf9e9baa2c3c01d82"
+source = "git+https://github.com/facebookexperimental/reverie#67d69c9d1174e328663f7552b767cc958d9c08ff"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2168,7 +2168,7 @@ dependencies = [
 [[package]]
 name = "reverie-syscalls"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#48f45f8ece31bcaf183082cdf9e9baa2c3c01d82"
+source = "git+https://github.com/facebookexperimental/reverie#67d69c9d1174e328663f7552b767cc958d9c08ff"
 dependencies = [
  "bitflags 2.10.0",
  "derive_more",
@@ -2183,7 +2183,7 @@ dependencies = [
 [[package]]
 name = "reverie-util"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#48f45f8ece31bcaf183082cdf9e9baa2c3c01d82"
+source = "git+https://github.com/facebookexperimental/reverie#67d69c9d1174e328663f7552b767cc958d9c08ff"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2321,7 +2321,7 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 [[package]]
 name = "safeptrace"
 version = "0.1.0"
-source = "git+https://github.com/facebookexperimental/reverie#48f45f8ece31bcaf183082cdf9e9baa2c3c01d82"
+source = "git+https://github.com/facebookexperimental/reverie#67d69c9d1174e328663f7552b767cc958d9c08ff"
 dependencies = [
  "bitflags 2.10.0",
  "futures 0.3.31",
@@ -3788,18 +3788,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.35"
+version = "0.8.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdea86ddd5568519879b8187e1cf04e24fce28f7fe046ceecbce472ff19a2572"
+checksum = "dafd85c832c1b68bbb4ec0c72c7f6f4fc5179627d2bc7c26b30e4c0cc11e76cc"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.35"
+version = "0.8.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c15e1b46eff7c6c91195752e0eeed8ef040e391cdece7c25376957d5f15df22"
+checksum = "7cb7e4e8436d9db52fbd6625dbf2f45243ab84994a72882ec8227b99e72b439a"
 dependencies = [
  "proc-macro2",
  "quote",
