@@ -58,6 +58,20 @@ func Open(ctx context.Context, opts AgentFSOptions) (*AgentFS, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// Configure connection pool
+	if opts.Pool.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(opts.Pool.MaxOpenConns)
+	}
+	if opts.Pool.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(opts.Pool.MaxIdleConns)
+	}
+	if opts.Pool.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(opts.Pool.ConnMaxLifetime)
+	}
+	if opts.Pool.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(opts.Pool.ConnMaxIdleTime)
+	}
+
 	// Enable WAL mode for better concurrency
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()

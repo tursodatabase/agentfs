@@ -128,12 +128,20 @@ type AgentFSOptions struct {
     Path      string       // Explicit database path (takes precedence)
     ChunkSize int          // Chunk size for file data (default: 4096)
     Cache     CacheOptions // Optional path resolution cache
+    Pool      PoolOptions  // Connection pool configuration
 }
 
 type CacheOptions struct {
     Enabled    bool          // Enable LRU cache (default: false)
     MaxEntries int           // Max cached paths (default: 10000)
     TTL        time.Duration // Entry expiration (0 = no expiration)
+}
+
+type PoolOptions struct {
+    MaxOpenConns    int           // Max open connections (0 = unlimited)
+    MaxIdleConns    int           // Max idle connections (default: 2)
+    ConnMaxLifetime time.Duration // Max connection lifetime (0 = forever)
+    ConnMaxIdleTime time.Duration // Max idle time (0 = forever)
 }
 ```
 
@@ -484,6 +492,27 @@ afs.FS.ClearCache()
 ```
 
 The cache automatically invalidates entries when files/directories are deleted, renamed, or moved.
+
+## Connection Pool
+
+The SDK uses Go's `database/sql` connection pool. You can tune it for your workload:
+
+```go
+afs, err := agentfs.Open(ctx, agentfs.AgentFSOptions{
+    ID: "my-agent",
+    Pool: agentfs.PoolOptions{
+        MaxOpenConns:    1,               // Serialize access (recommended for SQLite)
+        MaxIdleConns:    1,               // Keep one connection ready
+        ConnMaxLifetime: 0,               // Connections never expire
+        ConnMaxIdleTime: 5 * time.Minute, // Close idle connections after 5m
+    },
+})
+```
+
+**Recommendations:**
+- **Single-process**: `MaxOpenConns: 1` ensures serialized access, avoiding SQLite lock contention
+- **Read-heavy**: Higher `MaxOpenConns` can improve read parallelism with WAL mode
+- **Long-running**: Set `ConnMaxIdleTime` to periodically refresh connections
 
 ## Schema Compatibility
 

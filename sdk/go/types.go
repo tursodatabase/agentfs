@@ -21,6 +21,29 @@ type AgentFSOptions struct {
 
 	// Cache configures the optional path resolution cache.
 	Cache CacheOptions
+
+	// Pool configures the database connection pool.
+	Pool PoolOptions
+}
+
+// PoolOptions configures the SQLite connection pool.
+// These settings control how database/sql manages connections.
+type PoolOptions struct {
+	// MaxOpenConns sets the maximum number of open connections to the database.
+	// Default: 0 (unlimited). For SQLite, a value of 1 ensures serialized access.
+	MaxOpenConns int
+
+	// MaxIdleConns sets the maximum number of connections in the idle pool.
+	// Default: 2 (database/sql default). Set to MaxOpenConns for best performance.
+	MaxIdleConns int
+
+	// ConnMaxLifetime sets the maximum amount of time a connection may be reused.
+	// Default: 0 (connections are reused forever).
+	ConnMaxLifetime time.Duration
+
+	// ConnMaxIdleTime sets the maximum amount of time a connection may be idle.
+	// Default: 0 (connections are never closed due to idle time).
+	ConnMaxIdleTime time.Duration
 }
 
 // CacheOptions configures the optional LRU cache for path resolution.
