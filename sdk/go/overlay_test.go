@@ -757,7 +757,7 @@ func setupOverlayTestWithCache(t *testing.T) (*OverlayFS, *MockBaseFS, *AgentFS)
 		MaxEntries: 1000,
 	})
 	if err := ofs.Init(ctx); err != nil {
-		afs.Close()
+		_ = afs.Close()
 		t.Fatalf("Failed to init OverlayFS: %v", err)
 	}
 
@@ -811,7 +811,7 @@ func TestOverlayCache_InvalidationOnUnlink(t *testing.T) {
 	}
 
 	// Lookup to populate cache
-	ofs.LookupPath(ctx, "/to_delete.txt")
+	_, _ = ofs.LookupPath(ctx, "/to_delete.txt")
 
 	stats := ofs.CacheStats()
 	entriesBefore := stats.Entries
@@ -847,7 +847,7 @@ func TestOverlayCache_InvalidationOnRename(t *testing.T) {
 	}
 
 	// Populate cache
-	ofs.LookupPath(ctx, "/old_name.txt")
+	_, _ = ofs.LookupPath(ctx, "/old_name.txt")
 
 	// Rename
 	err = ofs.Rename(ctx, "/old_name.txt", "/new_name.txt")
@@ -909,7 +909,7 @@ func TestOverlayCache_ClearCache(t *testing.T) {
 	for i := int64(0); i < 10; i++ {
 		name := string(rune('a'+i)) + ".txt"
 		base.addFile(1, name, 100+i, []byte("x"), 0o644)
-		ofs.LookupPath(ctx, "/"+name)
+		_, _ = ofs.LookupPath(ctx, "/"+name)
 	}
 
 	stats := ofs.CacheStats()
@@ -1024,7 +1024,7 @@ func setupOverlayWithConfig(t *testing.T, cfg cacheTestConfig) (*OverlayFS, *Moc
 	}
 
 	if err := ofs.Init(ctx); err != nil {
-		afs.Close()
+		_ = afs.Close()
 		t.Fatalf("Failed to init OverlayFS: %v", err)
 	}
 
@@ -1264,8 +1264,8 @@ func TestOverlayCacheConsistency_RenameOperations(t *testing.T) {
 
 			// Lookup files multiple times to populate cache
 			for i := 0; i < 3; i++ {
-				ofs.LookupPath(ctx, "/base_rename.txt")
-				ofs.LookupPath(ctx, "/delta_rename.txt")
+				_, _ = ofs.LookupPath(ctx, "/base_rename.txt")
+				_, _ = ofs.LookupPath(ctx, "/delta_rename.txt")
 			}
 
 			// Test 1: Rename delta file
@@ -1357,8 +1357,8 @@ func TestOverlayCacheConsistency_CopyUpOperations(t *testing.T) {
 			base.addFile(1, "to_chmod.txt", 101, []byte("chmod test"), 0o644)
 
 			// Read to populate cache
-			ofs.LookupPath(ctx, "/to_chmod.txt")
-			ofs.LookupPath(ctx, "/to_chmod.txt")
+			_, _ = ofs.LookupPath(ctx, "/to_chmod.txt")
+			_, _ = ofs.LookupPath(ctx, "/to_chmod.txt")
 
 			err = ofs.Chmod(ctx, "/to_chmod.txt", 0o600)
 			if err != nil {
