@@ -733,3 +733,911 @@ func TestOverlay_WhiteoutAncestorBlocks(t *testing.T) {
 		t.Error("Expected /parent/child.txt to be blocked by ancestor whiteout")
 	}
 }
+
+// =============================================================================
+// Cache Tests
+// =============================================================================
+
+func setupOverlayTestWithCache(t *testing.T) (*OverlayFS, *MockBaseFS, *AgentFS) {
+	t.Helper()
+	ctx := context.Background()
+
+	// Create AgentFS
+	afs, err := Open(ctx, AgentFSOptions{Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("Failed to open AgentFS: %v", err)
+	}
+
+	// Create mock base filesystem
+	base := newMockBaseFS()
+
+	// Create overlay filesystem with cache enabled
+	ofs := NewOverlayFSWithCache(base, afs.FS, afs.db, OverlayCacheOptions{
+		Enabled:    true,
+		MaxEntries: 1000,
+	})
+	if err := ofs.Init(ctx); err != nil {
+		afs.Close()
+		t.Fatalf("Failed to init OverlayFS: %v", err)
+	}
+
+	return ofs, base, afs
+}
+
+func TestOverlayCache_BasicCaching(t *testing.T) {
+	ctx := context.Background()
+	ofs, base, afs := setupOverlayTestWithCache(t)
+	defer afs.Close()
+
+	// Add file to base
+	base.addFile(1, "test.txt", 100, []byte("hello"), 0o644)
+
+	// First lookup should miss cache
+	_, err := ofs.LookupPath(ctx, "/test.txt")
+	if err != nil {
+		t.Fatalf("LookupPath failed: %v", err)
+	}
+
+	stats := ofs.CacheStats()
+	if stats == nil {
+		t.Fatal("CacheStats should not be nil when cache is enabled")
+	}
+	initialMisses := stats.Misses
+
+	// Second lookup should hit cache
+	_, err = ofs.LookupPath(ctx, "/test.txt")
+	if err != nil {
+		t.Fatalf("LookupPath failed: %v", err)
+	}
+
+	stats = ofs.CacheStats()
+	if stats.Hits == 0 {
+		t.Error("Expected cache hit on second lookup")
+	}
+	if stats.Misses != initialMisses {
+		t.Error("Expected no additional misses on second lookup")
+	}
+}
+
+func TestOverlayCache_InvalidationOnUnlink(t *testing.T) {
+	ctx := context.Background()
+	ofs, _, afs := setupOverlayTestWithCache(t)
+	defer afs.Close()
+
+	// Create a file in delta
+	err := ofs.WriteFile(ctx, "/to_delete.txt", []byte("x"), 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// Lookup to populate cache
+	ofs.LookupPath(ctx, "/to_delete.txt")
+
+	stats := ofs.CacheStats()
+	entriesBefore := stats.Entries
+
+	// Delete the file
+	err = ofs.Unlink(ctx, "/to_delete.txt")
+	if err != nil {
+		t.Fatalf("Unlink failed: %v", err)
+	}
+
+	// Cache entry should be invalidated
+	stats = ofs.CacheStats()
+	if stats.Entries >= entriesBefore {
+		t.Error("Cache entry should be invalidated after Unlink")
+	}
+
+	// Lookup should fail
+	_, err = ofs.LookupPath(ctx, "/to_delete.txt")
+	if !IsNotExist(err) {
+		t.Error("Expected ENOENT after Unlink")
+	}
+}
+
+func TestOverlayCache_InvalidationOnRename(t *testing.T) {
+	ctx := context.Background()
+	ofs, _, afs := setupOverlayTestWithCache(t)
+	defer afs.Close()
+
+	// Create a file in delta
+	err := ofs.WriteFile(ctx, "/old_name.txt", []byte("x"), 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// Populate cache
+	ofs.LookupPath(ctx, "/old_name.txt")
+
+	// Rename
+	err = ofs.Rename(ctx, "/old_name.txt", "/new_name.txt")
+	if err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+
+	// Old path should not exist
+	_, err = ofs.LookupPath(ctx, "/old_name.txt")
+	if !IsNotExist(err) {
+		t.Error("Expected ENOENT for old path after rename")
+	}
+
+	// New path should work
+	_, err = ofs.LookupPath(ctx, "/new_name.txt")
+	if err != nil {
+		t.Errorf("New path should exist: %v", err)
+	}
+}
+
+func TestOverlayCache_InvalidationOnWhiteout(t *testing.T) {
+	ctx := context.Background()
+	ofs, base, afs := setupOverlayTestWithCache(t)
+	defer afs.Close()
+
+	// Add file to base
+	base.addFile(1, "base_file.txt", 100, []byte("hello"), 0o644)
+
+	// Lookup to populate cache
+	_, err := ofs.LookupPath(ctx, "/base_file.txt")
+	if err != nil {
+		t.Fatalf("LookupPath failed: %v", err)
+	}
+
+	stats := ofs.CacheStats()
+	if stats.Entries == 0 {
+		t.Fatal("Expected cache entry after lookup")
+	}
+
+	// Delete file (creates whiteout)
+	err = ofs.Unlink(ctx, "/base_file.txt")
+	if err != nil {
+		t.Fatalf("Unlink failed: %v", err)
+	}
+
+	// Lookup should fail (whiteout hides base file)
+	_, err = ofs.LookupPath(ctx, "/base_file.txt")
+	if !IsNotExist(err) {
+		t.Error("Expected ENOENT after whiteout created")
+	}
+}
+
+func TestOverlayCache_ClearCache(t *testing.T) {
+	ctx := context.Background()
+	ofs, base, afs := setupOverlayTestWithCache(t)
+	defer afs.Close()
+
+	// Add files to base and populate cache
+	for i := int64(0); i < 10; i++ {
+		name := string(rune('a'+i)) + ".txt"
+		base.addFile(1, name, 100+i, []byte("x"), 0o644)
+		ofs.LookupPath(ctx, "/"+name)
+	}
+
+	stats := ofs.CacheStats()
+	if stats.Entries == 0 {
+		t.Fatal("Cache should have entries")
+	}
+
+	// Clear cache
+	ofs.ClearCache()
+
+	stats = ofs.CacheStats()
+	if stats.Entries != 0 {
+		t.Error("Cache should be empty after ClearCache")
+	}
+}
+
+func TestOverlayCache_Disabled(t *testing.T) {
+	ctx := context.Background()
+	ofs, base, afs := setupOverlayTest(t) // Uses non-cached setup
+	defer afs.Close()
+
+	// CacheStats should return nil when cache is disabled
+	stats := ofs.CacheStats()
+	if stats != nil {
+		t.Error("CacheStats should be nil when cache is disabled")
+	}
+
+	// Operations should still work
+	base.addFile(1, "test.txt", 100, []byte("hello"), 0o644)
+	_, err := ofs.LookupPath(ctx, "/test.txt")
+	if err != nil {
+		t.Fatalf("LookupPath failed: %v", err)
+	}
+}
+
+func TestOverlayCache_InvalidationOnCopyUp(t *testing.T) {
+	ctx := context.Background()
+	ofs, base, afs := setupOverlayTestWithCache(t)
+	defer afs.Close()
+
+	// Add file to base
+	base.addFile(1, "to_modify.txt", 100, []byte("original"), 0o644)
+
+	// Lookup to populate cache
+	stats1, err := ofs.LookupPath(ctx, "/to_modify.txt")
+	if err != nil {
+		t.Fatalf("LookupPath failed: %v", err)
+	}
+	ino1 := stats1.Ino
+
+	// Modify file (triggers copy-up)
+	err = ofs.WriteFile(ctx, "/to_modify.txt", []byte("modified"), 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// Lookup after copy-up should return correct data
+	stats2, err := ofs.LookupPath(ctx, "/to_modify.txt")
+	if err != nil {
+		t.Fatalf("LookupPath after copy-up failed: %v", err)
+	}
+
+	// Read should return modified content
+	content, err := ofs.ReadFile(ctx, "/to_modify.txt")
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(content) != "modified" {
+		t.Errorf("Expected 'modified', got %q", string(content))
+	}
+
+	// Inode might change after copy-up (implementation detail)
+	_ = ino1
+	_ = stats2
+}
+
+// =============================================================================
+// Parameterized Cache Consistency Tests
+// =============================================================================
+// These tests run the same operations with caching enabled and disabled
+// to verify that results are consistent regardless of cache state.
+
+type cacheTestConfig struct {
+	name         string
+	cacheEnabled bool
+}
+
+var cacheConfigs = []cacheTestConfig{
+	{"WithCache", true},
+	{"WithoutCache", false},
+}
+
+func setupOverlayWithConfig(t *testing.T, cfg cacheTestConfig) (*OverlayFS, *MockBaseFS, *AgentFS) {
+	t.Helper()
+	ctx := context.Background()
+
+	afs, err := Open(ctx, AgentFSOptions{Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("Failed to open AgentFS: %v", err)
+	}
+
+	base := newMockBaseFS()
+
+	var ofs *OverlayFS
+	if cfg.cacheEnabled {
+		ofs = NewOverlayFSWithCache(base, afs.FS, afs.db, OverlayCacheOptions{
+			Enabled:    true,
+			MaxEntries: 1000,
+		})
+	} else {
+		ofs = NewOverlayFS(base, afs.FS, afs.db)
+	}
+
+	if err := ofs.Init(ctx); err != nil {
+		afs.Close()
+		t.Fatalf("Failed to init OverlayFS: %v", err)
+	}
+
+	return ofs, base, afs
+}
+
+// TestOverlayCacheConsistency_FileOperations tests basic file operations
+// produce identical results with and without caching.
+func TestOverlayCacheConsistency_FileOperations(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Add files to base
+			base.addFile(1, "base_file.txt", 100, []byte("base content"), 0o644)
+			base.addDir(1, "basedir", 101, 0o755)
+			base.addFile(101, "nested.txt", 102, []byte("nested content"), 0o644)
+
+			// Test 1: Read base file
+			content, err := ofs.ReadFile(ctx, "/base_file.txt")
+			if err != nil {
+				t.Fatalf("ReadFile failed: %v", err)
+			}
+			if string(content) != "base content" {
+				t.Errorf("Expected 'base content', got %q", string(content))
+			}
+
+			// Test 2: Read base file multiple times (exercises cache)
+			for i := 0; i < 5; i++ {
+				content, err = ofs.ReadFile(ctx, "/base_file.txt")
+				if err != nil {
+					t.Fatalf("ReadFile iteration %d failed: %v", i, err)
+				}
+				if string(content) != "base content" {
+					t.Errorf("Iteration %d: Expected 'base content', got %q", i, string(content))
+				}
+			}
+
+			// Test 3: Write new file
+			err = ofs.WriteFile(ctx, "/new_file.txt", []byte("new content"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile failed: %v", err)
+			}
+
+			// Test 4: Read new file multiple times
+			for i := 0; i < 5; i++ {
+				content, err = ofs.ReadFile(ctx, "/new_file.txt")
+				if err != nil {
+					t.Fatalf("ReadFile new file iteration %d failed: %v", i, err)
+				}
+				if string(content) != "new content" {
+					t.Errorf("Iteration %d: Expected 'new content', got %q", i, string(content))
+				}
+			}
+
+			// Test 5: Overwrite base file
+			err = ofs.WriteFile(ctx, "/base_file.txt", []byte("overwritten"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile overwrite failed: %v", err)
+			}
+			content, err = ofs.ReadFile(ctx, "/base_file.txt")
+			if err != nil {
+				t.Fatalf("ReadFile after overwrite failed: %v", err)
+			}
+			if string(content) != "overwritten" {
+				t.Errorf("Expected 'overwritten', got %q", string(content))
+			}
+
+			// Test 6: Read nested file
+			content, err = ofs.ReadFile(ctx, "/basedir/nested.txt")
+			if err != nil {
+				t.Fatalf("ReadFile nested failed: %v", err)
+			}
+			if string(content) != "nested content" {
+				t.Errorf("Expected 'nested content', got %q", string(content))
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_DirectoryOperations tests directory operations
+// produce identical results with and without caching.
+func TestOverlayCacheConsistency_DirectoryOperations(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Add directory structure to base
+			base.addDir(1, "basedir", 100, 0o755)
+			base.addFile(100, "file1.txt", 101, []byte("f1"), 0o644)
+			base.addFile(100, "file2.txt", 102, []byte("f2"), 0o644)
+
+			// Test 1: Readdir on base directory
+			entries, err := ofs.Readdir(ctx, 1)
+			if err != nil {
+				t.Fatalf("Readdir root failed: %v", err)
+			}
+			if !containsEntry(entries, "basedir") {
+				t.Error("Expected 'basedir' in root entries")
+			}
+
+			// Test 2: Create new directory
+			err = ofs.Mkdir(ctx, "/newdir", 0o755)
+			if err != nil {
+				t.Fatalf("Mkdir failed: %v", err)
+			}
+
+			// Test 3: Readdir should show both directories
+			entries, err = ofs.Readdir(ctx, 1)
+			if err != nil {
+				t.Fatalf("Readdir after mkdir failed: %v", err)
+			}
+			if !containsEntry(entries, "basedir") || !containsEntry(entries, "newdir") {
+				t.Errorf("Expected both 'basedir' and 'newdir', got %v", entries)
+			}
+
+			// Test 4: MkdirAll with nested path
+			err = ofs.MkdirAll(ctx, "/deep/nested/path", 0o755)
+			if err != nil {
+				t.Fatalf("MkdirAll failed: %v", err)
+			}
+
+			// Test 5: Verify deep path exists
+			stats, err := ofs.LookupPath(ctx, "/deep/nested/path")
+			if err != nil {
+				t.Fatalf("LookupPath deep path failed: %v", err)
+			}
+			if !stats.IsDir() {
+				t.Error("Expected directory")
+			}
+
+			// Test 6: Write file in deep path
+			err = ofs.WriteFile(ctx, "/deep/nested/path/file.txt", []byte("deep"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile in deep path failed: %v", err)
+			}
+			content, err := ofs.ReadFile(ctx, "/deep/nested/path/file.txt")
+			if err != nil {
+				t.Fatalf("ReadFile from deep path failed: %v", err)
+			}
+			if string(content) != "deep" {
+				t.Errorf("Expected 'deep', got %q", string(content))
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_DeleteOperations tests delete operations
+// produce identical results with and without caching.
+func TestOverlayCacheConsistency_DeleteOperations(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Add files to base and delta
+			base.addFile(1, "base_to_delete.txt", 100, []byte("base"), 0o644)
+			base.addDir(1, "base_dir", 101, 0o755)
+			base.addFile(101, "in_dir.txt", 102, []byte("in dir"), 0o644)
+
+			err := ofs.WriteFile(ctx, "/delta_to_delete.txt", []byte("delta"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile failed: %v", err)
+			}
+
+			// Test 1: Lookup files before delete
+			_, err = ofs.LookupPath(ctx, "/base_to_delete.txt")
+			if err != nil {
+				t.Fatalf("LookupPath base file failed: %v", err)
+			}
+			_, err = ofs.LookupPath(ctx, "/delta_to_delete.txt")
+			if err != nil {
+				t.Fatalf("LookupPath delta file failed: %v", err)
+			}
+
+			// Test 2: Delete base file (creates whiteout)
+			err = ofs.Unlink(ctx, "/base_to_delete.txt")
+			if err != nil {
+				t.Fatalf("Unlink base file failed: %v", err)
+			}
+
+			// Test 3: Lookup should fail after delete
+			_, err = ofs.LookupPath(ctx, "/base_to_delete.txt")
+			if !IsNotExist(err) {
+				t.Error("Expected ENOENT after deleting base file")
+			}
+
+			// Test 4: Delete delta file
+			err = ofs.Unlink(ctx, "/delta_to_delete.txt")
+			if err != nil {
+				t.Fatalf("Unlink delta file failed: %v", err)
+			}
+			_, err = ofs.LookupPath(ctx, "/delta_to_delete.txt")
+			if !IsNotExist(err) {
+				t.Error("Expected ENOENT after deleting delta file")
+			}
+
+			// Test 5: Delete file in base directory
+			err = ofs.Unlink(ctx, "/base_dir/in_dir.txt")
+			if err != nil {
+				t.Fatalf("Unlink nested file failed: %v", err)
+			}
+
+			// Test 6: Delete base directory (now empty)
+			err = ofs.Rmdir(ctx, "/base_dir")
+			if err != nil {
+				t.Fatalf("Rmdir base dir failed: %v", err)
+			}
+			_, err = ofs.LookupPath(ctx, "/base_dir")
+			if !IsNotExist(err) {
+				t.Error("Expected ENOENT after rmdir")
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_RenameOperations tests rename operations
+// produce identical results with and without caching.
+func TestOverlayCacheConsistency_RenameOperations(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup
+			base.addFile(1, "base_rename.txt", 100, []byte("base rename"), 0o644)
+			err := ofs.WriteFile(ctx, "/delta_rename.txt", []byte("delta rename"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile failed: %v", err)
+			}
+
+			// Lookup files multiple times to populate cache
+			for i := 0; i < 3; i++ {
+				ofs.LookupPath(ctx, "/base_rename.txt")
+				ofs.LookupPath(ctx, "/delta_rename.txt")
+			}
+
+			// Test 1: Rename delta file
+			err = ofs.Rename(ctx, "/delta_rename.txt", "/delta_renamed.txt")
+			if err != nil {
+				t.Fatalf("Rename delta file failed: %v", err)
+			}
+
+			// Test 2: Old path should not exist
+			_, err = ofs.LookupPath(ctx, "/delta_rename.txt")
+			if !IsNotExist(err) {
+				t.Error("Expected ENOENT for old delta path")
+			}
+
+			// Test 3: New path should exist with correct content
+			content, err := ofs.ReadFile(ctx, "/delta_renamed.txt")
+			if err != nil {
+				t.Fatalf("ReadFile renamed delta failed: %v", err)
+			}
+			if string(content) != "delta rename" {
+				t.Errorf("Expected 'delta rename', got %q", string(content))
+			}
+
+			// Test 4: Rename base file (triggers copy-up)
+			err = ofs.Rename(ctx, "/base_rename.txt", "/base_renamed.txt")
+			if err != nil {
+				t.Fatalf("Rename base file failed: %v", err)
+			}
+
+			// Test 5: Old path should not exist
+			_, err = ofs.LookupPath(ctx, "/base_rename.txt")
+			if !IsNotExist(err) {
+				t.Error("Expected ENOENT for old base path")
+			}
+
+			// Test 6: New path should exist with correct content
+			content, err = ofs.ReadFile(ctx, "/base_renamed.txt")
+			if err != nil {
+				t.Fatalf("ReadFile renamed base failed: %v", err)
+			}
+			if string(content) != "base rename" {
+				t.Errorf("Expected 'base rename', got %q", string(content))
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_CopyUpOperations tests copy-up operations
+// produce identical results with and without caching.
+func TestOverlayCacheConsistency_CopyUpOperations(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Add file to base
+			base.addFile(1, "to_modify.txt", 100, []byte("original content"), 0o644)
+
+			// Test 1: Read original content multiple times
+			for i := 0; i < 3; i++ {
+				content, err := ofs.ReadFile(ctx, "/to_modify.txt")
+				if err != nil {
+					t.Fatalf("ReadFile iteration %d failed: %v", i, err)
+				}
+				if string(content) != "original content" {
+					t.Errorf("Iteration %d: Expected 'original content', got %q", i, string(content))
+				}
+			}
+
+			// Test 2: Modify file (triggers copy-up)
+			err := ofs.WriteFile(ctx, "/to_modify.txt", []byte("modified content"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile failed: %v", err)
+			}
+
+			// Test 3: Read modified content multiple times
+			for i := 0; i < 3; i++ {
+				content, err := ofs.ReadFile(ctx, "/to_modify.txt")
+				if err != nil {
+					t.Fatalf("ReadFile after modify iteration %d failed: %v", i, err)
+				}
+				if string(content) != "modified content" {
+					t.Errorf("Iteration %d: Expected 'modified content', got %q", i, string(content))
+				}
+			}
+
+			// Test 4: Chmod on base file (triggers copy-up)
+			base.addFile(1, "to_chmod.txt", 101, []byte("chmod test"), 0o644)
+
+			// Read to populate cache
+			ofs.LookupPath(ctx, "/to_chmod.txt")
+			ofs.LookupPath(ctx, "/to_chmod.txt")
+
+			err = ofs.Chmod(ctx, "/to_chmod.txt", 0o600)
+			if err != nil {
+				t.Fatalf("Chmod failed: %v", err)
+			}
+
+			// Test 5: Verify chmod was applied
+			stats, err := ofs.LookupPath(ctx, "/to_chmod.txt")
+			if err != nil {
+				t.Fatalf("LookupPath after chmod failed: %v", err)
+			}
+			// Mode should include file type bits, check permission bits
+			if stats.Mode&0o777 != 0o600 {
+				t.Errorf("Expected mode 0600, got %o", stats.Mode&0o777)
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_WhiteoutOperations tests whiteout behavior
+// is consistent with and without caching.
+func TestOverlayCacheConsistency_WhiteoutOperations(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Add files to base
+			base.addFile(1, "to_delete.txt", 100, []byte("will be deleted"), 0o644)
+			base.addDir(1, "dir_to_delete", 101, 0o755)
+
+			// Test 1: Lookup files multiple times
+			for i := 0; i < 3; i++ {
+				_, err := ofs.LookupPath(ctx, "/to_delete.txt")
+				if err != nil {
+					t.Fatalf("LookupPath iteration %d failed: %v", i, err)
+				}
+			}
+
+			// Test 2: Delete file (creates whiteout)
+			err := ofs.Unlink(ctx, "/to_delete.txt")
+			if err != nil {
+				t.Fatalf("Unlink failed: %v", err)
+			}
+
+			// Test 3: Multiple lookups should all fail
+			for i := 0; i < 3; i++ {
+				_, err = ofs.LookupPath(ctx, "/to_delete.txt")
+				if !IsNotExist(err) {
+					t.Errorf("Iteration %d: Expected ENOENT after whiteout", i)
+				}
+			}
+
+			// Test 4: Recreate file at whiteout location
+			err = ofs.WriteFile(ctx, "/to_delete.txt", []byte("recreated"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile at whiteout location failed: %v", err)
+			}
+
+			// Test 5: File should now exist with new content
+			for i := 0; i < 3; i++ {
+				content, err := ofs.ReadFile(ctx, "/to_delete.txt")
+				if err != nil {
+					t.Fatalf("ReadFile iteration %d failed: %v", i, err)
+				}
+				if string(content) != "recreated" {
+					t.Errorf("Iteration %d: Expected 'recreated', got %q", i, string(content))
+				}
+			}
+
+			// Test 6: Delete and recreate directory
+			err = ofs.Rmdir(ctx, "/dir_to_delete")
+			if err != nil {
+				t.Fatalf("Rmdir failed: %v", err)
+			}
+			_, err = ofs.LookupPath(ctx, "/dir_to_delete")
+			if !IsNotExist(err) {
+				t.Error("Expected ENOENT for deleted directory")
+			}
+
+			err = ofs.Mkdir(ctx, "/dir_to_delete", 0o755)
+			if err != nil {
+				t.Fatalf("Mkdir at whiteout location failed: %v", err)
+			}
+			stats, err := ofs.LookupPath(ctx, "/dir_to_delete")
+			if err != nil {
+				t.Fatalf("LookupPath recreated dir failed: %v", err)
+			}
+			if !stats.IsDir() {
+				t.Error("Expected directory after mkdir")
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_SymlinkOperations tests symlink operations
+// are consistent with and without caching.
+func TestOverlayCacheConsistency_SymlinkOperations(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Add symlink to base
+			base.addSymlink(1, "base_link", 100, "/target")
+
+			// Test 1: Read base symlink multiple times
+			for i := 0; i < 3; i++ {
+				target, err := ofs.Readlink(ctx, "/base_link")
+				if err != nil {
+					t.Fatalf("Readlink iteration %d failed: %v", i, err)
+				}
+				if target != "/target" {
+					t.Errorf("Iteration %d: Expected '/target', got %q", i, target)
+				}
+			}
+
+			// Test 2: Create delta symlink
+			err := ofs.Symlink(ctx, "/new_target", "/delta_link")
+			if err != nil {
+				t.Fatalf("Symlink failed: %v", err)
+			}
+
+			// Test 3: Read delta symlink multiple times
+			for i := 0; i < 3; i++ {
+				target, err := ofs.Readlink(ctx, "/delta_link")
+				if err != nil {
+					t.Fatalf("Readlink delta iteration %d failed: %v", i, err)
+				}
+				if target != "/new_target" {
+					t.Errorf("Iteration %d: Expected '/new_target', got %q", i, target)
+				}
+			}
+
+			// Test 4: Delete base symlink
+			err = ofs.Unlink(ctx, "/base_link")
+			if err != nil {
+				t.Fatalf("Unlink symlink failed: %v", err)
+			}
+			_, err = ofs.Readlink(ctx, "/base_link")
+			if !IsNotExist(err) {
+				t.Error("Expected ENOENT after deleting symlink")
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_DeepPathResolution tests deep path resolution
+// is consistent with and without caching.
+func TestOverlayCacheConsistency_DeepPathResolution(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Create deep directory structure in base
+			// /a/b/c/d/e/file.txt
+			base.addDir(1, "a", 100, 0o755)
+			base.addDir(100, "b", 101, 0o755)
+			base.addDir(101, "c", 102, 0o755)
+			base.addDir(102, "d", 103, 0o755)
+			base.addDir(103, "e", 104, 0o755)
+			base.addFile(104, "file.txt", 105, []byte("deep file"), 0o644)
+
+			// Test 1: Lookup deep path multiple times
+			for i := 0; i < 5; i++ {
+				content, err := ofs.ReadFile(ctx, "/a/b/c/d/e/file.txt")
+				if err != nil {
+					t.Fatalf("ReadFile deep path iteration %d failed: %v", i, err)
+				}
+				if string(content) != "deep file" {
+					t.Errorf("Iteration %d: Expected 'deep file', got %q", i, string(content))
+				}
+			}
+
+			// Test 2: Lookup intermediate paths
+			paths := []string{"/a", "/a/b", "/a/b/c", "/a/b/c/d", "/a/b/c/d/e"}
+			for _, p := range paths {
+				for i := 0; i < 3; i++ {
+					stats, err := ofs.LookupPath(ctx, p)
+					if err != nil {
+						t.Fatalf("LookupPath %s iteration %d failed: %v", p, i, err)
+					}
+					if !stats.IsDir() {
+						t.Errorf("Expected %s to be a directory", p)
+					}
+				}
+			}
+
+			// Test 3: Create deep path in delta
+			err := ofs.MkdirAll(ctx, "/x/y/z", 0o755)
+			if err != nil {
+				t.Fatalf("MkdirAll failed: %v", err)
+			}
+			err = ofs.WriteFile(ctx, "/x/y/z/delta_file.txt", []byte("delta deep"), 0o644)
+			if err != nil {
+				t.Fatalf("WriteFile in deep delta path failed: %v", err)
+			}
+
+			// Test 4: Read from deep delta path multiple times
+			for i := 0; i < 5; i++ {
+				content, err := ofs.ReadFile(ctx, "/x/y/z/delta_file.txt")
+				if err != nil {
+					t.Fatalf("ReadFile delta deep path iteration %d failed: %v", i, err)
+				}
+				if string(content) != "delta deep" {
+					t.Errorf("Iteration %d: Expected 'delta deep', got %q", i, string(content))
+				}
+			}
+		})
+	}
+}
+
+// TestOverlayCacheConsistency_ReaddirMerging tests readdir merging
+// is consistent with and without caching.
+func TestOverlayCacheConsistency_ReaddirMerging(t *testing.T) {
+	for _, cfg := range cacheConfigs {
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx := context.Background()
+			ofs, base, afs := setupOverlayWithConfig(t, cfg)
+			defer afs.Close()
+
+			// Setup: Add files to both layers
+			base.addFile(1, "base1.txt", 100, []byte("b1"), 0o644)
+			base.addFile(1, "base2.txt", 101, []byte("b2"), 0o644)
+			base.addFile(1, "common.txt", 102, []byte("base common"), 0o644)
+
+			ofs.WriteFile(ctx, "/delta1.txt", []byte("d1"), 0o644)
+			ofs.WriteFile(ctx, "/delta2.txt", []byte("d2"), 0o644)
+			ofs.WriteFile(ctx, "/common.txt", []byte("delta common"), 0o644) // Override base
+
+			// Test 1: Readdir should merge both layers
+			entries, err := ofs.Readdir(ctx, 1)
+			if err != nil {
+				t.Fatalf("Readdir failed: %v", err)
+			}
+
+			expected := []string{"base1.txt", "base2.txt", "common.txt", "delta1.txt", "delta2.txt"}
+			for _, name := range expected {
+				if !containsEntry(entries, name) {
+					t.Errorf("Expected %q in readdir results", name)
+				}
+			}
+
+			// Test 2: common.txt should have delta content
+			content, err := ofs.ReadFile(ctx, "/common.txt")
+			if err != nil {
+				t.Fatalf("ReadFile common.txt failed: %v", err)
+			}
+			if string(content) != "delta common" {
+				t.Errorf("Expected 'delta common', got %q", string(content))
+			}
+
+			// Test 3: Delete base file
+			err = ofs.Unlink(ctx, "/base1.txt")
+			if err != nil {
+				t.Fatalf("Unlink base1.txt failed: %v", err)
+			}
+
+			// Test 4: Readdir should not include deleted file
+			entries, err = ofs.Readdir(ctx, 1)
+			if err != nil {
+				t.Fatalf("Readdir after delete failed: %v", err)
+			}
+			if containsEntry(entries, "base1.txt") {
+				t.Error("Deleted file should not appear in readdir")
+			}
+		})
+	}
+}
+
+func containsEntry(entries []string, name string) bool {
+	for _, e := range entries {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}

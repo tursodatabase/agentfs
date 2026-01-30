@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/tursodatabase/agentfs/sdk/go/internal/cache"
 )
 
 // Layer indicates which layer an inode belongs to in an overlay filesystem.
@@ -49,6 +51,17 @@ type BaseFS interface {
 	Readlink(ctx context.Context, ino int64) (string, error)
 }
 
+// OverlayCacheOptions configures the LRU path cache for OverlayFS.
+type OverlayCacheOptions struct {
+	// Enabled enables the LRU path cache.
+	Enabled bool
+	// MaxEntries is the maximum number of path->inode entries to cache.
+	// Defaults to 10000 if not specified.
+	MaxEntries int
+	// TTL is the time-to-live for cache entries. 0 means no expiration.
+	TTL time.Duration
+}
+
 // OverlayFS provides a copy-on-write overlay filesystem.
 // It combines a read-only base layer with a writable delta layer (AgentFS).
 // All modifications are written to the delta layer, while reads fall back
@@ -64,8 +77,11 @@ type OverlayFS struct {
 	// Reverse mapping: (layer, underlying_ino) -> overlay_ino
 	reverseMap sync.Map // map[layerInoKey]int64
 
-	// Path to overlay inode mapping
+	// Path to overlay inode mapping (unbounded, used for inode stability)
 	pathMap sync.Map // map[string]int64
+
+	// LRU cache for path resolution (optional, bounded)
+	cache cache.PathCache
 
 	// Whiteout paths (deleted from base)
 	whiteouts sync.Map // map[string]bool
@@ -86,10 +102,28 @@ type layerInoKey struct {
 // NewOverlayFS creates a new overlay filesystem.
 // The base layer is read-only, and the delta layer receives all modifications.
 func NewOverlayFS(base BaseFS, delta *Filesystem, db *sql.DB) *OverlayFS {
+	return NewOverlayFSWithCache(base, delta, db, OverlayCacheOptions{})
+}
+
+// NewOverlayFSWithCache creates a new overlay filesystem with optional LRU caching.
+// The base layer is read-only, and the delta layer receives all modifications.
+func NewOverlayFSWithCache(base BaseFS, delta *Filesystem, db *sql.DB, cacheOpts OverlayCacheOptions) *OverlayFS {
 	ofs := &OverlayFS{
 		base:  base,
 		delta: delta,
 		db:    db,
+	}
+
+	// Initialize LRU cache if enabled
+	if cacheOpts.Enabled {
+		maxEntries := cacheOpts.MaxEntries
+		if maxEntries <= 0 {
+			maxEntries = 10000
+		}
+		pathCache, err := cache.NewLRU(maxEntries, cacheOpts.TTL)
+		if err == nil {
+			ofs.cache = pathCache
+		}
 	}
 
 	// Initialize root inode mapping (root is always inode 1 in both layers)
@@ -260,6 +294,10 @@ func (ofs *OverlayFS) createWhiteout(ctx context.Context, p string) error {
 		return err
 	}
 	ofs.whiteouts.Store(p, true)
+
+	// Invalidate cache - path is now hidden
+	ofs.invalidateCachePrefix(p)
+
 	return nil
 }
 
@@ -274,6 +312,10 @@ func (ofs *OverlayFS) removeWhiteout(ctx context.Context, p string) error {
 		return err
 	}
 	ofs.whiteouts.Delete(p)
+
+	// Invalidate cache - path visibility changed
+	ofs.invalidateCachePrefix(p)
+
 	return nil
 }
 
@@ -559,6 +601,9 @@ func (ofs *OverlayFS) copyUp(ctx context.Context, p string, baseIno int64) (int6
 	if err := ofs.addOriginMapping(ctx, deltaIno, baseIno); err != nil {
 		return 0, err
 	}
+
+	// Invalidate cache - inode mapping changed from base to delta
+	ofs.invalidateCache(p)
 
 	return deltaIno, nil
 }
@@ -856,7 +901,7 @@ func (ofs *OverlayFS) ReaddirPlus(ctx context.Context, ino int64) ([]DirEntry, e
 func (ofs *OverlayFS) WriteFile(ctx context.Context, p string, data []byte, mode int64) error {
 	p = normalizePath(p)
 
-	// Remove whiteout if exists
+	// Remove whiteout if exists (this also invalidates cache)
 	if err := ofs.removeWhiteout(ctx, p); err != nil {
 		return err
 	}
@@ -875,6 +920,9 @@ func (ofs *OverlayFS) WriteFile(ctx context.Context, p string, data []byte, mode
 			return ErrNotDir("write", parentP)
 		}
 	}
+
+	// Invalidate cache before write (inode may change)
+	ofs.invalidateCache(p)
 
 	// Write to delta layer
 	return ofs.delta.WriteFile(ctx, p, data, mode)
@@ -939,6 +987,14 @@ func (ofs *OverlayFS) LookupPath(ctx context.Context, p string) (*Stats, error) 
 		return nil, ErrNoent("lookup", p)
 	}
 
+	// Check LRU cache first
+	if ofs.cache != nil {
+		if ino, ok := ofs.cache.Get(p); ok {
+			return ofs.Stat(ctx, ino)
+		}
+	}
+
+	// Cache miss - do full path resolution
 	components := strings.Split(strings.Trim(p, "/"), "/")
 	currentIno := int64(RootIno)
 
@@ -948,6 +1004,11 @@ func (ofs *OverlayFS) LookupPath(ctx context.Context, p string) (*Stats, error) 
 			return nil, err
 		}
 		currentIno = stats.Ino
+	}
+
+	// Cache the result
+	if ofs.cache != nil {
+		ofs.cache.Set(p, currentIno)
 	}
 
 	return ofs.Stat(ctx, currentIno)
@@ -960,7 +1021,7 @@ func (ofs *OverlayFS) Mkdir(ctx context.Context, p string, mode int64) error {
 	// Check if whiteout exists - if so, we're recreating a deleted item
 	wasWhiteout := ofs.isWhiteout(p)
 
-	// Remove whiteout if exists
+	// Remove whiteout if exists (also invalidates cache)
 	if err := ofs.removeWhiteout(ctx, p); err != nil {
 		return err
 	}
@@ -980,6 +1041,9 @@ func (ofs *OverlayFS) Mkdir(ctx context.Context, p string, mode int64) error {
 		}
 	}
 
+	// Invalidate cache before creating directory
+	ofs.invalidateCache(p)
+
 	return ofs.delta.Mkdir(ctx, p, mode)
 }
 
@@ -996,7 +1060,7 @@ func (ofs *OverlayFS) MkdirAll(ctx context.Context, p string, mode int64) error 
 	for _, component := range components {
 		currentPath = currentPath + "/" + component
 
-		// Remove whiteout if exists
+		// Remove whiteout if exists (also invalidates cache)
 		if err := ofs.removeWhiteout(ctx, currentPath); err != nil {
 			return err
 		}
@@ -1006,6 +1070,8 @@ func (ofs *OverlayFS) MkdirAll(ctx context.Context, p string, mode int64) error 
 			if !IsNotExist(err) {
 				return err
 			}
+			// Invalidate cache before creating
+			ofs.invalidateCache(currentPath)
 			// Create in delta
 			if err := ofs.delta.Mkdir(ctx, currentPath, mode); err != nil {
 				return err
@@ -1034,6 +1100,9 @@ func (ofs *OverlayFS) Unlink(ctx context.Context, p string) error {
 		return ErrIsDir("unlink", p)
 	}
 
+	// Invalidate cache
+	ofs.invalidateCache(p)
+
 	// Try to remove from delta
 	deltaErr := ofs.delta.Unlink(ctx, p)
 	if deltaErr != nil && !IsNotExist(deltaErr) {
@@ -1043,7 +1112,7 @@ func (ofs *OverlayFS) Unlink(ctx context.Context, p string) error {
 	// Check if exists in base
 	baseIno, err := ofs.resolvePathToBaseIno(ctx, p)
 	if err == nil && baseIno != 0 {
-		// Create whiteout
+		// Create whiteout (also invalidates cache)
 		if err := ofs.createWhiteout(ctx, p); err != nil {
 			return err
 		}
@@ -1077,6 +1146,9 @@ func (ofs *OverlayFS) Rmdir(ctx context.Context, p string) error {
 		return ErrNotEmpty("rmdir", p)
 	}
 
+	// Invalidate cache (directory and any cached children)
+	ofs.invalidateCachePrefix(p)
+
 	// Try to remove from delta
 	deltaErr := ofs.delta.Rmdir(ctx, p)
 	if deltaErr != nil && !IsNotExist(deltaErr) {
@@ -1086,7 +1158,7 @@ func (ofs *OverlayFS) Rmdir(ctx context.Context, p string) error {
 	// Check if exists in base
 	baseIno, err := ofs.resolvePathToBaseIno(ctx, p)
 	if err == nil && baseIno != 0 {
-		// Create whiteout
+		// Create whiteout (also invalidates cache)
 		if err := ofs.createWhiteout(ctx, p); err != nil {
 			return err
 		}
@@ -1110,7 +1182,7 @@ func (ofs *OverlayFS) Rename(ctx context.Context, oldPath, newPath string) error
 		return err
 	}
 
-	// Remove whiteout at destination if exists
+	// Remove whiteout at destination if exists (also invalidates cache)
 	if err := ofs.removeWhiteout(ctx, newPath); err != nil {
 		return err
 	}
@@ -1129,12 +1201,16 @@ func (ofs *OverlayFS) Rename(ctx context.Context, oldPath, newPath string) error
 		}
 	}
 
+	// Invalidate cache for both old and new paths (and children if directory)
+	ofs.invalidateCachePrefix(oldPath)
+	ofs.invalidateCachePrefix(newPath)
+
 	// Perform rename in delta
 	if err := ofs.delta.Rename(ctx, oldPath, newPath); err != nil {
 		return err
 	}
 
-	// Create whiteout at old path if it existed in base
+	// Create whiteout at old path if it existed in base (also invalidates cache)
 	baseIno, err := ofs.resolvePathToBaseIno(ctx, oldPath)
 	if err == nil && baseIno != 0 {
 		if err := ofs.createWhiteout(ctx, oldPath); err != nil {
@@ -1173,10 +1249,13 @@ func (ofs *OverlayFS) Link(ctx context.Context, existingPath, newPath string) er
 		}
 	}
 
-	// Remove whiteout at destination if exists
+	// Remove whiteout at destination if exists (also invalidates cache)
 	if err := ofs.removeWhiteout(ctx, newPath); err != nil {
 		return err
 	}
+
+	// Invalidate cache for new path
+	ofs.invalidateCache(newPath)
 
 	return ofs.delta.Link(ctx, existingPath, newPath)
 }
@@ -1185,10 +1264,13 @@ func (ofs *OverlayFS) Link(ctx context.Context, existingPath, newPath string) er
 func (ofs *OverlayFS) Symlink(ctx context.Context, target, linkPath string) error {
 	linkPath = normalizePath(linkPath)
 
-	// Remove whiteout if exists
+	// Remove whiteout if exists (also invalidates cache)
 	if err := ofs.removeWhiteout(ctx, linkPath); err != nil {
 		return err
 	}
+
+	// Invalidate cache for link path
+	ofs.invalidateCache(linkPath)
 
 	return ofs.delta.Symlink(ctx, target, linkPath)
 }
@@ -1268,4 +1350,41 @@ func (ofs *OverlayFS) Utimes(ctx context.Context, p string, atime, mtime int64) 
 	}
 
 	return ofs.delta.Utimes(ctx, p, atime, mtime)
+}
+
+// =============================================================================
+// Cache Operations
+// =============================================================================
+
+// invalidateCache invalidates the cache entry for a single path.
+func (ofs *OverlayFS) invalidateCache(p string) {
+	if ofs.cache != nil {
+		ofs.cache.Delete(p)
+	}
+}
+
+// invalidateCachePrefix invalidates all cache entries with the given prefix.
+// Used when a directory is deleted or renamed.
+func (ofs *OverlayFS) invalidateCachePrefix(prefix string) {
+	if ofs.cache != nil {
+		ofs.cache.Delete(prefix)
+		ofs.cache.DeletePrefix(prefix + "/")
+	}
+}
+
+// CacheStats returns cache statistics, or nil if caching is disabled.
+func (ofs *OverlayFS) CacheStats() *cache.Stats {
+	if ofs.cache == nil {
+		return nil
+	}
+	stats := ofs.cache.Stats()
+	return &stats
+}
+
+// ClearCache clears all cached path resolutions.
+// This is useful when external changes may have occurred.
+func (ofs *OverlayFS) ClearCache() {
+	if ofs.cache != nil {
+		ofs.cache.Clear()
+	}
 }
