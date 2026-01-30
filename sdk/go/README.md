@@ -139,25 +139,25 @@ type CacheOptions struct {
 
 ### Filesystem
 
-| Method | Description |
-|--------|-------------|
-| `Stat(path)` | Get file/directory metadata |
-| `Readdir(path)` | List directory entries |
-| `ReaddirPlus(path)` | List entries with stats |
-| `Mkdir(path, mode)` | Create directory |
-| `MkdirAll(path, mode)` | Create directory and parents |
-| `ReadFile(path)` | Read entire file |
-| `WriteFile(path, data, mode)` | Write file (creates parents) |
-| `Unlink(path)` | Delete file |
-| `Rmdir(path)` | Delete empty directory |
-| `Rename(old, new)` | Move/rename file or directory |
-| `Link(existing, new)` | Create hard link |
-| `Symlink(target, link)` | Create symbolic link |
-| `Readlink(path)` | Read symlink target |
-| `Chmod(path, mode)` | Change permissions |
-| `Utimes(path, atime, mtime)` | Update timestamps |
-| `Open(path, flags)` | Open file handle |
-| `Create(path, mode)` | Create new file handle |
+| Method                        | Description                   |
+|-------------------------------|-------------------------------|
+| `Stat(path)`                  | Get file/directory metadata   |
+| `Readdir(path)`               | List directory entries        |
+| `ReaddirPlus(path)`           | List entries with stats       |
+| `Mkdir(path, mode)`           | Create directory              |
+| `MkdirAll(path, mode)`        | Create directory and parents  |
+| `ReadFile(path)`              | Read entire file              |
+| `WriteFile(path, data, mode)` | Write file (creates parents)  |
+| `Unlink(path)`                | Delete file                   |
+| `Rmdir(path)`                 | Delete empty directory        |
+| `Rename(old, new)`            | Move/rename file or directory |
+| `Link(existing, new)`         | Create hard link              |
+| `Symlink(target, link)`       | Create symbolic link          |
+| `Readlink(path)`              | Read symlink target           |
+| `Chmod(path, mode)`           | Change permissions            |
+| `Utimes(path, atime, mtime)`  | Update timestamps             |
+| `Open(path, flags)`           | Open file handle              |
+| `Create(path, mode)`          | Create new file handle        |
 
 ### File Handle
 
@@ -190,33 +190,33 @@ io.Copy(destFile, srcFile)         // Copy between files
 io.Copy(f, bytes.NewReader(data))  // Write from bytes.Reader
 ```
 
-| Method | Description |
-|--------|-------------|
-| `Read(p []byte)` | Read sequentially (io.Reader) |
-| `Write(p []byte)` | Write sequentially (io.Writer) |
-| `Seek(offset, whence)` | Set position (io.Seeker) |
-| `ReadAt(p, offset)` | Read at offset (io.ReaderAt) |
-| `WriteAt(p, offset)` | Write at offset (io.WriterAt) |
-| `Pread(ctx, buf, offset)` | Positioned read with context |
-| `Pwrite(ctx, data, offset)` | Positioned write with context |
-| `Truncate(ctx, size)` | Set file size |
-| `Stat(ctx)` | Get metadata |
-| `Size()` | Get current file size |
-| `Offset()` | Get current position |
-| `Close()` | Close handle |
+| Method                      | Description                    |
+|-----------------------------|--------------------------------|
+| `Read(p []byte)`            | Read sequentially (io.Reader)  |
+| `Write(p []byte)`           | Write sequentially (io.Writer) |
+| `Seek(offset, whence)`      | Set position (io.Seeker)       |
+| `ReadAt(p, offset)`         | Read at offset (io.ReaderAt)   |
+| `WriteAt(p, offset)`        | Write at offset (io.WriterAt)  |
+| `Pread(ctx, buf, offset)`   | Positioned read with context   |
+| `Pwrite(ctx, data, offset)` | Positioned write with context  |
+| `Truncate(ctx, size)`       | Set file size                  |
+| `Stat(ctx)`                 | Get metadata                   |
+| `Size()`                    | Get current file size          |
+| `Offset()`                  | Get current position           |
+| `Close()`                   | Close handle                   |
 
 ### Key-Value Store
 
-| Method | Description |
-|--------|-------------|
-| `Set(key, value)` | Store value (JSON-serialized) |
-| `Get(key, dest)` | Retrieve and unmarshal value |
-| `GetRaw(key)` | Get raw JSON value |
-| `Delete(key)` | Remove key |
-| `Has(key)` | Check if key exists |
-| `Keys(prefix)` | List keys (optionally by prefix) |
-| `List(prefix)` | List keys with metadata |
-| `Clear(prefix)` | Delete keys (optionally by prefix) |
+| Method            | Description                        |
+|-------------------|------------------------------------|
+| `Set(key, value)` | Store value (JSON-serialized)      |
+| `Get(key, dest)`  | Retrieve and unmarshal value       |
+| `GetRaw(key)`     | Get raw JSON value                 |
+| `Delete(key)`     | Remove key                         |
+| `Has(key)`        | Check if key exists                |
+| `Keys(prefix)`    | List keys (optionally by prefix)   |
+| `List(prefix)`    | List keys with metadata            |
+| `Clear(prefix)`   | Delete keys (optionally by prefix) |
 
 #### Generic Helper Functions (Go 1.18+)
 
@@ -244,25 +244,25 @@ name, err := agentfs.KVGetOrZero[string](ctx, afs.KV, "user:name")    // "" if n
 err := agentfs.KVSet(ctx, afs.KV, "config:version", "1.0.0")
 ```
 
-| Function | Description |
-|----------|-------------|
-| `KVGet[T](ctx, kv, key)` | Type-safe get, returns value directly |
-| `KVGetOrDefault[T](ctx, kv, key, default)` | Returns default if key not found |
-| `KVGetOrZero[T](ctx, kv, key)` | Returns zero value if key not found |
-| `KVSet[T](ctx, kv, key, value)` | Type-safe set (wrapper for consistency) |
+| Function                                   | Description                             |
+|--------------------------------------------|-----------------------------------------|
+| `KVGet[T](ctx, kv, key)`                   | Type-safe get, returns value directly   |
+| `KVGetOrDefault[T](ctx, kv, key, default)` | Returns default if key not found        |
+| `KVGetOrZero[T](ctx, kv, key)`             | Returns zero value if key not found     |
+| `KVSet[T](ctx, kv, key, value)`            | Type-safe set (wrapper for consistency) |
 
 ### Tool Calls
 
-| Method | Description |
-|--------|-------------|
-| `Start(name, params)` | Begin tracking a call |
-| `PendingCall.Success(result)` | Mark as successful |
-| `PendingCall.Error(err)` | Mark as failed |
-| `Record(...)` | Insert complete record |
-| `Get(id)` | Get call by ID |
-| `GetByName(name, limit)` | Get calls by name |
-| `GetRecent(since, limit)` | Get recent calls |
-| `GetStats()` | Get aggregated statistics |
+| Method                        | Description               |
+|-------------------------------|---------------------------|
+| `Start(name, params)`         | Begin tracking a call     |
+| `PendingCall.Success(result)` | Mark as successful        |
+| `PendingCall.Error(err)`      | Mark as failed            |
+| `Record(...)`                 | Insert complete record    |
+| `Get(id)`                     | Get call by ID            |
+| `GetByName(name, limit)`      | Get calls by name         |
+| `GetRecent(since, limit)`     | Get recent calls          |
+| `GetStats()`                  | Get aggregated statistics |
 
 ## Error Handling
 
@@ -314,11 +314,11 @@ func (m *MockFS) Stat(ctx context.Context, path string) (*agentfs.Stats, error) 
 svc := &MyService{fs: &MockFS{}}
 ```
 
-| Interface | Concrete Type |
-|-----------|---------------|
-| `FileSystem` | `*Filesystem` |
-| `KVStoreInterface` | `*KVStore` |
-| `ToolCallsInterface` | `*ToolCalls` |
+| Interface            | Concrete Type |
+|----------------------|---------------|
+| `FileSystem`         | `*Filesystem` |
+| `KVStoreInterface`   | `*KVStore`    |
+| `ToolCallsInterface` | `*ToolCalls`  |
 
 These interfaces are entirely optional. The SDK continues to return concrete types, and users who don't need mocking can ignore the interfaces entirely.
 
@@ -363,13 +363,13 @@ iofsWithCtx := iofs.WithContext(ctx)
 
 ### Supported Interfaces
 
-| Interface | Status |
-|-----------|--------|
-| `fs.FS` | Supported |
-| `fs.StatFS` | Supported |
-| `fs.ReadFileFS` | Supported |
-| `fs.ReadDirFS` | Supported |
-| `fs.SubFS` | Supported |
+| Interface        | Status                      |
+|------------------|-----------------------------|
+| `fs.FS`          | Supported                   |
+| `fs.StatFS`      | Supported                   |
+| `fs.ReadFileFS`  | Supported                   |
+| `fs.ReadDirFS`   | Supported                   |
+| `fs.SubFS`       | Supported                   |
 | `fs.ReadDirFile` | Supported (for directories) |
 
 **Note:** Use `fs.Glob(iofs, pattern)` for glob matching - it uses the `ReadDir` implementation.
@@ -384,62 +384,62 @@ go test -bench=. -run=^$ -benchmem
 
 ### Sequential I/O (1MB files)
 
-| Operation | Throughput | Allocs/op |
-|-----------|------------|-----------|
-| WriteFile | 274 MB/s | 1,898 |
-| ReadFile | 752 MB/s | 1,101 |
-| Streaming Write | 93 MB/s | 13,628 |
-| Streaming Read | 167 MB/s | 12,612 |
+| Operation       | Throughput | Allocs/op |
+|-----------------|------------|-----------|
+| WriteFile       | 274 MB/s   | 1,898     |
+| ReadFile        | 752 MB/s   | 1,101     |
+| Streaming Write | 93 MB/s    | 13,628    |
+| Streaming Read  | 167 MB/s   | 12,612    |
 
 ### Random I/O (16MB file, 4KB operations)
 
-| Operation | Throughput |
-|-----------|------------|
-| RandomRead | 138 MB/s |
-| RandomWrite | 56 MB/s |
+| Operation   | Throughput |
+|-------------|------------|
+| RandomRead  | 138 MB/s   |
+| RandomWrite | 56 MB/s    |
 
 ### Metadata Operations
 
-| Operation | Latency |
-|-----------|---------|
-| Stat | 13 μs |
-| Readdir (100 entries) | 57 μs |
-| Mkdir | 60 μs |
-| Rename | 24 μs |
-| Create+Delete | 132 μs |
+| Operation             | Latency |
+|-----------------------|---------|
+| Stat                  | 13 μs   |
+| Readdir (100 entries) | 57 μs   |
+| Mkdir                 | 60 μs   |
+| Rename                | 24 μs   |
+| Create+Delete         | 132 μs  |
 
 ### Path Resolution
 
-| Depth | Latency |
-|-------|---------|
-| 1 level | 18 μs |
-| 10 levels | 60 μs |
-| 20 levels | 106 μs |
+| Depth     | Latency |
+|-----------|---------|
+| 1 level   | 18 μs   |
+| 10 levels | 60 μs   |
+| 20 levels | 106 μs  |
 
 ### Chunk Size Impact (1MB file)
 
-| Chunk Size | Write | Read |
-|------------|-------|------|
+| Chunk Size    | Write    | Read     |
+|---------------|----------|----------|
 | 4KB (default) | 266 MB/s | 740 MB/s |
-| 16KB | 491 MB/s | 644 MB/s |
-| 64KB | 947 MB/s | 842 MB/s |
+| 16KB          | 491 MB/s | 644 MB/s |
+| 64KB          | 947 MB/s | 842 MB/s |
 
 ### KV Store
 
-| Operation | Latency |
-|-----------|---------|
-| Get (small value) | 4 μs |
-| Set (small value) | 16 μs |
-| Has | 3 μs |
-| Keys (100 keys) | 56 μs |
+| Operation         | Latency |
+|-------------------|---------|
+| Get (small value) | 4 μs    |
+| Set (small value) | 16 μs   |
+| Has               | 3 μs    |
+| Keys (100 keys)   | 56 μs   |
 
 ### Path Resolution Cache
 
-| Depth | Without Cache | With Cache | Speedup |
-|-------|---------------|------------|---------|
-| 1 level | 18 μs | 9 μs | 2x |
-| 10 levels | 60 μs | 9 μs | 6.7x |
-| 20 levels | 108 μs | 9 μs | 12x |
+| Depth     | Without Cache | With Cache | Speedup |
+|-----------|---------------|------------|---------|
+| 1 level   | 18 μs         | 9 μs       | 2x      |
+| 10 levels | 60 μs         | 9 μs       | 6.7x    |
+| 20 levels | 108 μs        | 9 μs       | 12x     |
 
 ### Key Insights
 
