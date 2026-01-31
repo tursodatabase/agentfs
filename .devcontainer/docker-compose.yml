@@ -26,7 +26,7 @@ services:
         CLAUDE_CODE_VERSION: "latest"
         GIT_DELTA_VERSION: "0.18.2"
         ZSH_IN_DOCKER_VERSION: "1.2.0"
-        GO_VERSION: "1.24.10"
+        GO_VERSION: "1.25.6"
         RUST_VERSION: "1.88.0"
         PYTHON_VERSION: "3.11"
     environment:
