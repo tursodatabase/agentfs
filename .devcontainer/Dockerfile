@@ -1,11 +1,14 @@
 FROM node:20
 
+ARG BUILDOS
+ARG BUILDARCH
 ARG TZ
 ARG CLAUDE_CODE_VERSION
 ARG GIT_DELTA_VERSION
 ARG ZSH_IN_DOCKER_VERSION
 ARG RUST_VERSION
 ARG PYTHON_VERSION
+ARG GO_VERSION
 
 ENV TZ="$TZ"
 
@@ -40,6 +43,10 @@ ENV DEVCONTAINER=true
 RUN mkdir -p /workspace /home/node/.claude && \
   chown -R node:node /workspace /home/node/.claude
 
+# Remove existing Golang installation, if any, and set permissions
+RUN rm -rf /usr/local/go ; mkdir -p /usr/local/go && \
+  chown node:node /usr/local /usr/local/go
+
 WORKDIR /workspace
 
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -69,11 +76,20 @@ ENV PATH=$PATH:/home/node/.cargo/bin:/home/node/.local/bin
 RUN curl -Ls https://astral.sh/uv/install.sh | sh
 RUN uv python install ${PYTHON_VERSION}
 
+# Install Go
+
+RUN  curl -LsSfo go${GO_VERSION}.${BUILDOS}-${BUILDARCH}.tar.gz https://go.dev/dl/go${GO_VERSION}.${BUILDOS}-${BUILDARCH}.tar.gz && \
+     tar -C /usr/local -xzf go${GO_VERSION}.${BUILDOS}-${BUILDARCH}.tar.gz && \
+     rm go${GO_VERSION}.${BUILDOS}-${BUILDARCH}.tar.gz
+
+ENV PATH=$PATH:/usr/local/go/bin
+
 # Check installation
 
 RUN rustc --version \
  && cargo --version \
- && uv --version
+ && uv --version \
+ && go version
 
 # Install global packages
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
