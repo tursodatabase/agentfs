@@ -21,4 +21,5 @@ DIR="$(dirname "$0")"
 "$DIR/test-run-git.sh" || true  # Requires user namespaces (may fail in CI)
 "$DIR/test-mount.sh"
 "$DIR/test-overlay-whiteout.sh"
+"$DIR/test-overlay-delta-in-base-dir.sh"
 "$DIR/test-symlinks.sh" || true  # Requires user namespaces (may fail in CI)
