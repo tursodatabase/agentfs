@@ -13,6 +13,7 @@ use super::{
     DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, MAX_NAME_LEN, S_IFLNK, S_IFMT, S_IFREG,
 };
 use crate::connection_pool::ConnectionPool;
+use crate::schema::AGENTFS_SCHEMA_VERSION;
 
 const ROOT_INO: i64 = 1;
 const DEFAULT_CHUNK_SIZE: usize = 4096;
@@ -570,6 +571,13 @@ impl AgentFS {
             )
             .await?;
         }
+
+        // Set schema version
+        conn.execute(
+            "INSERT OR REPLACE INTO fs_config (key, value) VALUES ('schema_version', ?)",
+            [AGENTFS_SCHEMA_VERSION],
+        )
+        .await?;
 
         // Ensure root directory exists with correct ownership
         let mut rows = conn

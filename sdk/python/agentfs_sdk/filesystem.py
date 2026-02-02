@@ -168,6 +168,12 @@ class Filesystem:
         else:
             chunk_size = int(config[0]) if config[0] else DEFAULT_CHUNK_SIZE
 
+        # Set schema version (keep in sync with AGENTFS_SCHEMA_VERSION in sdk/rust/src/schema.rs)
+        await self._db.execute(
+            "INSERT OR REPLACE INTO fs_config (key, value) VALUES ('schema_version', '0.4')"
+        )
+        await self._db.commit()
+
         # Ensure root directory exists
         cursor = await self._db.execute("SELECT ino FROM fs_inode WHERE ino = ?", (self._root_ino,))
         root = await cursor.fetchone()

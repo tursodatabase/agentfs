@@ -1,4 +1,4 @@
-use agentfs_sdk::{AgentFSOptions, FileSystem, HostFS, OverlayFS};
+use agentfs_sdk::{error::Error as SdkError, AgentFSOptions, FileSystem, HostFS, OverlayFS};
 use anyhow::{Context, Result};
 use std::{
     path::{Path, PathBuf},
@@ -87,6 +87,22 @@ pub fn mount(args: MountArgs) -> Result<()> {
 fn mount_fuse(args: MountArgs) -> Result<()> {
     let opts = AgentFSOptions::resolve(&args.id_or_path)?;
 
+    // Check schema version before daemonizing. This allows us to show the error
+    // message to the user directly, rather than having it appear in daemon logs.
+    {
+        let rt = crate::get_runtime();
+        let db_path = opts.db_path()?;
+        let result: Result<(), SdkError> = rt.block_on(async {
+            let db = turso::Builder::new_local(&db_path).build().await?;
+            let conn = db.connect()?;
+            agentfs_sdk::schema::check_schema_version(&conn).await?;
+            Ok(())
+        });
+        if let Err(SdkError::SchemaVersionMismatch { found, expected }) = result {
+            exit_schema_version_mismatch(&found, &expected, &args.id_or_path);
+        }
+    }
+
     let fsname = format!(
         "agentfs:{}",
         std::fs::canonicalize(&args.id_or_path)
@@ -107,7 +123,7 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
     };
 
     let fuse_opts = FuseMountOptions {
-        mountpoint: args.mountpoint,
+        mountpoint: args.mountpoint.clone(),
         auto_unmount: args.auto_unmount,
         allow_root: args.allow_root,
         allow_other: args.allow_other,
@@ -116,9 +132,16 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
         gid: args.gid,
     };
 
+    let id_or_path = args.id_or_path.clone();
     let mount = move || {
         let rt = crate::get_runtime();
-        let agentfs = rt.block_on(open_agentfs(opts))?;
+        let agentfs = match rt.block_on(open_agentfs(opts)) {
+            Ok(fs) => fs,
+            Err(SdkError::SchemaVersionMismatch { found, expected }) => {
+                exit_schema_version_mismatch(&found, &expected, &id_or_path);
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         // Check for overlay configuration
         let fs: Arc<dyn FileSystem> = rt.block_on(async {
@@ -192,7 +215,13 @@ async fn mount_nfs_backend(args: MountArgs) -> Result<()> {
     );
 
     // Open AgentFS
-    let agentfs = open_agentfs(opts).await?;
+    let agentfs = match open_agentfs(opts).await {
+        Ok(fs) => fs,
+        Err(SdkError::SchemaVersionMismatch { found, expected }) => {
+            exit_schema_version_mismatch(&found, &expected, &args.id_or_path);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Check for overlay configuration
     // Query base_path in a separate scope so connection is released before load_whiteouts
@@ -580,4 +609,20 @@ pub fn prune_mounts(force: bool) -> Result<()> {
 #[cfg(target_os = "macos")]
 pub fn prune_mounts(_force: bool) -> Result<()> {
     anyhow::bail!("Mount pruning is only available on Linux")
+}
+
+/// Print schema version mismatch error and exit.
+fn exit_schema_version_mismatch(found: &str, expected: &str, id_or_path: &str) -> ! {
+    eprintln!("Error: Filesystem `{}` requires migration", id_or_path);
+    eprintln!();
+    eprintln!(
+        "Found schema version {}, but this version of agentfs requires {}.",
+        found, expected
+    );
+    eprintln!();
+    eprintln!("To upgrade, run:");
+    eprintln!();
+    eprintln!("    agentfs migrate {}", id_or_path);
+    eprintln!();
+    std::process::exit(1);
 }

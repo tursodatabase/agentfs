@@ -179,6 +179,59 @@ agentfs sync <ID_OR_PATH> <SUBCOMMAND>
 - `stats` - View sync statistics
 - `checkpoint` - Create checkpoint
 
+### agentfs migrate
+
+Migrate database schema to the current version.
+
+```
+agentfs migrate [OPTIONS] <ID_OR_PATH>
+```
+
+Upgrades an AgentFS database schema to the latest version. This is necessary when using databases created with older versions of AgentFS.
+
+**Arguments:**
+- `ID_OR_PATH` - Agent identifier or database path
+
+**Options:**
+- `--dry-run` - Preview migration without applying changes
+
+**Examples:**
+
+```bash
+# Preview pending migrations
+agentfs migrate my-agent --dry-run
+
+# Apply migrations
+agentfs migrate my-agent
+
+# Migrate using database path
+agentfs migrate .agentfs/my-agent.db
+```
+
+**Output:**
+
+The command displays the current and target schema versions, then applies any necessary migrations:
+
+```
+Database: .agentfs/my-agent.db
+Current schema version: v0.2
+Target schema version: v0.4
+
+Applying migrations...
+  Migrating v0.2 -> v0.4...
+    Added atime_nsec column to fs_inode
+    Added mtime_nsec column to fs_inode
+    Added ctime_nsec column to fs_inode
+    Added rdev column to fs_inode
+  v0.2 -> v0.4 migration complete.
+
+Migration completed successfully.
+```
+
+**Notes:**
+- Migrations are idempotent and safe to run multiple times
+- Always backup your database before running migrations on production data
+
 ### agentfs fs
 
 Filesystem operations on agent databases.

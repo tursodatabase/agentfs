@@ -68,6 +68,10 @@ pub enum Error {
     /// Internal error (for unexpected conditions)
     #[error("{0}")]
     Internal(String),
+
+    /// Schema version mismatch - database schema version doesn't match expected version
+    #[error("schema version mismatch: database is version {found}, expected {expected}")]
+    SchemaVersionMismatch { found: String, expected: String },
 }
 
 /// Result type alias using the SDK Error type.

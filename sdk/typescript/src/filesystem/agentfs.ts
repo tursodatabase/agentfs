@@ -302,6 +302,12 @@ export class AgentFS implements FileSystem {
       chunkSize = parseInt(config.value, 10) || DEFAULT_CHUNK_SIZE;
     }
 
+    // Set schema version (keep in sync with AGENTFS_SCHEMA_VERSION in sdk/rust/src/schema.rs)
+    const schemaVersionStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO fs_config (key, value) VALUES ('schema_version', '0.4')
+    `);
+    await schemaVersionStmt.run();
+
     const stmt = this.db.prepare('SELECT ino FROM fs_inode WHERE ino = ?');
     const root = await stmt.get(this.rootIno);
 

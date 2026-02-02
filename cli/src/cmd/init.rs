@@ -16,7 +16,7 @@ pub struct EncryptionOptions {
     pub cipher: String,
 }
 
-pub async fn open_agentfs(options: AgentFSOptions) -> anyhow::Result<AgentFS> {
+pub async fn open_agentfs(options: AgentFSOptions) -> Result<AgentFS, agentfs_sdk::error::Error> {
     let mut options = options;
     // CLI handles env var fallback for auth token
     if options.sync.auth_token.is_none() {
@@ -24,9 +24,7 @@ pub async fn open_agentfs(options: AgentFSOptions) -> anyhow::Result<AgentFS> {
             options.sync.auth_token = Some(auth_token);
         }
     }
-    AgentFS::open(options)
-        .await
-        .context("Failed to open database")
+    AgentFS::open(options).await
 }
 
 pub fn build_sync_options(sync_cmd_options: &SyncCommandOptions) -> SyncOptions {

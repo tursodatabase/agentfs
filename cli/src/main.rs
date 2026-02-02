@@ -321,6 +321,20 @@ fn main() {
                 }
             }
         },
+        Command::Migrate {
+            id_or_path,
+            dry_run,
+        } => {
+            let rt = get_runtime();
+            if let Err(e) = rt.block_on(cmd::migrate::handle_migrate_command(
+                &mut std::io::stdout(),
+                id_or_path,
+                dry_run,
+            )) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 

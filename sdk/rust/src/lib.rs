@@ -2,6 +2,7 @@ pub mod connection_pool;
 pub mod error;
 pub mod filesystem;
 pub mod kvstore;
+pub mod schema;
 pub mod toolcalls;
 
 use error::{Error, Result};
@@ -23,6 +24,7 @@ pub use filesystem::{
     S_IFREG, S_IFSOCK,
 };
 pub use kvstore::KvStore;
+pub use schema::{SchemaVersion, AGENTFS_SCHEMA_VERSION};
 pub use toolcalls::{ToolCall, ToolCallStats, ToolCallStatus, ToolCalls};
 
 /// Directory containing agentfs databases
@@ -348,6 +350,11 @@ impl AgentFS {
             let pool = connection_pool::ConnectionPool::new(db);
             (None, pool)
         };
+
+        // Check schema version for existing databases
+        let conn = pool.get_connection().await?;
+        schema::check_schema_version(&conn).await?;
+        drop(conn);
 
         // Initialize overlay schema if base is provided
         if let Some(base_path) = options.base {

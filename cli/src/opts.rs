@@ -323,6 +323,16 @@ pub enum Command {
         #[command(subcommand)]
         command: PruneCommand,
     },
+    /// Migrate database schema to the current version
+    Migrate {
+        /// Agent ID or database path
+        #[arg(add = ArgValueCompleter::new(id_or_path_completer))]
+        id_or_path: String,
+
+        /// Preview migration without applying changes
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
