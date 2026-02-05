@@ -9,7 +9,7 @@ from .filesystem import S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, Filesystem, Stats
 from .kvstore import KvStore
 from .toolcalls import ToolCall, ToolCalls, ToolCallStats
 
-__version__ = "0.6.0-pre.5"
+__version__ = "0.6.0"
 
 __all__ = [
     "AgentFS",

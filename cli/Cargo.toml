@@ -1,6 +1,6 @@
 [package]
 name = "agentfs"
-version = "0.6.0-pre.5"
+version = "0.6.0"
 edition = "2021"
 repository = "https://github.com/tursodatabase/agentfs"
 
