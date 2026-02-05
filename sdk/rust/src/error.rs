@@ -72,6 +72,10 @@ pub enum Error {
     /// Schema version mismatch - database schema version doesn't match expected version
     #[error("schema version mismatch: database is version {found}, expected {expected}")]
     SchemaVersionMismatch { found: String, expected: String },
+
+    /// Snapshot error
+    #[error("snapshot error: {0}")]
+    Snapshot(String),
 }
 
 /// Result type alias using the SDK Error type.
