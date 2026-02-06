@@ -673,7 +673,7 @@ impl FileSystem for HostFS {
         let file_fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR,
                 mode as libc::mode_t as libc::c_uint,
             )
         };

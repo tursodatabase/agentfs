@@ -711,7 +711,7 @@ impl FileSystem for HostFS {
             libc::openat(
                 parent_fd,
                 c_name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR,
                 mode as libc::mode_t,
             )
         };
@@ -1006,6 +1006,41 @@ mod tests {
         // List directory
         let entries = fs.readdir(subdir_stats.ino).await?.unwrap();
         assert_eq!(entries, vec!["a.txt", "b.txt"]);
+
+        Ok(())
+    }
+
+    /// Regression test: create_file() on an existing file must succeed (not EEXIST)
+    /// and truncate the file. The FUSE create op is invoked by the kernel for
+    /// open(O_CREAT) on existing files (e.g. cargo overwriting .d dependency files).
+    #[tokio::test]
+    async fn test_hostfs_create_file_existing() -> Result<()> {
+        let dir = tempdir()?;
+        let fs = HostFS::new(dir.path())?;
+
+        // Create a file with some content
+        let (stats1, file1) = fs
+            .create_file(ROOT_INO, "existing.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        file1.pwrite(0, b"old content").await?;
+        drop(file1);
+
+        // create_file again on the same name must succeed (not EEXIST) and truncate
+        let (stats2, file2) = fs
+            .create_file(ROOT_INO, "existing.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+
+        // Inode should be the same file
+        assert_eq!(stats1.ino, stats2.ino);
+
+        // File should be truncated (empty)
+        let data = file2.pread(0, 100).await?;
+        assert!(data.is_empty(), "file should be truncated after re-create");
+
+        // Write new content and verify
+        file2.pwrite(0, b"new content").await?;
+        let data = file2.pread(0, 100).await?;
+        assert_eq!(data, b"new content");
 
         Ok(())
     }
