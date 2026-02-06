@@ -23,7 +23,8 @@ SRCS = main.c \
        test-mknod.c \
        test-mkfifo.c \
        test-copyup-permissions.c \
-       test-open-readonly.c
+       test-open-readonly.c \
+       test-create-existing.c
 
 # Object files
 OBJS = $(SRCS:.c=.o)
