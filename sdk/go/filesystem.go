@@ -809,13 +809,25 @@ func (fs *Filesystem) Chmod(ctx context.Context, p string, mode int64) error {
 }
 
 // Utimes updates file timestamps (seconds precision).
-// For nanosecond precision, use UtimesNano.
+// For nanosecond precision or selective updates, use Utimens.
 func (fs *Filesystem) Utimes(ctx context.Context, p string, atime, mtime int64) error {
-	return fs.UtimesNano(ctx, p, atime, 0, mtime, 0)
+	return fs.Utimens(ctx, p, TimeSet(atime, 0), TimeSet(mtime, 0))
 }
 
 // UtimesNano updates file timestamps with nanosecond precision.
+// For selective updates (omit or set to now), use Utimens.
 func (fs *Filesystem) UtimesNano(ctx context.Context, p string, atimeSec, atimeNsec, mtimeSec, mtimeNsec int64) error {
+	return fs.Utimens(ctx, p, TimeSet(atimeSec, atimeNsec), TimeSet(mtimeSec, mtimeNsec))
+}
+
+// Utimens updates file timestamps with nanosecond precision and selective control.
+// Each timestamp can be set to a specific value (TimeSet), the current time (TimeNow),
+// or left unchanged (TimeOmit).
+func (fs *Filesystem) Utimens(ctx context.Context, p string, atime, mtime TimeChange) error {
+	if atime.IsOmit() && mtime.IsOmit() {
+		return nil
+	}
+
 	p = normalizePath(p)
 
 	ino, err := fs.resolvePathFollow(ctx, p, true)
@@ -824,7 +836,40 @@ func (fs *Filesystem) UtimesNano(ctx context.Context, p string, atimeSec, atimeN
 	}
 
 	now := time.Now()
-	if _, err := fs.db.ExecContext(ctx, updateInodeTimes, atimeSec, mtimeSec, now.Unix(), atimeNsec, mtimeNsec, int64(now.Nanosecond()), ino); err != nil {
+
+	var setClauses []string
+	var args []any
+
+	if !atime.IsOmit() {
+		var sec, nsec int64
+		if atime.IsNow() {
+			sec, nsec = now.Unix(), int64(now.Nanosecond())
+		} else {
+			sec, nsec = atime.sec, atime.nsec
+		}
+		setClauses = append(setClauses, "atime = ?", "atime_nsec = ?")
+		args = append(args, sec, nsec)
+	}
+
+	if !mtime.IsOmit() {
+		var sec, nsec int64
+		if mtime.IsNow() {
+			sec, nsec = now.Unix(), int64(now.Nanosecond())
+		} else {
+			sec, nsec = mtime.sec, mtime.nsec
+		}
+		setClauses = append(setClauses, "mtime = ?", "mtime_nsec = ?")
+		args = append(args, sec, nsec)
+	}
+
+	// Always update ctime
+	setClauses = append(setClauses, "ctime = ?", "ctime_nsec = ?")
+	args = append(args, now.Unix(), int64(now.Nanosecond()))
+
+	args = append(args, ino)
+	query := fmt.Sprintf("UPDATE fs_inode SET %s WHERE ino = ?", strings.Join(setClauses, ", "))
+
+	if _, err := fs.db.ExecContext(ctx, query, args...); err != nil {
 		return err
 	}
 
@@ -878,26 +923,31 @@ func (fs *Filesystem) Open(ctx context.Context, p string, flags int) (*File, err
 	}, nil
 }
 
-// Create creates a new file and returns a handle.
-func (fs *Filesystem) Create(ctx context.Context, p string, mode int64) (*File, error) {
+// Create creates a new file and returns its stats and a file handle.
+func (fs *Filesystem) Create(ctx context.Context, p string, mode int64) (*Stats, *File, error) {
 	p = normalizePath(p)
 
 	_, name := path.Split(p)
 	if err := validateName("create", name); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Create the file (or truncate if exists)
 	if err := fs.WriteFile(ctx, p, nil, mode); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	ino, err := fs.resolvePathFollow(ctx, p, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &File{
+	stats, err := fs.statInode(ctx, ino)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return stats, &File{
 		fs:    fs,
 		ino:   ino,
 		path:  p,

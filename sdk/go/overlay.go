@@ -1352,6 +1352,30 @@ func (ofs *OverlayFS) Utimes(ctx context.Context, p string, atime, mtime int64) 
 	return ofs.delta.Utimes(ctx, p, atime, mtime)
 }
 
+// Utimens updates file timestamps with selective control.
+func (ofs *OverlayFS) Utimens(ctx context.Context, p string, atime, mtime TimeChange) error {
+	p = normalizePath(p)
+
+	stats, err := ofs.LookupPath(ctx, p)
+	if err != nil {
+		return err
+	}
+
+	info, ok := ofs.getInodeInfo(stats.Ino)
+	if !ok {
+		return ErrNoent("utimens", p)
+	}
+
+	if info.Layer == LayerBase {
+		_, err := ofs.copyUp(ctx, p, info.UnderlyingIno)
+		if err != nil {
+			return err
+		}
+	}
+
+	return ofs.delta.Utimens(ctx, p, atime, mtime)
+}
+
 // =============================================================================
 // Cache Operations
 // =============================================================================

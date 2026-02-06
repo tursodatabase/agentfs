@@ -120,6 +120,44 @@ func (s *Stats) CtimeTime() time.Time {
 	return time.Unix(s.Ctime, s.CtimeNsec)
 }
 
+// TimeChange represents a timestamp change request for Utimens.
+// Use the constructor functions TimeOmit(), TimeNow(), and TimeSet() to create values.
+type TimeChange struct {
+	kind int // 0=Omit, 1=Now, 2=Set
+	sec  int64
+	nsec int64
+}
+
+const (
+	timeOmit = 0
+	timeNow  = 1
+	timeSet  = 2
+)
+
+// TimeOmit returns a TimeChange that leaves the timestamp unchanged.
+func TimeOmit() TimeChange {
+	return TimeChange{kind: timeOmit}
+}
+
+// TimeNow returns a TimeChange that sets the timestamp to the current time.
+func TimeNow() TimeChange {
+	return TimeChange{kind: timeNow}
+}
+
+// TimeSet returns a TimeChange that sets the timestamp to the given value.
+func TimeSet(sec, nsec int64) TimeChange {
+	return TimeChange{kind: timeSet, sec: sec, nsec: nsec}
+}
+
+// IsOmit returns true if this TimeChange leaves the timestamp unchanged.
+func (tc TimeChange) IsOmit() bool { return tc.kind == timeOmit }
+
+// IsNow returns true if this TimeChange sets the timestamp to the current time.
+func (tc TimeChange) IsNow() bool { return tc.kind == timeNow }
+
+// IsSet returns true if this TimeChange sets the timestamp to a specific value.
+func (tc TimeChange) IsSet() bool { return tc.kind == timeSet }
+
 // FilesystemStats represents aggregate filesystem statistics returned by Statfs.
 type FilesystemStats struct {
 	Inodes    int64 `json:"inodes"`     // Total number of inodes (files, directories, symlinks, etc.)

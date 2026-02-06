@@ -58,11 +58,16 @@ type FileSystem interface {
 	// Utimes updates file timestamps.
 	Utimes(ctx context.Context, path string, atime, mtime int64) error
 
+	// Utimens updates file timestamps with selective control.
+	// Each timestamp can be TimeSet (specific value), TimeNow (current time),
+	// or TimeOmit (leave unchanged).
+	Utimens(ctx context.Context, path string, atime, mtime TimeChange) error
+
 	// Open opens a file and returns a handle for read/write operations.
 	Open(ctx context.Context, path string, flags int) (*File, error)
 
-	// Create creates a new file and returns a handle.
-	Create(ctx context.Context, path string, mode int64) (*File, error)
+	// Create creates a new file and returns its stats and a handle.
+	Create(ctx context.Context, path string, mode int64) (*Stats, *File, error)
 
 	// ChunkSize returns the configured chunk size for file data.
 	ChunkSize() int

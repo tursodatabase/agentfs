@@ -95,7 +95,7 @@ func TestFile_IOWriter(t *testing.T) {
 	defer afs.Close()
 
 	t.Run("Write entire file", func(t *testing.T) {
-		f, err := afs.FS.Create(ctx, "/write.txt", 0o644)
+		_, f, err := afs.FS.Create(ctx, "/write.txt", 0o644)
 		if err != nil {
 			t.Fatalf("Create failed: %v", err)
 		}
@@ -118,7 +118,7 @@ func TestFile_IOWriter(t *testing.T) {
 	})
 
 	t.Run("Write in chunks", func(t *testing.T) {
-		f, _ := afs.FS.Create(ctx, "/chunks.txt", 0o644)
+		_, f, _ := afs.FS.Create(ctx, "/chunks.txt", 0o644)
 		defer f.Close()
 
 		chunks := []string{"Hello, ", "World! ", "This is ", "chunked."}
@@ -134,7 +134,7 @@ func TestFile_IOWriter(t *testing.T) {
 	})
 
 	t.Run("Offset advances on write", func(t *testing.T) {
-		f, _ := afs.FS.Create(ctx, "/offset.txt", 0o644)
+		_, f, _ := afs.FS.Create(ctx, "/offset.txt", 0o644)
 		defer f.Close()
 
 		if f.Offset() != 0 {
@@ -333,7 +333,7 @@ func TestFile_IOWriterAt(t *testing.T) {
 	defer afs.Close()
 
 	t.Run("WriteAt various offsets", func(t *testing.T) {
-		f, _ := afs.FS.Create(ctx, "/writeat.txt", 0o644)
+		_, f, _ := afs.FS.Create(ctx, "/writeat.txt", 0o644)
 		defer f.Close()
 
 		// Write "HELLO" at offset 0
@@ -355,7 +355,7 @@ func TestFile_IOWriterAt(t *testing.T) {
 	})
 
 	t.Run("WriteAt does not affect offset", func(t *testing.T) {
-		f, _ := afs.FS.Create(ctx, "/writeat2.txt", 0o644)
+		_, f, _ := afs.FS.Create(ctx, "/writeat2.txt", 0o644)
 		defer f.Close()
 
 		initialOffset := f.Offset()
@@ -380,7 +380,7 @@ func TestFile_IOCopy(t *testing.T) {
 		src, _ := afs.FS.Open(ctx, "/source.txt", O_RDONLY)
 		defer src.Close()
 
-		dst, _ := afs.FS.Create(ctx, "/dest.txt", 0o644)
+		_, dst, _ := afs.FS.Create(ctx, "/dest.txt", 0o644)
 		defer dst.Close()
 
 		n, err := io.Copy(dst, src)
@@ -401,7 +401,7 @@ func TestFile_IOCopy(t *testing.T) {
 	t.Run("io.Copy from bytes.Reader", func(t *testing.T) {
 		src := bytes.NewReader([]byte("From bytes.Reader"))
 
-		dst, _ := afs.FS.Create(ctx, "/from_reader.txt", 0o644)
+		_, dst, _ := afs.FS.Create(ctx, "/from_reader.txt", 0o644)
 		defer dst.Close()
 
 		io.Copy(dst, src)
@@ -438,7 +438,7 @@ func TestFile_LargeFileStreaming(t *testing.T) {
 	}
 
 	t.Run("Stream write large file", func(t *testing.T) {
-		f, _ := afs.FS.Create(ctx, "/large.bin", 0o644)
+		_, f, _ := afs.FS.Create(ctx, "/large.bin", 0o644)
 		defer f.Close()
 
 		// Write in small chunks
@@ -544,7 +544,7 @@ func TestFile_ReadWriteInterleaved(t *testing.T) {
 	defer afs.Close()
 
 	t.Run("Read then write", func(t *testing.T) {
-		f, _ := afs.FS.Create(ctx, "/rw.txt", 0o644)
+		_, f, _ := afs.FS.Create(ctx, "/rw.txt", 0o644)
 		defer f.Close()
 
 		// Write initial content

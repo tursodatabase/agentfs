@@ -500,7 +500,7 @@ func TestFileHandle(t *testing.T) {
 	fs := afs.FS
 
 	t.Run("pread and pwrite", func(t *testing.T) {
-		f, err := fs.Create(ctx, "/filehandle.txt", 0o644)
+		_, f, err := fs.Create(ctx, "/filehandle.txt", 0o644)
 		if err != nil {
 			t.Fatalf("Create failed: %v", err)
 		}
@@ -531,7 +531,7 @@ func TestFileHandle(t *testing.T) {
 	})
 
 	t.Run("pwrite at offset", func(t *testing.T) {
-		f, err := fs.Create(ctx, "/offset.txt", 0o644)
+		_, f, err := fs.Create(ctx, "/offset.txt", 0o644)
 		if err != nil {
 			t.Fatalf("Create failed: %v", err)
 		}
@@ -561,7 +561,7 @@ func TestFileHandle(t *testing.T) {
 	})
 
 	t.Run("truncate", func(t *testing.T) {
-		f, err := fs.Create(ctx, "/truncate.txt", 0o644)
+		_, f, err := fs.Create(ctx, "/truncate.txt", 0o644)
 		if err != nil {
 			t.Fatalf("Create failed: %v", err)
 		}
@@ -1346,7 +1346,7 @@ func TestNameLengthValidation(t *testing.T) {
 	})
 
 	t.Run("Create rejects long name", func(t *testing.T) {
-		_, err := fs.Create(ctx, "/"+longName, 0o644)
+		_, _, err := fs.Create(ctx, "/"+longName, 0o644)
 		if err == nil {
 			t.Fatal("Expected error for long file name")
 		}
@@ -2146,6 +2146,268 @@ func TestMknod(t *testing.T) {
 }
 
 // setupTestDB creates a temporary database for testing
+func TestUtimens(t *testing.T) {
+	ctx := context.Background()
+	afs := setupTestDB(t)
+	defer afs.Close()
+	fs := afs.FS
+
+	t.Run("TimeSet sets both timestamps", func(t *testing.T) {
+		err := fs.WriteFile(ctx, "/utimens_set.txt", []byte("x"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		err = fs.Utimens(ctx, "/utimens_set.txt",
+			TimeSet(1000, 123456789),
+			TimeSet(2000, 987654321),
+		)
+		if err != nil {
+			t.Fatalf("Utimens failed: %v", err)
+		}
+
+		stats, _ := fs.Stat(ctx, "/utimens_set.txt")
+		if stats.Atime != 1000 {
+			t.Errorf("Atime = %d, want 1000", stats.Atime)
+		}
+		if stats.AtimeNsec != 123456789 {
+			t.Errorf("AtimeNsec = %d, want 123456789", stats.AtimeNsec)
+		}
+		if stats.Mtime != 2000 {
+			t.Errorf("Mtime = %d, want 2000", stats.Mtime)
+		}
+		if stats.MtimeNsec != 987654321 {
+			t.Errorf("MtimeNsec = %d, want 987654321", stats.MtimeNsec)
+		}
+	})
+
+	t.Run("TimeOmit leaves timestamp unchanged", func(t *testing.T) {
+		err := fs.WriteFile(ctx, "/utimens_omit.txt", []byte("x"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		// Set known values first
+		err = fs.Utimens(ctx, "/utimens_omit.txt",
+			TimeSet(1000, 111),
+			TimeSet(2000, 222),
+		)
+		if err != nil {
+			t.Fatalf("Utimens failed: %v", err)
+		}
+
+		// Now omit atime, change mtime
+		err = fs.Utimens(ctx, "/utimens_omit.txt",
+			TimeOmit(),
+			TimeSet(3000, 333),
+		)
+		if err != nil {
+			t.Fatalf("Utimens failed: %v", err)
+		}
+
+		stats, _ := fs.Stat(ctx, "/utimens_omit.txt")
+		if stats.Atime != 1000 || stats.AtimeNsec != 111 {
+			t.Errorf("Atime changed: %d.%d, want 1000.111", stats.Atime, stats.AtimeNsec)
+		}
+		if stats.Mtime != 3000 || stats.MtimeNsec != 333 {
+			t.Errorf("Mtime = %d.%d, want 3000.333", stats.Mtime, stats.MtimeNsec)
+		}
+	})
+
+	t.Run("TimeOmit both is no-op", func(t *testing.T) {
+		err := fs.WriteFile(ctx, "/utimens_noop.txt", []byte("x"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		statsBefore, _ := fs.Stat(ctx, "/utimens_noop.txt")
+
+		err = fs.Utimens(ctx, "/utimens_noop.txt", TimeOmit(), TimeOmit())
+		if err != nil {
+			t.Fatalf("Utimens failed: %v", err)
+		}
+
+		statsAfter, _ := fs.Stat(ctx, "/utimens_noop.txt")
+		if statsBefore.Atime != statsAfter.Atime || statsBefore.AtimeNsec != statsAfter.AtimeNsec {
+			t.Error("Atime changed on double-omit")
+		}
+		if statsBefore.Mtime != statsAfter.Mtime || statsBefore.MtimeNsec != statsAfter.MtimeNsec {
+			t.Error("Mtime changed on double-omit")
+		}
+		// ctime should also be unchanged since we short-circuit
+		if statsBefore.Ctime != statsAfter.Ctime || statsBefore.CtimeNsec != statsAfter.CtimeNsec {
+			t.Error("Ctime changed on double-omit")
+		}
+	})
+
+	t.Run("TimeNow sets to current time", func(t *testing.T) {
+		err := fs.WriteFile(ctx, "/utimens_now.txt", []byte("x"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		// Set atime to old value
+		err = fs.Utimens(ctx, "/utimens_now.txt",
+			TimeSet(1000, 0),
+			TimeSet(1000, 0),
+		)
+		if err != nil {
+			t.Fatalf("Utimens failed: %v", err)
+		}
+
+		before := time.Now()
+		err = fs.Utimens(ctx, "/utimens_now.txt", TimeNow(), TimeNow())
+		if err != nil {
+			t.Fatalf("Utimens failed: %v", err)
+		}
+		after := time.Now()
+
+		stats, _ := fs.Stat(ctx, "/utimens_now.txt")
+		if stats.Atime < before.Unix() || stats.Atime > after.Unix() {
+			t.Errorf("Atime %d not in range [%d, %d]", stats.Atime, before.Unix(), after.Unix())
+		}
+		if stats.Mtime < before.Unix() || stats.Mtime > after.Unix() {
+			t.Errorf("Mtime %d not in range [%d, %d]", stats.Mtime, before.Unix(), after.Unix())
+		}
+	})
+
+	t.Run("Utimens updates ctime", func(t *testing.T) {
+		err := fs.WriteFile(ctx, "/utimens_ctime.txt", []byte("x"), 0o644)
+		if err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		before := time.Now()
+		err = fs.Utimens(ctx, "/utimens_ctime.txt",
+			TimeSet(5000, 0),
+			TimeOmit(),
+		)
+		if err != nil {
+			t.Fatalf("Utimens failed: %v", err)
+		}
+		after := time.Now()
+
+		stats, _ := fs.Stat(ctx, "/utimens_ctime.txt")
+		if stats.Ctime < before.Unix() || stats.Ctime > after.Unix() {
+			t.Errorf("Ctime %d not in range [%d, %d]", stats.Ctime, before.Unix(), after.Unix())
+		}
+	})
+
+	t.Run("Utimens on nonexistent path", func(t *testing.T) {
+		err := fs.Utimens(ctx, "/no_such_file.txt", TimeNow(), TimeNow())
+		if err == nil {
+			t.Fatal("Expected error")
+		}
+		if !IsNotExist(err) {
+			t.Errorf("Expected ENOENT, got: %v", err)
+		}
+	})
+
+	t.Run("TimeChange constructors", func(t *testing.T) {
+		omit := TimeOmit()
+		if !omit.IsOmit() || omit.IsNow() || omit.IsSet() {
+			t.Error("TimeOmit() should be Omit")
+		}
+
+		now := TimeNow()
+		if now.IsOmit() || !now.IsNow() || now.IsSet() {
+			t.Error("TimeNow() should be Now")
+		}
+
+		set := TimeSet(100, 200)
+		if set.IsOmit() || set.IsNow() || !set.IsSet() {
+			t.Error("TimeSet() should be Set")
+		}
+	})
+}
+
+func TestCreateReturnsStats(t *testing.T) {
+	ctx := context.Background()
+	afs := setupTestDB(t)
+	defer afs.Close()
+	fs := afs.FS
+
+	t.Run("Create returns valid stats", func(t *testing.T) {
+		before := time.Now()
+		stats, f, err := fs.Create(ctx, "/created.txt", 0o644)
+		if err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+		defer f.Close()
+		after := time.Now()
+
+		if stats == nil {
+			t.Fatal("Stats should not be nil")
+		}
+		if !stats.IsRegularFile() {
+			t.Errorf("Mode = %o, want regular file", stats.Mode)
+		}
+		if stats.Permissions() != 0o644 {
+			t.Errorf("Permissions = %o, want 0644", stats.Permissions())
+		}
+		if stats.Size != 0 {
+			t.Errorf("Size = %d, want 0", stats.Size)
+		}
+		if stats.Ino <= 0 {
+			t.Errorf("Ino = %d, want > 0", stats.Ino)
+		}
+		if stats.Nlink != 1 {
+			t.Errorf("Nlink = %d, want 1", stats.Nlink)
+		}
+		if stats.Ctime < before.Unix() || stats.Ctime > after.Unix() {
+			t.Errorf("Ctime %d not in range [%d, %d]", stats.Ctime, before.Unix(), after.Unix())
+		}
+	})
+
+	t.Run("Create stats match subsequent Stat", func(t *testing.T) {
+		createStats, f, err := fs.Create(ctx, "/stat_match.txt", 0o600)
+		if err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+		f.Close()
+
+		statStats, err := fs.Stat(ctx, "/stat_match.txt")
+		if err != nil {
+			t.Fatalf("Stat failed: %v", err)
+		}
+
+		if createStats.Ino != statStats.Ino {
+			t.Errorf("Ino: Create=%d, Stat=%d", createStats.Ino, statStats.Ino)
+		}
+		if createStats.Mode != statStats.Mode {
+			t.Errorf("Mode: Create=%o, Stat=%o", createStats.Mode, statStats.Mode)
+		}
+		if createStats.Size != statStats.Size {
+			t.Errorf("Size: Create=%d, Stat=%d", createStats.Size, statStats.Size)
+		}
+	})
+
+	t.Run("Create file handle is usable", func(t *testing.T) {
+		_, f, err := fs.Create(ctx, "/usable.txt", 0o644)
+		if err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+		defer f.Close()
+
+		n, err := f.Pwrite(ctx, []byte("hello"), 0)
+		if err != nil {
+			t.Fatalf("Pwrite failed: %v", err)
+		}
+		if n != 5 {
+			t.Errorf("Pwrite n = %d, want 5", n)
+		}
+
+		buf := make([]byte, 5)
+		n, err = f.Pread(ctx, buf, 0)
+		if err != nil {
+			t.Fatalf("Pread failed: %v", err)
+		}
+		if string(buf[:n]) != "hello" {
+			t.Errorf("Content = %q, want %q", string(buf[:n]), "hello")
+		}
+	})
+}
+
 func setupTestDB(t *testing.T) *AgentFS {
 	t.Helper()
 	ctx := context.Background()

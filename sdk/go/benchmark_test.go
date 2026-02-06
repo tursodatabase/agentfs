@@ -119,7 +119,7 @@ func BenchmarkStreamingWrite(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				path := fmt.Sprintf("/stream_%d.bin", i)
-				f, err := afs.FS.Create(ctx, path, 0o644)
+				_, f, err := afs.FS.Create(ctx, path, 0o644)
 				if err != nil {
 					b.Fatalf("Create failed: %v", err)
 				}
@@ -222,7 +222,7 @@ func BenchmarkStreamingCopy(b *testing.B) {
 				}
 
 				dstPath := fmt.Sprintf("/dest_%d.bin", i)
-				dst, err := afs.FS.Create(ctx, dstPath, 0o644)
+				_, dst, err := afs.FS.Create(ctx, dstPath, 0o644)
 				if err != nil {
 					src.Close()
 					b.Fatalf("Create dest failed: %v", err)
