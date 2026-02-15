@@ -635,7 +635,18 @@ impl FileSystem for OverlayFS {
             return Ok(Some(stats));
         }
 
-        // Try base
+        // If the parent is a "pure delta" directory (created in delta, not copied from base),
+        // there's no point checking the base layer - children can't exist there. This avoids
+        // unnecessary stat() syscalls when looking up entries in directories like node_modules/
+        // that were created entirely within the delta layer.
+        if let Some(delta_parent) = delta_parent_ino {
+            if self.get_origin_ino(delta_parent).is_none() {
+                // Parent exists in delta with no base origin - it's a pure delta directory
+                return Ok(None);
+            }
+        }
+
+        // Try base - parent either exists in base or was copied from base
         let base_parent_ino = if parent_info.layer == Layer::Base {
             parent_info.underlying_ino
         } else {
@@ -918,14 +929,18 @@ impl FileSystem for OverlayFS {
         // Remove whiteout if exists
         self.remove_whiteout(&path).await?;
 
-        // Ensure parent dirs exist in delta
-        self.ensure_parent_dirs(&path, uid, gid).await?;
-
-        // Get delta parent inode
+        // Resolve the delta parent inode. When the parent is already in the delta layer,
+        // we can use it directly - all its ancestors are guaranteed to exist in delta
+        // (a directory can only be in delta if its parents are too). This avoids the
+        // expensive ensure_parent_dirs() walk which would otherwise check each path
+        // component against both delta and base layers.
         let delta_parent_ino = if parent_info.layer == Layer::Delta {
             parent_info.underlying_ino
         } else {
-            // Walk delta to find parent
+            // Parent is in base layer - we need to create the directory hierarchy in
+            // delta before we can create the new entry. This walks the path and creates
+            // any missing directories.
+            self.ensure_parent_dirs(&path, uid, gid).await?;
             let mut ino: i64 = 1;
             for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
                 if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
@@ -963,13 +978,18 @@ impl FileSystem for OverlayFS {
         // Remove whiteout if exists
         self.remove_whiteout(&path).await?;
 
-        // Ensure parent dirs exist in delta
-        self.ensure_parent_dirs(&path, uid, gid).await?;
-
-        // Get delta parent inode
+        // Resolve the delta parent inode. When the parent is already in the delta layer,
+        // we can use it directly - all its ancestors are guaranteed to exist in delta
+        // (a directory can only be in delta if its parents are too). This avoids the
+        // expensive ensure_parent_dirs() walk which would otherwise check each path
+        // component against both delta and base layers.
         let delta_parent_ino = if parent_info.layer == Layer::Delta {
             parent_info.underlying_ino
         } else {
+            // Parent is in base layer - we need to create the directory hierarchy in
+            // delta before we can create the new file. This walks the path and creates
+            // any missing directories.
+            self.ensure_parent_dirs(&path, uid, gid).await?;
             let mut ino: i64 = 1;
             for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
                 if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
@@ -1002,11 +1022,15 @@ impl FileSystem for OverlayFS {
         let path = self.build_path(parent_ino, name)?;
 
         self.remove_whiteout(&path).await?;
-        self.ensure_parent_dirs(&path, uid, gid).await?;
 
+        // Resolve the delta parent inode. When the parent is already in the delta layer,
+        // we can use it directly - all its ancestors are guaranteed to exist in delta.
+        // This avoids the expensive ensure_parent_dirs() walk.
         let delta_parent_ino = if parent_info.layer == Layer::Delta {
             parent_info.underlying_ino
         } else {
+            // Parent is in base layer - create the directory hierarchy in delta first.
+            self.ensure_parent_dirs(&path, uid, gid).await?;
             let mut ino: i64 = 1;
             for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
                 if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
@@ -1043,11 +1067,15 @@ impl FileSystem for OverlayFS {
         let path = self.build_path(parent_ino, name)?;
 
         self.remove_whiteout(&path).await?;
-        self.ensure_parent_dirs(&path, uid, gid).await?;
 
+        // Resolve the delta parent inode. When the parent is already in the delta layer,
+        // we can use it directly - all its ancestors are guaranteed to exist in delta.
+        // This avoids the expensive ensure_parent_dirs() walk.
         let delta_parent_ino = if parent_info.layer == Layer::Delta {
             parent_info.underlying_ino
         } else {
+            // Parent is in base layer - create the directory hierarchy in delta first.
+            self.ensure_parent_dirs(&path, uid, gid).await?;
             let mut ino: i64 = 1;
             for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
                 if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
@@ -1181,12 +1209,15 @@ impl FileSystem for OverlayFS {
         };
 
         self.remove_whiteout(&new_path).await?;
-        self.ensure_parent_dirs(&new_path, 0, 0).await?;
 
-        // Get delta parent
+        // Resolve the delta parent inode for the new link location. When the parent is
+        // already in the delta layer, we can use it directly - all its ancestors are
+        // guaranteed to exist in delta. This avoids the expensive ensure_parent_dirs() walk.
         let delta_parent_ino = if parent_info.layer == Layer::Delta {
             parent_info.underlying_ino
         } else {
+            // Parent is in base layer - create the directory hierarchy in delta first.
+            self.ensure_parent_dirs(&new_path, 0, 0).await?;
             let mut ino: i64 = 1;
             for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
                 if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
@@ -1255,12 +1286,15 @@ impl FileSystem for OverlayFS {
 
         // Remove whiteout at destination
         self.remove_whiteout(&new_path).await?;
-        self.ensure_parent_dirs(&new_path, 0, 0).await?;
 
-        // Get delta destination parent
+        // Resolve the delta destination parent inode. When the parent is already in the
+        // delta layer, we can use it directly - all its ancestors are guaranteed to exist
+        // in delta. This avoids the expensive ensure_parent_dirs() walk.
         let delta_dst_parent_ino = if new_parent_info.layer == Layer::Delta {
             new_parent_info.underlying_ino
         } else {
+            // Destination parent is in base layer - create the directory hierarchy in delta first.
+            self.ensure_parent_dirs(&new_path, 0, 0).await?;
             let mut ino: i64 = 1;
             for comp in new_parent_info.path.split('/').filter(|s| !s.is_empty()) {
                 if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
