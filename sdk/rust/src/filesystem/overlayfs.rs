@@ -302,6 +302,44 @@ impl OverlayFS {
         ino
     }
 
+    /// Refresh an existing overlay inode mapping to point at a new backing inode/path.
+    ///
+    /// This is used when we intentionally reuse an existing overlay inode number
+    /// (for stability), but the underlying layer/path has changed (for example after
+    /// a base file is copied-up and then renamed in delta).
+    fn refresh_overlay_mapping(
+        &self,
+        overlay_ino: i64,
+        new_layer: Layer,
+        new_underlying_ino: i64,
+        new_path: &str,
+    ) {
+        let old_path = {
+            let mut inode_map = self.inode_map.write().unwrap();
+            let Some(info) = inode_map.get_mut(&overlay_ino) else {
+                return;
+            };
+            let old_path = info.path.clone();
+            info.layer = new_layer;
+            info.underlying_ino = new_underlying_ino;
+            info.path = new_path.to_string();
+            old_path
+        };
+
+        {
+            let mut reverse = self.reverse_map.write().unwrap();
+            reverse.insert((new_layer, new_underlying_ino), overlay_ino);
+        }
+
+        {
+            let mut path_map = self.path_map.write().unwrap();
+            if path_map.get(&old_path).copied() == Some(overlay_ino) {
+                path_map.remove(&old_path);
+            }
+            path_map.insert(new_path.to_string(), overlay_ino);
+        }
+    }
+
     /// Get inode info for an overlay inode
     fn get_inode_info(&self, ino: i64) -> Option<InodeInfo> {
         self.inode_map.read().unwrap().get(&ino).cloned()
@@ -373,6 +411,26 @@ impl OverlayFS {
                 reverse.insert((Layer::Delta, delta_ino), overlay_ino);
             }
         }
+    }
+
+    /// Resolve the delta-layer inode for a parent directory.
+    ///
+    /// If the parent's overlay inode already maps to Delta, returns the underlying
+    /// inode directly. Otherwise, walks the delta filesystem from root using the
+    /// stored path. Returns Ok(None) if any path component is missing in delta.
+    async fn resolve_delta_parent(&self, info: &InodeInfo) -> Result<Option<i64>> {
+        if info.layer == Layer::Delta {
+            return Ok(Some(info.underlying_ino));
+        }
+        let mut ino: i64 = 1;
+        for comp in info.path.split('/').filter(|s| !s.is_empty()) {
+            match FileSystem::lookup(&self.delta, ino, comp).await? {
+                Some(s) if s.is_directory() => ino = s.ino,
+                Some(_) => return Ok(None),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(ino))
     }
 
     /// Ensure parent directories exist in delta layer
@@ -586,34 +644,16 @@ impl FileSystem for OverlayFS {
             return Ok(None);
         }
 
-        // Try delta first - need to find the corresponding delta parent
-        let delta_parent_ino = if parent_info.layer == Layer::Delta {
-            Some(parent_info.underlying_ino)
-        } else {
-            // Parent is in base, walk the path in delta to find corresponding directory
-            let mut ino: i64 = 1; // Start at delta root
-            let mut found_all = true;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = self.delta.lookup(ino, comp).await? {
-                    ino = s.ino;
-                } else {
-                    found_all = false;
-                    break;
-                }
-            }
-            if found_all {
-                Some(ino)
-            } else {
-                None
-            }
-        };
+        // Try delta first
+        let delta_parent_ino = self.resolve_delta_parent(&parent_info).await?;
 
         // Look up in delta (only if we resolved the correct parent)
         if let Some(delta_stats) = match delta_parent_ino {
             Some(ino) => self.delta.lookup(ino, name).await?,
             None => None,
         } {
-            let ino = self.get_or_create_overlay_ino(Layer::Delta, delta_stats.ino, &path);
+            let delta_ino = delta_stats.ino;
+            let ino = self.get_or_create_overlay_ino(Layer::Delta, delta_ino, &path);
             let mut stats = delta_stats;
 
             // Origin mapping: reuse an existing Base overlay inode for stable
@@ -624,10 +664,13 @@ impl FileSystem for OverlayFS {
             // already walks base from root when the parent is tagged Delta.
             if let Some(base_ino) = self.get_origin_ino(stats.ino) {
                 let reverse = self.reverse_map.read().unwrap();
-                stats.ino = reverse
-                    .get(&(Layer::Base, base_ino))
-                    .copied()
-                    .unwrap_or(ino);
+                if let Some(existing_ino) = reverse.get(&(Layer::Base, base_ino)).copied() {
+                    drop(reverse);
+                    self.refresh_overlay_mapping(existing_ino, Layer::Delta, delta_ino, &path);
+                    stats.ino = existing_ino;
+                } else {
+                    stats.ino = ino;
+                }
             } else {
                 stats.ino = ino;
             }
@@ -674,6 +717,9 @@ impl FileSystem for OverlayFS {
             Some(i) => i,
             None => return Ok(None),
         };
+        if self.is_whiteout(&info.path) {
+            return Ok(None);
+        }
 
         let stats = match info.layer {
             Layer::Delta => FileSystem::getattr(&self.delta, info.underlying_ino).await?,
@@ -690,6 +736,9 @@ impl FileSystem for OverlayFS {
         trace!("OverlayFS::readlink: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
+        if self.is_whiteout(&info.path) {
+            return Ok(None);
+        }
 
         match info.layer {
             Layer::Delta => FileSystem::readlink(&self.delta, info.underlying_ino).await,
@@ -708,7 +757,16 @@ impl FileSystem for OverlayFS {
         // Get delta entries
         if info.layer == Layer::Delta {
             if let Some(delta_entries) = self.delta.readdir(info.underlying_ino).await? {
-                entries.extend(delta_entries);
+                for entry in delta_entries {
+                    let entry_path = if info.path == "/" {
+                        format!("/{}", entry)
+                    } else {
+                        format!("{}/{}", info.path, entry)
+                    };
+                    if !self.is_whiteout(&entry_path) && !child_whiteouts.contains(&entry) {
+                        entries.insert(entry);
+                    }
+                }
             }
         }
 
@@ -816,6 +874,9 @@ impl FileSystem for OverlayFS {
                     } else {
                         format!("{}/{}", info.path, entry.name)
                     };
+                    if self.is_whiteout(&entry_path) || child_whiteouts.contains(&entry.name) {
+                        continue;
+                    }
 
                     // Check for origin mapping
                     if let Some(base_ino) = self.get_origin_ino(entry.stats.ino) {
@@ -844,6 +905,9 @@ impl FileSystem for OverlayFS {
         trace!("OverlayFS::chmod: ino={}, mode={:o}", ino, mode);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
+        if self.is_whiteout(&info.path) {
+            return Err(FsError::NotFound.into());
+        }
 
         let delta_ino = match info.layer {
             Layer::Delta => info.underlying_ino,
@@ -862,6 +926,9 @@ impl FileSystem for OverlayFS {
         );
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
+        if self.is_whiteout(&info.path) {
+            return Err(FsError::NotFound.into());
+        }
 
         let delta_ino = match info.layer {
             Layer::Delta => info.underlying_ino,
@@ -875,6 +942,9 @@ impl FileSystem for OverlayFS {
         trace!("OverlayFS::utimens: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
+        if self.is_whiteout(&info.path) {
+            return Err(FsError::NotFound.into());
+        }
 
         let delta_ino = match info.layer {
             Layer::Delta => info.underlying_ino,
@@ -888,6 +958,9 @@ impl FileSystem for OverlayFS {
         trace!("OverlayFS::open: ino={}", ino);
 
         let info = self.get_inode_info(ino).ok_or(FsError::NotFound)?;
+        if self.is_whiteout(&info.path) {
+            return Err(FsError::NotFound.into());
+        }
 
         let delta_ino = match info.layer {
             Layer::Delta => info.underlying_ino,
@@ -921,19 +994,10 @@ impl FileSystem for OverlayFS {
         // Ensure parent dirs exist in delta
         self.ensure_parent_dirs(&path, uid, gid).await?;
 
-        // Get delta parent inode
-        let delta_parent_ino = if parent_info.layer == Layer::Delta {
-            parent_info.underlying_ino
-        } else {
-            // Walk delta to find parent
-            let mut ino: i64 = 1;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
-                    ino = s.ino;
-                }
-            }
-            ino
-        };
+        let delta_parent_ino = self
+            .resolve_delta_parent(&parent_info)
+            .await?
+            .ok_or(FsError::NotFound)?;
 
         let mut stats =
             FileSystem::mkdir(&self.delta, delta_parent_ino, name, mode, uid, gid).await?;
@@ -966,18 +1030,10 @@ impl FileSystem for OverlayFS {
         // Ensure parent dirs exist in delta
         self.ensure_parent_dirs(&path, uid, gid).await?;
 
-        // Get delta parent inode
-        let delta_parent_ino = if parent_info.layer == Layer::Delta {
-            parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
-                    ino = s.ino;
-                }
-            }
-            ino
-        };
+        let delta_parent_ino = self
+            .resolve_delta_parent(&parent_info)
+            .await?
+            .ok_or(FsError::NotFound)?;
 
         let (mut stats, file) =
             FileSystem::create_file(&self.delta, delta_parent_ino, name, mode, uid, gid).await?;
@@ -1004,17 +1060,10 @@ impl FileSystem for OverlayFS {
         self.remove_whiteout(&path).await?;
         self.ensure_parent_dirs(&path, uid, gid).await?;
 
-        let delta_parent_ino = if parent_info.layer == Layer::Delta {
-            parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
-                    ino = s.ino;
-                }
-            }
-            ino
-        };
+        let delta_parent_ino = self
+            .resolve_delta_parent(&parent_info)
+            .await?
+            .ok_or(FsError::NotFound)?;
 
         let mut stats =
             FileSystem::mknod(&self.delta, delta_parent_ino, name, mode, rdev, uid, gid).await?;
@@ -1045,17 +1094,10 @@ impl FileSystem for OverlayFS {
         self.remove_whiteout(&path).await?;
         self.ensure_parent_dirs(&path, uid, gid).await?;
 
-        let delta_parent_ino = if parent_info.layer == Layer::Delta {
-            parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
-                    ino = s.ino;
-                }
-            }
-            ino
-        };
+        let delta_parent_ino = self
+            .resolve_delta_parent(&parent_info)
+            .await?
+            .ok_or(FsError::NotFound)?;
 
         let mut stats =
             FileSystem::symlink(&self.delta, delta_parent_ino, name, target, uid, gid).await?;
@@ -1084,27 +1126,19 @@ impl FileSystem for OverlayFS {
             return Err(FsError::IsADirectory.into());
         }
 
-        // Try to remove from delta
-        if parent_info.layer == Layer::Delta {
-            let _ = FileSystem::unlink(&self.delta, parent_info.underlying_ino, name).await;
+        // Try to remove from delta. Walk the delta layer to find the parent,
+        // since the overlay parent may map to Base even when a copy-up exists in delta.
+        if let Some(dpi) = self.resolve_delta_parent(&parent_info).await? {
+            match FileSystem::unlink(&self.delta, dpi, name).await {
+                Ok(()) => {}
+                Err(crate::error::Error::Fs(FsError::NotFound)) => {}
+                Err(e) => return Err(e),
+            }
         }
 
-        // Check if exists in base
-        let base_parent_ino = if parent_info.layer == Layer::Base {
-            parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = self.base.lookup(ino, comp).await? {
-                    ino = s.ino;
-                } else {
-                    return Ok(()); // Parent doesn't exist in base
-                }
-            }
-            ino
-        };
-
-        if self.base.lookup(base_parent_ino, name).await?.is_some() {
+        // If the file is still visible through the overlay after delta removal,
+        // it must be coming from the base layer — create a whiteout to hide it.
+        if self.lookup(parent_ino, name).await?.is_some() {
             self.create_whiteout(&path).await?;
         }
 
@@ -1132,27 +1166,19 @@ impl FileSystem for OverlayFS {
             return Err(FsError::NotEmpty.into());
         }
 
-        // Try to remove from delta
-        if parent_info.layer == Layer::Delta {
-            let _ = FileSystem::rmdir(&self.delta, parent_info.underlying_ino, name).await;
+        // Try to remove from delta. Walk the delta layer to find the parent,
+        // since the overlay parent may map to Base even when a copy-up exists in delta.
+        if let Some(dpi) = self.resolve_delta_parent(&parent_info).await? {
+            match FileSystem::rmdir(&self.delta, dpi, name).await {
+                Ok(()) => {}
+                Err(crate::error::Error::Fs(FsError::NotFound)) => {}
+                Err(e) => return Err(e),
+            }
         }
 
-        // Check if exists in base
-        let base_parent_ino = if parent_info.layer == Layer::Base {
-            parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = self.base.lookup(ino, comp).await? {
-                    ino = s.ino;
-                } else {
-                    return Ok(());
-                }
-            }
-            ino
-        };
-
-        if self.base.lookup(base_parent_ino, name).await?.is_some() {
+        // If the directory is still visible through the overlay after delta removal,
+        // it must be coming from the base layer — create a whiteout to hide it.
+        if self.lookup(parent_ino, name).await?.is_some() {
             self.create_whiteout(&path).await?;
         }
 
@@ -1183,18 +1209,11 @@ impl FileSystem for OverlayFS {
         self.remove_whiteout(&new_path).await?;
         self.ensure_parent_dirs(&new_path, 0, 0).await?;
 
-        // Get delta parent
-        let delta_parent_ino = if parent_info.layer == Layer::Delta {
-            parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
-                    ino = s.ino;
-                }
-            }
-            ino
-        };
+        // Resolve delta parent AFTER ensure_parent_dirs so the directories exist.
+        let delta_parent_ino = self
+            .resolve_delta_parent(&parent_info)
+            .await?
+            .ok_or(FsError::NotFound)?;
 
         let mut stats = FileSystem::link(&self.delta, delta_ino, delta_parent_ino, newname).await?;
         stats.ino = ino; // Keep original overlay inode
@@ -1235,19 +1254,6 @@ impl FileSystem for OverlayFS {
             .get_inode_info(src_stats.ino)
             .ok_or(FsError::NotFound)?;
 
-        // Ensure source is in delta
-        let delta_src_parent_ino = if old_parent_info.layer == Layer::Delta {
-            old_parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in old_parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
-                    ino = s.ino;
-                }
-            }
-            ino
-        };
-
         // If source is in base, copy to delta first
         if src_info.layer == Layer::Base {
             self.copy_up(&old_path, src_info.underlying_ino).await?;
@@ -1257,18 +1263,16 @@ impl FileSystem for OverlayFS {
         self.remove_whiteout(&new_path).await?;
         self.ensure_parent_dirs(&new_path, 0, 0).await?;
 
-        // Get delta destination parent
-        let delta_dst_parent_ino = if new_parent_info.layer == Layer::Delta {
-            new_parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in new_parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = FileSystem::lookup(&self.delta, ino, comp).await? {
-                    ino = s.ino;
-                }
-            }
-            ino
-        };
+        // Resolve delta parents AFTER copy_up / ensure_parent_dirs,
+        // since those create the parent directories in delta.
+        let delta_src_parent_ino = self
+            .resolve_delta_parent(&old_parent_info)
+            .await?
+            .ok_or(FsError::NotFound)?;
+        let delta_dst_parent_ino = self
+            .resolve_delta_parent(&new_parent_info)
+            .await?
+            .ok_or(FsError::NotFound)?;
 
         // Perform rename in delta
         FileSystem::rename(
@@ -1280,27 +1284,9 @@ impl FileSystem for OverlayFS {
         )
         .await?;
 
-        // Create whiteout at source if it existed in base
-        let base_src_parent_ino = if old_parent_info.layer == Layer::Base {
-            old_parent_info.underlying_ino
-        } else {
-            let mut ino: i64 = 1;
-            for comp in old_parent_info.path.split('/').filter(|s| !s.is_empty()) {
-                if let Some(s) = self.base.lookup(ino, comp).await? {
-                    ino = s.ino;
-                } else {
-                    return Ok(());
-                }
-            }
-            ino
-        };
-
-        if self
-            .base
-            .lookup(base_src_parent_ino, oldname)
-            .await?
-            .is_some()
-        {
+        // If the old file is still visible through the overlay after the rename,
+        // it must be coming from the base layer — create a whiteout to hide it.
+        if self.lookup(oldparent_ino, oldname).await?.is_some() {
             self.create_whiteout(&old_path).await?;
         }
 
@@ -2215,6 +2201,69 @@ mod tests {
         Ok(())
     }
 
+    /// Test unlink of a BASE file after the parent directory has been promoted
+    /// from Base to Delta layer.
+    ///
+    /// Scenario:
+    /// 1. Base has /dir/base.txt and /dir/other.txt
+    /// 2. Lookup /dir/ (creates Base layer mapping)
+    /// 3. Create /dir/delta.txt (triggers ensure_parent_dirs, promotes /dir/ to Delta)
+    /// 4. Unlink /dir/base.txt (base file in promoted parent)
+    /// 5. base.txt should be gone (whiteout must be created)
+    ///
+    /// Bug: The base-walk loop in unlink() returns Ok(()) when a path component
+    /// lookup fails in HostFS, skipping whiteout creation.
+    #[tokio::test]
+    async fn test_overlay_unlink_base_file_in_promoted_parent() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir(base_dir.path().join("dir"))?;
+        std::fs::write(base_dir.path().join("dir/base.txt"), b"base content")?;
+        std::fs::write(base_dir.path().join("dir/other.txt"), b"other content")?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        // Step 1: Lookup the directory (creates Base layer mapping)
+        let dir_stats = overlay.lookup(ROOT_INO, "dir").await?.unwrap();
+        assert!(dir_stats.is_directory());
+
+        // Step 2: Create a file in the directory (promotes /dir/ from Base to Delta)
+        let (_delta_stats, delta_file) = overlay
+            .create_file(dir_stats.ino, "delta.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        delta_file.pwrite(0, b"delta content").await?;
+
+        // Step 3: Unlink the BASE file
+        overlay.unlink(dir_stats.ino, "base.txt").await?;
+
+        // Step 4: Verify the base file is gone via lookup
+        let deleted = overlay.lookup(dir_stats.ino, "base.txt").await?;
+        assert!(
+            deleted.is_none(),
+            "base.txt should be deleted after unlink, but lookup still finds it"
+        );
+
+        // Step 5: Verify readdir no longer shows it
+        let entries = overlay.readdir(dir_stats.ino).await?.unwrap();
+        assert!(
+            !entries.contains(&"base.txt".to_string()),
+            "readdir should not show base.txt after unlink, got: {:?}",
+            entries
+        );
+
+        // Other files should still be visible
+        assert!(entries.contains(&"other.txt".to_string()));
+        assert!(entries.contains(&"delta.txt".to_string()));
+
+        Ok(())
+    }
+
     /// Unlink of a base file must create a whiteout even when the parent
     /// directory has a stale origin mapping from a previous session.
     #[tokio::test]
@@ -2249,6 +2298,183 @@ mod tests {
         assert!(
             overlay.lookup(dir_stats.ino, "base.txt").await?.is_none(),
             "base.txt should be whiteout-deleted after unlink"
+        );
+
+        Ok(())
+    }
+
+    /// Test unlink of a BASE file in a deeply nested promoted parent.
+    ///
+    /// Scenario: base has /a/b/file.txt, promote /a/b/ by creating a delta
+    /// file there, then unlink /a/b/file.txt. The base-walk must resolve
+    /// both "a" and "b" in the HostFS to find the base parent.
+    #[tokio::test]
+    async fn test_overlay_unlink_base_file_in_nested_promoted_parent() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir_all(base_dir.path().join("a/b"))?;
+        std::fs::write(base_dir.path().join("a/b/base.txt"), b"deep base")?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        // Walk down to /a/b/ (creates Base layer mappings)
+        let a_stats = overlay.lookup(ROOT_INO, "a").await?.unwrap();
+        let b_stats = overlay.lookup(a_stats.ino, "b").await?.unwrap();
+
+        // Create a delta file in /a/b/ (promotes /a/ and /a/b/ to Delta)
+        let (_stats, file) = overlay
+            .create_file(b_stats.ino, "delta.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        file.pwrite(0, b"delta").await?;
+
+        // Unlink the base file
+        overlay.unlink(b_stats.ino, "base.txt").await?;
+
+        // Verify it's gone
+        let deleted = overlay.lookup(b_stats.ino, "base.txt").await?;
+        assert!(
+            deleted.is_none(),
+            "base.txt should be deleted after unlink in nested promoted parent"
+        );
+
+        let entries = overlay.readdir(b_stats.ino).await?.unwrap();
+        assert!(
+            !entries.contains(&"base.txt".to_string()),
+            "readdir should not show base.txt after unlink, got: {:?}",
+            entries
+        );
+        assert!(entries.contains(&"delta.txt".to_string()));
+
+        Ok(())
+    }
+
+    /// Test rmdir of a BASE directory after the parent has been promoted
+    /// from Base to Delta layer.
+    ///
+    /// Scenario: base has /parent/emptydir/, promote /parent/ by creating a
+    /// delta file, then rmdir /parent/emptydir/. The whiteout must be created
+    /// so the directory doesn't reappear.
+    #[tokio::test]
+    async fn test_overlay_rmdir_base_dir_in_promoted_parent() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir(base_dir.path().join("parent"))?;
+        std::fs::create_dir(base_dir.path().join("parent/emptydir"))?;
+        std::fs::write(base_dir.path().join("parent/keep.txt"), b"keep")?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        // Lookup parent directory (Base layer)
+        let parent_stats = overlay.lookup(ROOT_INO, "parent").await?.unwrap();
+
+        // Lookup emptydir so overlay knows about it
+        let emptydir_stats = overlay.lookup(parent_stats.ino, "emptydir").await?.unwrap();
+        assert!(emptydir_stats.is_directory());
+
+        // Create a delta file in /parent/ (promotes /parent/ to Delta)
+        let (_stats, file) = overlay
+            .create_file(parent_stats.ino, "delta.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        file.pwrite(0, b"delta").await?;
+
+        // rmdir the base directory
+        overlay.rmdir(parent_stats.ino, "emptydir").await?;
+
+        // Verify it's gone
+        let deleted = overlay.lookup(parent_stats.ino, "emptydir").await?;
+        assert!(
+            deleted.is_none(),
+            "emptydir should be deleted after rmdir, but lookup still finds it"
+        );
+
+        let entries = overlay.readdir(parent_stats.ino).await?.unwrap();
+        assert!(
+            !entries.contains(&"emptydir".to_string()),
+            "readdir should not show emptydir after rmdir, got: {:?}",
+            entries
+        );
+        assert!(entries.contains(&"keep.txt".to_string()));
+        assert!(entries.contains(&"delta.txt".to_string()));
+
+        Ok(())
+    }
+
+    /// Test rename of a BASE file creates a whiteout at the source when the
+    /// parent directory has been promoted from Base to Delta layer.
+    ///
+    /// Scenario: base has /dir/original.txt, promote /dir/ by creating a delta
+    /// file, rename /dir/original.txt to /dir/renamed.txt. The source path
+    /// must get a whiteout so original.txt doesn't reappear.
+    #[tokio::test]
+    async fn test_overlay_rename_base_file_whiteout_in_promoted_parent() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir(base_dir.path().join("dir"))?;
+        std::fs::write(base_dir.path().join("dir/original.txt"), b"original")?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        // Lookup directory (Base layer)
+        let dir_stats = overlay.lookup(ROOT_INO, "dir").await?.unwrap();
+
+        // Lookup original.txt so overlay has the inode
+        let orig_stats = overlay
+            .lookup(dir_stats.ino, "original.txt")
+            .await?
+            .unwrap();
+        assert!(orig_stats.is_file());
+
+        // Create a delta file to promote /dir/ from Base to Delta
+        let (_stats, file) = overlay
+            .create_file(dir_stats.ino, "delta.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        file.pwrite(0, b"delta").await?;
+
+        // Rename the base file within the same promoted directory
+        overlay
+            .rename(dir_stats.ino, "original.txt", dir_stats.ino, "renamed.txt")
+            .await?;
+
+        // Verify original.txt is gone (whiteout must exist)
+        let deleted = overlay.lookup(dir_stats.ino, "original.txt").await?;
+        assert!(
+            deleted.is_none(),
+            "original.txt should be gone after rename, but lookup still finds it"
+        );
+
+        // Verify renamed.txt exists
+        let renamed = overlay.lookup(dir_stats.ino, "renamed.txt").await?;
+        assert!(renamed.is_some(), "renamed.txt should exist after rename");
+
+        // Verify readdir shows the right state
+        let entries = overlay.readdir(dir_stats.ino).await?.unwrap();
+        assert!(
+            !entries.contains(&"original.txt".to_string()),
+            "readdir should not show original.txt after rename, got: {:?}",
+            entries
+        );
+        assert!(
+            entries.contains(&"renamed.txt".to_string()),
+            "readdir should show renamed.txt after rename, got: {:?}",
+            entries
         );
 
         Ok(())
@@ -2334,6 +2560,235 @@ mod tests {
         overlay.unlink(dir_stats.ino, "src.txt").await?;
         assert!(overlay.lookup(dir_stats.ino, "src.txt").await?.is_none());
         assert!(overlay.lookup(dir_stats.ino, "dst.txt").await?.is_some());
+
+        Ok(())
+    }
+
+    /// Test rename of base file across directories where both parents have
+    /// been promoted. Source directory must get a whiteout for the original
+    /// file, even though the base-walk must resolve through promoted parents.
+    #[tokio::test]
+    async fn test_overlay_rename_base_file_across_promoted_parents() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir(base_dir.path().join("src"))?;
+        std::fs::create_dir(base_dir.path().join("dst"))?;
+        std::fs::write(base_dir.path().join("src/moveme.txt"), b"moving")?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        // Lookup both directories
+        let src_stats = overlay.lookup(ROOT_INO, "src").await?.unwrap();
+        let dst_stats = overlay.lookup(ROOT_INO, "dst").await?.unwrap();
+
+        // Promote /src/ by creating a delta file
+        let (_s, f) = overlay
+            .create_file(src_stats.ino, "trigger1.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        f.pwrite(0, b"t").await?;
+
+        // Promote /dst/ by creating a delta file
+        let (_s, f) = overlay
+            .create_file(dst_stats.ino, "trigger2.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        f.pwrite(0, b"t").await?;
+
+        // Lookup moveme.txt so overlay knows it
+        let moveme = overlay.lookup(src_stats.ino, "moveme.txt").await?.unwrap();
+        assert!(moveme.is_file());
+
+        // Rename across promoted parents
+        overlay
+            .rename(src_stats.ino, "moveme.txt", dst_stats.ino, "moved.txt")
+            .await?;
+
+        // Source must be gone (whiteout at /src/moveme.txt)
+        let src_lookup = overlay.lookup(src_stats.ino, "moveme.txt").await?;
+        assert!(
+            src_lookup.is_none(),
+            "moveme.txt should be gone from /src/ after rename"
+        );
+
+        // Destination must exist
+        let dst_lookup = overlay.lookup(dst_stats.ino, "moved.txt").await?;
+        assert!(
+            dst_lookup.is_some(),
+            "moved.txt should exist in /dst/ after rename"
+        );
+
+        // readdir /src/ should not show moveme.txt
+        let src_entries = overlay.readdir(src_stats.ino).await?.unwrap();
+        assert!(
+            !src_entries.contains(&"moveme.txt".to_string()),
+            "readdir /src/ should not show moveme.txt, got: {:?}",
+            src_entries
+        );
+
+        Ok(())
+    }
+
+    /// Test rename of a BASE file in a deeply nested directory that has not
+    /// been promoted to Delta.
+    ///
+    /// Scenario: base has /deep/nested/file.txt, lookup the path (Base layer
+    /// only, no promotion), then rename file.txt within the same directory.
+    /// The delta parent must be resolved after copy_up creates it.
+    #[tokio::test]
+    async fn test_overlay_rename_base_file_delta_src_parent_before_copyup() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir_all(base_dir.path().join("deep/nested"))?;
+        std::fs::write(base_dir.path().join("deep/nested/file.txt"), b"content")?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        // Walk down to /deep/nested/ (creates Base layer mappings)
+        let deep_stats = overlay.lookup(ROOT_INO, "deep").await?.unwrap();
+        let nested_stats = overlay.lookup(deep_stats.ino, "nested").await?.unwrap();
+        let file_stats = overlay.lookup(nested_stats.ino, "file.txt").await?.unwrap();
+        assert!(file_stats.is_file());
+
+        // Rename within same directory — parents only exist in base
+        overlay
+            .rename(
+                nested_stats.ino,
+                "file.txt",
+                nested_stats.ino,
+                "renamed.txt",
+            )
+            .await?;
+
+        let renamed = overlay.lookup(nested_stats.ino, "renamed.txt").await?;
+        assert!(renamed.is_some(), "renamed.txt should exist after rename");
+
+        let original = overlay.lookup(nested_stats.ino, "file.txt").await?;
+        assert!(original.is_none(), "file.txt should be gone after rename");
+
+        let entries = overlay.readdir(nested_stats.ino).await?.unwrap();
+        assert!(
+            entries.contains(&"renamed.txt".to_string()),
+            "readdir should show renamed.txt, got: {:?}",
+            entries
+        );
+        assert!(
+            !entries.contains(&"file.txt".to_string()),
+            "readdir should not show file.txt after rename, got: {:?}",
+            entries
+        );
+
+        Ok(())
+    }
+
+    /// Test rename of a BASE file across directories when neither parent has
+    /// been promoted to Delta.
+    ///
+    /// Scenario: base has /src/base.txt and /dst/, neither exists in delta.
+    /// Rename /src/base.txt to /dst/moved.txt. Both source and destination
+    /// delta parents must be correctly resolved after copy_up.
+    #[tokio::test]
+    async fn test_overlay_rename_base_file_across_dirs_no_found_guard() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir(base_dir.path().join("src"))?;
+        std::fs::create_dir(base_dir.path().join("dst"))?;
+        std::fs::write(base_dir.path().join("src/base.txt"), b"source content")?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        let src_stats = overlay.lookup(ROOT_INO, "src").await?.unwrap();
+        let dst_stats = overlay.lookup(ROOT_INO, "dst").await?.unwrap();
+        let file_stats = overlay.lookup(src_stats.ino, "base.txt").await?.unwrap();
+        assert!(file_stats.is_file());
+        overlay
+            .rename(src_stats.ino, "base.txt", dst_stats.ino, "moved.txt")
+            .await?;
+
+        let moved = overlay.lookup(dst_stats.ino, "moved.txt").await?;
+        assert!(
+            moved.is_some(),
+            "moved.txt should exist in /dst/ after rename"
+        );
+
+        let original = overlay.lookup(src_stats.ino, "base.txt").await?;
+        assert!(
+            original.is_none(),
+            "base.txt should be gone from /src/ after rename"
+        );
+
+        let file = overlay.open(moved.unwrap().ino, libc::O_RDONLY).await?;
+        let data = file.pread(0, 1024).await?;
+        assert_eq!(data, b"source content");
+
+        Ok(())
+    }
+
+    /// Test unlink of a delta-only file does not create a spurious whiteout.
+    ///
+    /// Scenario: base has /dir/ (empty), create delta_only.txt in delta,
+    /// unlink it, then recreate with the same name. The recreated file must
+    /// be visible — no whiteout should have been left behind.
+    #[tokio::test]
+    async fn test_overlay_unlink_delta_only_file_no_spurious_whiteout() -> Result<()> {
+        let base_dir = tempdir()?;
+        std::fs::create_dir(base_dir.path().join("dir"))?;
+
+        let base = Arc::new(HostFS::new(base_dir.path())?);
+
+        let delta_dir = tempdir()?;
+        let db_path = delta_dir.path().join("delta.db");
+        let delta = AgentFS::new(db_path.to_str().unwrap()).await?;
+
+        let overlay = OverlayFS::new(base, delta);
+        overlay.init(base_dir.path().to_str().unwrap()).await?;
+
+        let dir_stats = overlay.lookup(ROOT_INO, "dir").await?.unwrap();
+
+        let (_stats, file) = overlay
+            .create_file(dir_stats.ino, "delta_only.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        file.pwrite(0, b"delta only").await?;
+
+        overlay.unlink(dir_stats.ino, "delta_only.txt").await?;
+
+        let deleted = overlay.lookup(dir_stats.ino, "delta_only.txt").await?;
+        assert!(
+            deleted.is_none(),
+            "delta_only.txt should be gone after unlink"
+        );
+
+        // Recreate with the same name
+        let (_stats2, file2) = overlay
+            .create_file(dir_stats.ino, "delta_only.txt", DEFAULT_FILE_MODE, 0, 0)
+            .await?;
+        file2.pwrite(0, b"recreated").await?;
+
+        let recreated = overlay.lookup(dir_stats.ino, "delta_only.txt").await?;
+        assert!(
+            recreated.is_some(),
+            "recreated delta_only.txt should be visible (no spurious whiteout)"
+        );
+
+        let f = overlay.open(recreated.unwrap().ino, libc::O_RDONLY).await?;
+        let data = f.pread(0, 1024).await?;
+        assert_eq!(data, b"recreated");
 
         Ok(())
     }
