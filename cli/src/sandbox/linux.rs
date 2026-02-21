@@ -162,6 +162,14 @@ pub async fn run_cmd(
             .context("Failed to read session base path")?;
         let overlay_base = PathBuf::from(overlay_base.trim());
 
+        // Check if we're running inside an existing agentfs session (nested run)
+        // If so, create an automatic snapshot before joining
+        if std::env::var("AGENTFS_SESSION").is_ok() {
+            if let Err(e) = create_auto_snapshot(&session.db_path).await {
+                eprintln!("Warning: Failed to create automatic snapshot: {}", e);
+            }
+        }
+
         eprintln!("Joining existing session: {}", session.run_id);
         eprintln!();
         return run_in_existing_session(
@@ -453,6 +461,47 @@ fn setup_run_directory(session_id: Option<String>) -> Result<RunSession> {
         fuse_mountpoint,
         base_path_file,
     })
+}
+
+/// Create an automatic snapshot before a nested run joins an existing session.
+///
+/// This creates a point-in-time copy of the delta database, allowing agents
+/// to branch off from a known state. The snapshot is saved in the same run
+/// directory with a timestamp suffix.
+async fn create_auto_snapshot(db_path: &Path) -> Result<()> {
+    use chrono::Utc;
+
+    // Generate snapshot filename with timestamp
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+    let snapshot_name = format!("snapshot_{}.db", timestamp);
+
+    let snapshot_path = db_path
+        .parent()
+        .context("Failed to get parent directory of database")?
+        .join(&snapshot_name);
+
+    let db_path_str = db_path
+        .to_str()
+        .context("Database path contains non-UTF8 characters")?;
+
+    let snapshot_path_str = snapshot_path
+        .to_str()
+        .context("Snapshot path contains non-UTF8 characters")?;
+
+    // Open the existing database and create a snapshot
+    let options = AgentFSOptions::with_path(db_path_str);
+    let agentfs = AgentFS::open(options)
+        .await
+        .context("Failed to open database for snapshot")?;
+
+    agentfs
+        .snapshot(snapshot_path_str)
+        .await
+        .context("Failed to create snapshot")?;
+
+    eprintln!("📸 Auto-snapshot created: {}", snapshot_path.display());
+
+    Ok(())
 }
 
 /// Create a pair of pipes for parent-child synchronization.
