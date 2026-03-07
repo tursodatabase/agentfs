@@ -147,6 +147,17 @@ export interface FileSystem {
   ): Promise<void>;
 
   /**
+   * Append data to a file, creating it if it doesn't exist.
+   * Creates parent directories if they don't exist.
+   * Unlike read-modify-write, this writes directly at the end of the file.
+   */
+  appendFile(
+    path: string,
+    data: string | Buffer,
+    options?: BufferEncoding | { encoding?: BufferEncoding }
+  ): Promise<void>;
+
+  /**
    * List directory contents.
    * @throws {ErrnoException} ENOENT if directory does not exist
    * @throws {ErrnoException} ENOTDIR if path is not a directory
