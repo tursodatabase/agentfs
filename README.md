@@ -64,18 +64,18 @@ Agent ID: my-agent
 Inspect the agent filesystem:
 
 ```bash
-$ agentfs fs ls my-agent
+$ agentfs fs my-agent ls
 Using agent: my-agent
 f hello.txt
 
-$ agentfs fs cat my-agent hello.txt
+$ agentfs fs my-agent cat hello.txt
 hello from agent
 ```
 
 You can also use a database path directly:
 
 ```bash
-$ agentfs fs cat .agentfs/my-agent.db hello.txt
+$ agentfs fs .agentfs/my-agent.db cat hello.txt
 hello from agent
 ```
 
