@@ -76,6 +76,16 @@ nix = { version = "0.29", features = ["fs", "user"] }
 # with Apple clang (`veor3q_u8` in `aegis128l_neon_sha3.c`).
 aegis = { version = "0.9.6", features = ["pure-rust"] }
 
+# Windows dependencies for WinFsp functionality
+# Note: Requires WinFsp to be installed from https://winfsp.dev/rel/
+# The winfsp crate includes pre-built bindings, no LLVM/bindgen needed
+[target.'cfg(target_os = "windows")'.dependencies]
+winfsp = { version = "0.12", default-features = false, features = ["delayload"] }
+
+# Build dependencies for Windows (needed for winfsp_link_delayload in build.rs)
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winfsp = { version = "0.12", default-features = false, features = ["delayload"] }
+
 
 # The profile that 'dist' will build with
 [profile.dist]

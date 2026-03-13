@@ -7,9 +7,9 @@ pub mod ps;
 pub mod sync;
 pub mod timeline;
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 pub mod mount;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_os = "windows")))]
 #[path = "mount_stub.rs"]
 pub mod mount;
 

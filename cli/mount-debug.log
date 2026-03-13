@@ -1,0 +1,126 @@
+warning: unused import: `FileSystem`
+ --> src\cmd\mount.rs:1:61
+  |
+1 | use agentfs_sdk::{error::Error as SdkError, AgentFSOptions, FileSystem};
+  |                                                             ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Context`
+ --> src\cmd\mount.rs:2:14
+  |
+2 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+
+warning: unused import: `crate::mount::MountOpts`
+  --> src\cmd\mount.rs:20:5
+   |
+20 | use crate::mount::MountOpts;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `mountpoint`
+   --> src\mount\mod.rs:175:16
+    |
+175 | pub fn unmount(mountpoint: &Path, backend: MountBackend, lazy: bool) -> Result<()> {
+    |                ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mountpoint`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `lazy`
+   --> src\mount\mod.rs:175:58
+    |
+175 | pub fn unmount(mountpoint: &Path, backend: MountBackend, lazy: bool) -> Result<()> {
+    |                                                          ^^^^ help: if this is intentional, prefix it with an underscore: `_lazy`
+
+warning: constant `DEFAULT_NFS_PORT` is never used
+  --> src\cmd\mount.rs:44:7
+   |
+44 | const DEFAULT_NFS_PORT: u32 = 11111;
+   |       ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `dir_buffer` is never read
+   --> src\winfsp.rs:158:5
+    |
+153 | pub struct AgentFSWinFsp {
+    |            ------------- field in this struct
+...
+158 |     dir_buffer: DirBuffer,
+    |     ^^^^^^^^^^
+
+warning: fields `backend` and `lazy_unmount` are never read
+  --> src\mount\mod.rs:97:5
+   |
+95 | pub struct MountHandle {
+   |            ----------- fields in this struct
+96 |     mountpoint: PathBuf,
+97 |     backend: MountBackend,
+   |     ^^^^^^^
+98 |     lazy_unmount: bool,
+   |     ^^^^^^^^^^^^
+
+warning: `agentfs` (lib) generated 8 warnings (run `cargo fix --lib -p agentfs` to apply 5 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.33s
+     Running `target\release\agentfs.exe mount .agentfs/win-test.db 'C:/mnt/win-test' --foreground`
+[DEBUG] Mounting WinFsp filesystem at C:/mnt/win-test
+[DEBUG] Getting current tokio runtime handle...
+[DEBUG] Creating AgentFSWinFsp adapter...
+[DEBUG] Configuring volume parameters...
+[DEBUG] Creating FileSystemHost...
+[DEBUG] FileSystemHost created successfully
+[DEBUG] Calling host.mount(C:/mnt/win-test)...
+[DEBUG] host.mount() returned successfully
+[DEBUG] Calling host.start()...
+[DEBUG] host.start() returned successfully
+[DEBUG] Waiting for mount to be ready...
+[2m2026-03-13T05:56:07.661659Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /
+[2m2026-03-13T05:56:07.661994Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:07.662701Z[0m [34mDEBUG[0m [2magentfs::mount::winfsp[0m[2m:[0m WinFsp mount verified - directory is accessible
+[DEBUG] WinFsp filesystem mounted successfully at C:/mnt/win-test
+Mounted at C:/mnt/win-test
+Press Ctrl+C to unmount and exit.
+[2m2026-03-13T05:56:10.180562Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /
+[2m2026-03-13T05:56:10.180716Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:10.181099Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /
+[2m2026-03-13T05:56:10.181131Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.553687Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /
+[2m2026-03-13T05:56:39.553763Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.554052Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /
+[2m2026-03-13T05:56:39.554065Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.554257Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /
+[2m2026-03-13T05:56:39.554310Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.556871Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.557075Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt.exe
+[2m2026-03-13T05:56:39.557126Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt.lnk
+[2m2026-03-13T05:56:39.557259Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.557331Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.557387Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.557442Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.557501Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.557620Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.557667Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /
+[2m2026-03-13T05:56:39.557709Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::create: /test-overwrite.txt (is_dir=false)
+[2m2026-03-13T05:56:39.557730Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::create: file does not exist, creating /test-overwrite.txt
+[2m2026-03-13T05:56:39.582490Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.582606Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+[2m2026-03-13T05:56:39.582967Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.583016Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+[2m2026-03-13T05:56:39.590324Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.590387Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+[2m2026-03-13T05:56:39.591833Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.591885Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+[2m2026-03-13T05:56:39.592157Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.592257Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.592329Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.592386Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.592449Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /
+[2m2026-03-13T05:56:39.592583Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.592642Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+[2m2026-03-13T05:56:39.616246Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.616350Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+[2m2026-03-13T05:56:39.616791Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.616851Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+[2m2026-03-13T05:56:39.624552Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::get_security_by_name: /test-overwrite.txt
+[2m2026-03-13T05:56:39.624618Z[0m [34mDEBUG[0m [2magentfs::winfsp[0m[2m:[0m WinFsp::open: /test-overwrite.txt
+error: process didn't exit successfully: `target\release\agentfs.exe mount .agentfs/win-test.db 'C:/mnt/win-test' --foreground` (exit code: 1)

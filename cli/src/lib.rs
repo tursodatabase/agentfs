@@ -20,6 +20,12 @@ pub mod nfs;
 #[cfg(unix)]
 pub mod mount;
 
+#[cfg(target_os = "windows")]
+pub mod winfsp;
+
+#[cfg(target_os = "windows")]
+pub mod mount;
+
 pub fn get_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Runtime::new().expect("Internal error: failed to initialize runtime")
 }

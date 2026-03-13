@@ -1,15 +1,28 @@
-use agentfs_sdk::{error::Error as SdkError, AgentFSOptions, FileSystem, HostFS, OverlayFS};
+use agentfs_sdk::{error::Error as SdkError, AgentFSOptions, FileSystem};
 use anyhow::{Context, Result};
 use std::{
-    path::{Path, PathBuf},
-    process::Command,
+    path::PathBuf,
     sync::Arc,
 };
+
+#[cfg(unix)]
+use agentfs_sdk::{HostFS, OverlayFS};
+#[cfg(unix)]
+use std::{
+    path::Path,
+    process::Command,
+};
+#[cfg(unix)]
 use tokio::sync::Mutex;
+#[cfg(unix)]
 use turso::value::Value;
 
-use crate::mount::{mount_fs, MountOpts};
+use crate::mount::MountOpts;
+#[cfg(unix)]
+use crate::mount::mount_fs;
+#[cfg(unix)]
 use crate::nfs::AgentNFS;
+#[cfg(unix)]
 use crate::nfsserve::tcp::NFSTcp;
 
 #[cfg(target_os = "linux")]
@@ -20,7 +33,7 @@ use std::{
     os::unix::fs::MetadataExt,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(unix, target_os = "windows"))]
 use crate::cmd::init::open_agentfs;
 #[cfg(target_os = "linux")]
 use crate::fuse::FuseMountOptions;
@@ -80,6 +93,91 @@ pub fn mount(args: MountArgs) -> Result<()> {
             rt.block_on(mount_nfs_backend(args))
         }
     }
+}
+
+/// Mount the agent filesystem (Windows).
+#[cfg(target_os = "windows")]
+pub fn mount(args: MountArgs) -> Result<()> {
+    match args.backend {
+        MountBackend::Fuse => {
+            anyhow::bail!(
+                "FUSE mounting is not supported on Windows.\n\
+                 Use --backend winfsp instead."
+            );
+        }
+        MountBackend::Nfs => {
+            anyhow::bail!(
+                "NFS mounting is not supported on Windows.\n\
+                 Use --backend winfsp instead."
+            );
+        }
+        MountBackend::Winfsp => {
+            let rt = crate::get_runtime();
+            rt.block_on(mount_winfsp_backend(args))
+        }
+    }
+}
+
+/// Mount the agent filesystem using WinFsp (Windows only).
+#[cfg(target_os = "windows")]
+async fn mount_winfsp_backend(args: MountArgs) -> Result<()> {
+    use parking_lot::Mutex;
+
+    let opts = AgentFSOptions::resolve(&args.id_or_path)?;
+
+    // WinFsp requires the mountpoint to NOT exist - it will create the directory itself.
+    // This is opposite to FUSE/NFS which require the directory to exist.
+    if args.mountpoint.exists() {
+        anyhow::bail!(
+            "Mountpoint already exists: {}. WinFsp requires a non-existent path - it will create the directory.",
+            args.mountpoint.display()
+        );
+    }
+
+    // Don't use canonicalize - it adds the \\?\ prefix which WinFsp doesn't accept,
+    // and it would fail anyway if the path doesn't exist.
+    let mountpoint = args.mountpoint.clone();
+
+    // WinFsp FileSystemName field is limited to 16 WCHARs, so use just "agentfs"
+    let fsname = "agentfs".to_string();
+
+    // Open AgentFS
+    let agentfs = match open_agentfs(opts).await {
+        Ok(fs) => fs,
+        Err(SdkError::SchemaVersionMismatch { found, expected }) => {
+            exit_schema_version_mismatch(&found, &expected, &args.id_or_path);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // Wrap filesystem in parking_lot::Mutex for WinFsp
+    let fs: Arc<Mutex<dyn agentfs_sdk::FileSystem + Send>> =
+        Arc::new(Mutex::new(agentfs.fs));
+
+    let mount_opts = crate::mount::MountOpts {
+        mountpoint: mountpoint.clone(),
+        backend: MountBackend::Winfsp,
+        fsname,
+        uid: args.uid,
+        gid: args.gid,
+        allow_other: args.allow_other,
+        allow_root: args.allow_root,
+        auto_unmount: args.auto_unmount,
+        lazy_unmount: false,
+        timeout: std::time::Duration::from_secs(10),
+    };
+
+    // Call winfsp mount directly
+    let _mount_handle = crate::mount::winfsp::mount_winfsp(fs, mount_opts).await?;
+
+    eprintln!("Mounted at {}", mountpoint.display());
+    eprintln!("Press Ctrl+C to unmount and exit.");
+
+    // Wait for Ctrl+C
+    tokio::signal::ctrl_c().await?;
+
+    // MountHandle will be dropped automatically and unmount
+    Ok(())
 }
 
 /// Mount the agent filesystem using FUSE (Linux only).
@@ -196,6 +294,7 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
 }
 
 /// Mount the agent filesystem using NFS over localhost.
+#[cfg(unix)]
 async fn mount_nfs_backend(args: MountArgs) -> Result<()> {
     use crate::cmd::init::open_agentfs;
 
@@ -315,6 +414,7 @@ async fn mount_nfs_backend(args: MountArgs) -> Result<()> {
 }
 
 /// Find an available TCP port starting from the given port.
+#[cfg(unix)]
 fn find_available_port(start_port: u32) -> Result<u32> {
     for port in start_port..start_port + 100 {
         if std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok() {
@@ -607,6 +707,18 @@ pub fn prune_mounts(force: bool) -> Result<()> {
 
 /// Prune unused agentfs mount points (macOS stub).
 #[cfg(target_os = "macos")]
+pub fn prune_mounts(_force: bool) -> Result<()> {
+    anyhow::bail!("Mount pruning is only available on Linux")
+}
+
+/// List all currently mounted agentfs filesystems (Windows stub).
+#[cfg(target_os = "windows")]
+pub fn list_mounts<W: std::io::Write>(out: &mut W) {
+    let _ = writeln!(out, "Mount listing is only available on Linux.");
+}
+
+/// Prune unused agentfs mount points (Windows stub).
+#[cfg(target_os = "windows")]
 pub fn prune_mounts(_force: bool) -> Result<()> {
     anyhow::bail!("Mount pruning is only available on Linux")
 }

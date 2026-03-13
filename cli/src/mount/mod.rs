@@ -14,18 +14,24 @@
 //! drop(handle); // auto-unmounts
 //! ```
 
+use crate::opts::MountBackend;
+
+#[cfg(target_os = "windows")]
+pub mod winfsp;
+
 #[cfg(target_os = "linux")]
 mod fuse;
-mod nfs;
 
-use anyhow::Result;
+#[cfg(unix)]
+use super::nfs;
+#[cfg(unix)]
+use tokio::sync::Mutex;
+#[cfg(unix)]
+use tokio_util::sync::CancellationToken;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-
-pub use crate::opts::MountBackend;
+use anyhow::Result;
 
 /// Default timeout for mount to become ready.
 const DEFAULT_MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -98,9 +104,14 @@ pub(crate) enum MountHandleInner {
     Fuse {
         _thread: std::thread::JoinHandle<anyhow::Result<()>>,
     },
+    #[cfg(unix)]
     Nfs {
         shutdown: CancellationToken,
         _server_handle: tokio::task::JoinHandle<()>,
+    },
+    #[cfg(target_os = "windows")]
+    WinFsp {
+        host_ptr: *mut (),
     },
 }
 
@@ -114,6 +125,7 @@ impl MountHandle {
 impl Drop for MountHandle {
     fn drop(&mut self) {
         // Move away from mountpoint before unmounting to avoid EBUSY
+        #[cfg(unix)]
         let _ = std::env::set_current_dir("/");
 
         match &self.inner {
@@ -127,6 +139,7 @@ impl Drop for MountHandle {
                     );
                 }
             }
+            #[cfg(unix)]
             MountHandleInner::Nfs { shutdown, .. } => {
                 // Signal the NFS server to shut down
                 shutdown.cancel();
@@ -135,6 +148,17 @@ impl Drop for MountHandle {
                 if let Err(e) = unmount(&self.mountpoint, self.backend, self.lazy_unmount) {
                     eprintln!(
                         "Warning: Failed to unmount NFS filesystem at {}: {}",
+                        self.mountpoint.display(),
+                        e
+                    );
+                }
+            }
+            #[cfg(target_os = "windows")]
+            MountHandleInner::WinFsp { host_ptr } => {
+                // WinFsp filesystem stops and unmounts when we reconstruct the Box and drop it
+                if let Err(e) = winfsp::unmount_winfsp(*host_ptr) {
+                    eprintln!(
+                        "Warning: Failed to unmount WinFsp filesystem at {}: {}",
                         self.mountpoint.display(),
                         e
                     );
@@ -154,7 +178,21 @@ pub fn unmount(mountpoint: &Path, backend: MountBackend, lazy: bool) -> Result<(
         MountBackend::Fuse => fuse::unmount_fuse(mountpoint, lazy),
         #[cfg(not(target_os = "linux"))]
         MountBackend::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
+        #[cfg(target_os = "windows")]
+        MountBackend::Nfs => anyhow::bail!("NFS mounting is not supported on Windows. Use --backend winfsp instead."),
+        #[cfg(all(unix, not(target_os = "linux")))]
         MountBackend::Nfs => nfs::unmount_nfs(mountpoint, lazy),
+        #[cfg(target_os = "windows")]
+        MountBackend::Winfsp => {
+            // WinFsp unmounting is handled by dropping the MountHandle
+            // External unmount is not supported - use drop(handle) instead
+            anyhow::bail!(
+                "WinFsp external unmount is not supported. \
+                 Drop the MountHandle to unmount the filesystem."
+            );
+        }
+        #[cfg(not(any(unix, target_os = "windows")))]
+        _ => anyhow::bail!("Unsupported mount backend for this platform"),
     }
 }
 
@@ -190,10 +228,33 @@ pub async fn mount_fs(
     }
 }
 
+/// Mount a filesystem with the given options (Windows version).
+#[cfg(target_os = "windows")]
+pub async fn mount_fs(
+    fs: Arc<parking_lot::Mutex<dyn agentfs_sdk::FileSystem + Send>>,
+    opts: MountOpts,
+) -> Result<MountHandle> {
+    match opts.backend {
+        MountBackend::Fuse => {
+            anyhow::bail!(
+                "FUSE mounting is not supported on Windows.\n\
+                 Use --backend winfsp instead."
+            );
+        }
+        MountBackend::Nfs => {
+            anyhow::bail!(
+                "NFS mounting is not supported on Windows.\n\
+                 Use --backend winfsp instead."
+            );
+        }
+        MountBackend::Winfsp => winfsp::mount_winfsp(fs, opts).await,
+    }
+}
+
 /// Wait for a path to become a mountpoint.
 pub fn wait_for_mount(path: &Path, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
-    let interval = Duration::from_millis(50);
+    let interval = Duration:: from_millis(50);
 
     while start.elapsed() < timeout {
         if is_mountpoint(path) {

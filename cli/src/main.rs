@@ -173,6 +173,12 @@ fn main() {
                     backend,
                 }) {
                     eprintln!("Error: {}", e);
+                    // Print error chain for debugging
+                    let mut source = e.source();
+                    while let Some(cause) = source {
+                        eprintln!("Caused by: {}", cause);
+                        source = cause.source();
+                    }
                     std::process::exit(1);
                 }
             }

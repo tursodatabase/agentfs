@@ -29,4 +29,12 @@ fn main() {
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
     println!("cargo:rustc-env=AGENTFS_VERSION={}", version);
+
+    // Enable delay-load for winfsp on Windows
+    // Note: This requires WinFsp to be installed from https://winfsp.dev/rel/
+    // The winfsp crate includes pre-built bindings, no LLVM/bindgen needed
+    #[cfg(target_os = "windows")]
+    {
+        winfsp::build::winfsp_link_delayload();
+    }
 }

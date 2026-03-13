@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__web-reader__webReader",
+      "mcp__zread__get_repo_structure",
+      "Bash(cargo build:*)",
+      "mcp__web-search-prime__web_search_prime",
+      "mcp__zread__search_doc",
+      "Read(//c/Users/esp3j/rep/winfsp-rs/filesystems/ntptfs-winfsp-rs/src/**)",
+      "Read(//c/Users/esp3j/rep/winfsp-rs/winfsp/src/host/**)",
+      "Bash(objdump:*)",
+      "mcp__zread__read_file",
+      "Bash(git checkout:*)",
+      "Read(//c/Users/esp3j/rep/winfsp-rs/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

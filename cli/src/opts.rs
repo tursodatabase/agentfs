@@ -13,9 +13,11 @@ pub enum MountBackend {
     Fuse,
     /// NFS over localhost
     Nfs,
+    /// WinFsp filesystem (Windows only)
+    Winfsp,
 }
 
-// Platform-specific default: FUSE on Linux, NFS elsewhere
+// Platform-specific default: FUSE on Linux, WinFsp on Windows, NFS on macOS
 #[allow(clippy::derivable_impls)]
 impl Default for MountBackend {
     fn default() -> Self {
@@ -23,7 +25,11 @@ impl Default for MountBackend {
         {
             MountBackend::Fuse
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            MountBackend::Winfsp
+        }
+        #[cfg(target_os = "macos")]
         {
             MountBackend::Nfs
         }
@@ -35,6 +41,7 @@ impl std::fmt::Display for MountBackend {
         match self {
             MountBackend::Fuse => write!(f, "fuse"),
             MountBackend::Nfs => write!(f, "nfs"),
+            MountBackend::Winfsp => write!(f, "winfsp"),
         }
     }
 }
