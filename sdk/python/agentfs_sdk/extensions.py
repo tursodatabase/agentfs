@@ -14,13 +14,13 @@ from typing import List, Literal, Optional
 
 from .filesystem import Filesystem
 
+import re
+
 try:
-    import re2 as re
+    import re2  # type: ignore[import-not-found]
 
     _RE2_AVAILABLE = True
 except ImportError:
-    import re  # type: ignore[no-redef]
-
     _RE2_AVAILABLE = False
 
 
@@ -98,6 +98,7 @@ async def grep(
         ...     print(match.line)
     """
     raw = await fs.read_file(path, encoding=None)
+    assert isinstance(raw, bytes)
 
     if _is_binary(raw):
         return GrepResult(message=f"Binary file {path}, cannot search")
@@ -115,9 +116,9 @@ async def grep(
     safe_pattern = re.escape(pattern) if fixed_string else pattern
 
     if _RE2_AVAILABLE:
-        opts = re.Options()
+        opts = re2.Options()  # type: ignore[possibly-undefined]
         opts.case_sensitive = not ignore_case
-        compiled = re.compile(safe_pattern, opts)
+        compiled = re2.compile(safe_pattern, opts)  # type: ignore[possibly-undefined]
     else:
         # TODO: add timeout protection for re fallback — compile and search can both
         # hang on pathological patterns from untrusted input (ReDoS). signal.SIGALRM
@@ -276,6 +277,7 @@ async def wc(fs: Filesystem, path: str) -> WcResult:
         >>> print(f"{result.lines} {result.words} {result.bytes}")
     """
     raw = await fs.read_file(path, encoding=None)
+    assert isinstance(raw, bytes)
     byte_count = len(raw)
 
     if _is_binary(raw):
