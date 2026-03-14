@@ -8,13 +8,12 @@ on untrusted patterns.
 """
 
 import fnmatch
+import re
 import warnings
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional
 
 from .filesystem import Filesystem
-
-import re
 
 try:
     import re2  # type: ignore[import-not-found]
