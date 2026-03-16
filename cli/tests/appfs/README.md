@@ -41,6 +41,12 @@ For gRPC bridge example, use:
 1. `examples/appfs/grpc-bridge/python/grpc_server.py`
 2. `examples/appfs/grpc-bridge/python/http_gateway.py`
 
+For runtime native gRPC bridge mode, export:
+
+```bash
+export APPFS_ADAPTER_GRPC_ENDPOINT=http://127.0.0.1:50051
+```
+
 ## Environment
 
 | Variable | Default |
@@ -67,6 +73,8 @@ For gRPC bridge example, use:
 | `APPFS_ADAPTER_RECONCILE_POLL_MS` | `1000` |
 | `APPFS_ADAPTER_HTTP_ENDPOINT` | _empty_ (uses in-process demo adapter) |
 | `APPFS_ADAPTER_HTTP_TIMEOUT_MS` | `5000` |
+| `APPFS_ADAPTER_GRPC_ENDPOINT` | _empty_ (mutually exclusive with HTTP endpoint) |
+| `APPFS_ADAPTER_GRPC_TIMEOUT_MS` | `5000` |
 | `APPFS_TIMEOUT_SEC` | `20` |
 | `APPFS_MOUNT_WAIT_SEC` | `20` |
 | `APPFS_MOUNT_LOG` | `cli/appfs-mount-live.log` |

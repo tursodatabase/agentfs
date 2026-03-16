@@ -319,6 +319,8 @@ fn main() {
                 poll_ms,
                 adapter_http_endpoint,
                 adapter_http_timeout_ms,
+                adapter_grpc_endpoint,
+                adapter_grpc_timeout_ms,
             } => {
                 let rt = get_runtime();
                 if let Err(e) = rt.block_on(cmd::appfs::handle_appfs_adapter_command(
@@ -328,6 +330,8 @@ fn main() {
                     poll_ms,
                     adapter_http_endpoint,
                     adapter_http_timeout_ms,
+                    adapter_grpc_endpoint,
+                    adapter_grpc_timeout_ms,
                 )) {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);

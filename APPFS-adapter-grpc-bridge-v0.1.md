@@ -43,12 +43,24 @@ Mapping target:
 1. `AdapterErrorV1::Rejected` for domain validation/permission/type errors.
 2. Transport/internal failures map to `AdapterErrorV1::Internal`.
 
-## 5. Suggested Deployment Shapes
+## 5. Deployment Shapes
 
-1. Direct runtime gRPC adapter (future extension).
-2. gRPC backend + HTTP gateway sidecar (supported now using existing `--adapter-http-endpoint` path).
+1. Direct runtime gRPC adapter (supported via `--adapter-grpc-endpoint`).
+2. gRPC backend + HTTP gateway sidecar (supported via `--adapter-http-endpoint`).
 
-## 6. Python Reference
+## 6. Runtime Option
+
+```bash
+agentfs serve appfs \
+  --root /app \
+  --app-id aiim \
+  --adapter-grpc-endpoint http://127.0.0.1:50051 \
+  --adapter-grpc-timeout-ms 5000
+```
+
+`--adapter-grpc-endpoint` is mutually exclusive with `--adapter-http-endpoint`.
+
+## 7. Python Reference
 
 Reference files:
 

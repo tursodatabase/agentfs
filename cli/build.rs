@@ -1,6 +1,8 @@
 use std::process::Command;
 
 fn main() {
+    compile_appfs_grpc_bridge_proto();
+
     // Sandbox uses libunwind-ptrace which depends on liblzma and gcc_s.
     #[cfg(target_os = "linux")]
     {
@@ -37,4 +39,24 @@ fn main() {
     {
         winfsp::build::winfsp_link_delayload();
     }
+}
+
+fn compile_appfs_grpc_bridge_proto() {
+    let proto = "../examples/appfs/grpc-bridge/proto/appfs_adapter_v1.proto";
+    let include_dir = "../examples/appfs/grpc-bridge/proto";
+
+    println!("cargo:rerun-if-changed={proto}");
+    if !std::path::Path::new(proto).exists() {
+        return;
+    }
+
+    if let Ok(protoc) = protoc_bin_vendored::protoc_bin_path() {
+        std::env::set_var("PROTOC", protoc);
+    }
+
+    tonic_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile_protos(&[proto], &[include_dir])
+        .expect("failed to compile AppFS gRPC bridge proto");
 }

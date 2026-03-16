@@ -36,8 +36,9 @@
 6. Requirements checklist item 1-17 are marked `PASS` in `APPFS-adapter-requirements-v0.1.md`.
 7. Optional language bridge reference is now available via HTTP adapter mode in runtime (`--adapter-http-endpoint`), with mapping documented in `APPFS-adapter-http-bridge-v0.1.md` and Python sample at `examples/appfs/http-bridge/python/`.
 8. Second transport example (gRPC bridge) is now documented and sampled with proto + Python gRPC service + HTTP gateway at `examples/appfs/grpc-bridge/`.
+9. Runtime native gRPC bridge mode is implemented (`--adapter-grpc-endpoint`, `--adapter-grpc-timeout-ms`) for direct out-of-process adapter dispatch.
 2. Remaining:
-1. Optional: add direct runtime gRPC adapter mode (without HTTP gateway hop), mapped to frozen `AppAdapterV1` semantics.
+1. Optional: add bridge resilience policies (retry/backoff/circuit-breaker) and explicit transport-level observability metrics.
 
 ## Task 1: Add `serve appfs` Command Skeleton
 

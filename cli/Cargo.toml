@@ -37,6 +37,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 ureq = { version = "2.10", features = ["json"] }
+tonic = { version = "0.12", features = ["transport"] }
+prost = "0.13"
+tokio-stream = { version = "0.1", features = ["net"] }
 
 # MCP Server support
 base64 = "0.22"
@@ -86,6 +89,10 @@ winfsp = { version = "0.12", default-features = false, features = ["delayload"] 
 # Build dependencies for Windows (needed for winfsp_link_delayload in build.rs)
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winfsp = { version = "0.12", default-features = false, features = ["delayload"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
 
 
 # The profile that 'dist' will build with

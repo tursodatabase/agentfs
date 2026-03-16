@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod grpc_bridge_adapter;
 mod http_bridge_adapter;
 
+use grpc_bridge_adapter::GrpcBridgeAdapterV1;
 use http_bridge_adapter::HttpBridgeAdapterV1;
 
 const DEFAULT_RETENTION_HINT_SEC: i64 = 86400;
@@ -45,6 +47,8 @@ pub async fn handle_appfs_adapter_command(
     poll_ms: u64,
     adapter_http_endpoint: Option<String>,
     adapter_http_timeout_ms: u64,
+    adapter_grpc_endpoint: Option<String>,
+    adapter_grpc_timeout_ms: u64,
 ) -> Result<()> {
     let session_id = session_id.unwrap_or_else(|| {
         let uuid = Uuid::new_v4().simple().to_string();
@@ -57,6 +61,8 @@ pub async fn handle_appfs_adapter_command(
         session_id,
         adapter_http_endpoint,
         adapter_http_timeout_ms,
+        adapter_grpc_endpoint,
+        adapter_grpc_timeout_ms,
     )?;
     adapter.prepare_action_sinks()?;
 
@@ -201,6 +207,8 @@ impl AppfsAdapter {
         session_id: String,
         adapter_http_endpoint: Option<String>,
         adapter_http_timeout_ms: u64,
+        adapter_grpc_endpoint: Option<String>,
+        adapter_grpc_timeout_ms: u64,
     ) -> Result<Self> {
         let app_dir = root.join(&app_id);
         let manifest_path = app_dir.join("_meta").join("manifest.res.json");
@@ -228,20 +236,45 @@ impl AppfsAdapter {
         let cursor = Self::load_cursor(&cursor_path)?;
         let next_seq = cursor.max_seq + 1;
         let action_specs = Self::load_action_specs(&manifest_path)?;
-        let business_adapter: Box<dyn AppAdapterV1> = if let Some(endpoint) = adapter_http_endpoint
+        let normalized_http_endpoint = adapter_http_endpoint
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            eprintln!("AppFS adapter using HTTP bridge endpoint: {endpoint}");
-            Box::new(HttpBridgeAdapterV1::new(
-                app_id.clone(),
-                endpoint.to_string(),
-                Duration::from_millis(adapter_http_timeout_ms.max(1)),
-            ))
-        } else {
-            Box::new(DemoAppAdapterV1::new(app_id.clone()))
-        };
+            .map(|s| s.to_string());
+        let normalized_grpc_endpoint = adapter_grpc_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        if normalized_http_endpoint.is_some() && normalized_grpc_endpoint.is_some() {
+            anyhow::bail!(
+                "Only one bridge endpoint can be configured at a time: --adapter-http-endpoint or --adapter-grpc-endpoint"
+            );
+        }
+
+        let business_adapter: Box<dyn AppAdapterV1> =
+            if let Some(endpoint) = normalized_grpc_endpoint {
+                eprintln!("AppFS adapter using gRPC bridge endpoint: {endpoint}");
+                Box::new(
+                    GrpcBridgeAdapterV1::new(
+                        app_id.clone(),
+                        endpoint,
+                        Duration::from_millis(adapter_grpc_timeout_ms.max(1)),
+                    )
+                    .map_err(|err| {
+                        anyhow::anyhow!("failed to initialize gRPC bridge adapter: {err}")
+                    })?,
+                )
+            } else if let Some(endpoint) = normalized_http_endpoint {
+                eprintln!("AppFS adapter using HTTP bridge endpoint: {endpoint}");
+                Box::new(HttpBridgeAdapterV1::new(
+                    app_id.clone(),
+                    endpoint,
+                    Duration::from_millis(adapter_http_timeout_ms.max(1)),
+                ))
+            } else {
+                Box::new(DemoAppAdapterV1::new(app_id.clone()))
+            };
         if business_adapter.app_id() != app_id {
             anyhow::bail!(
                 "Adapter app_id mismatch: adapter={} runtime={}",

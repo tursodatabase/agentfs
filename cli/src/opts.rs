@@ -429,12 +429,30 @@ pub enum ServeCommand {
         /// Optional HTTP bridge endpoint for out-of-process adapters.
         /// When provided, runtime dispatches adapter calls to:
         /// POST {endpoint}/v1/submit-action and /v1/submit-control-action
-        #[arg(long, env = "APPFS_ADAPTER_HTTP_ENDPOINT")]
+        #[arg(
+            long,
+            env = "APPFS_ADAPTER_HTTP_ENDPOINT",
+            conflicts_with = "adapter_grpc_endpoint"
+        )]
         adapter_http_endpoint: Option<String>,
 
         /// HTTP bridge request timeout in milliseconds.
         #[arg(long, default_value_t = 5000, env = "APPFS_ADAPTER_HTTP_TIMEOUT_MS")]
         adapter_http_timeout_ms: u64,
+
+        /// Optional gRPC bridge endpoint for out-of-process adapters.
+        /// Example: http://127.0.0.1:50051
+        /// Mutually exclusive with --adapter-http-endpoint.
+        #[arg(
+            long,
+            env = "APPFS_ADAPTER_GRPC_ENDPOINT",
+            conflicts_with = "adapter_http_endpoint"
+        )]
+        adapter_grpc_endpoint: Option<String>,
+
+        /// gRPC bridge request timeout in milliseconds.
+        #[arg(long, default_value_t = 5000, env = "APPFS_ADAPTER_GRPC_TIMEOUT_MS")]
+        adapter_grpc_timeout_ms: u64,
     },
 }
 
