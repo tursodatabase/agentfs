@@ -425,6 +425,16 @@ pub enum ServeCommand {
         /// Poll interval in milliseconds for action sink scanning
         #[arg(long, default_value_t = 200)]
         poll_ms: u64,
+
+        /// Optional HTTP bridge endpoint for out-of-process adapters.
+        /// When provided, runtime dispatches adapter calls to:
+        /// POST {endpoint}/v1/submit-action and /v1/submit-control-action
+        #[arg(long, env = "APPFS_ADAPTER_HTTP_ENDPOINT")]
+        adapter_http_endpoint: Option<String>,
+
+        /// HTTP bridge request timeout in milliseconds.
+        #[arg(long, default_value_t = 5000, env = "APPFS_ADAPTER_HTTP_TIMEOUT_MS")]
+        adapter_http_timeout_ms: u64,
     },
 }
 

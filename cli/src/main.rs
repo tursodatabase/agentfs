@@ -317,10 +317,17 @@ fn main() {
                 app_id,
                 session_id,
                 poll_ms,
+                adapter_http_endpoint,
+                adapter_http_timeout_ms,
             } => {
                 let rt = get_runtime();
                 if let Err(e) = rt.block_on(cmd::appfs::handle_appfs_adapter_command(
-                    root, app_id, session_id, poll_ms,
+                    root,
+                    app_id,
+                    session_id,
+                    poll_ms,
+                    adapter_http_endpoint,
+                    adapter_http_timeout_ms,
                 )) {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);

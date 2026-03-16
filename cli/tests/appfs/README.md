@@ -30,6 +30,12 @@ cd cli
 ./tests/appfs/run-live-with-adapter.sh
 ```
 
+For bridge-mode runs (runtime -> external HTTP adapter), start bridge service first and export:
+
+```bash
+export APPFS_ADAPTER_HTTP_ENDPOINT=http://127.0.0.1:8080
+```
+
 ## Environment
 
 | Variable | Default |
@@ -54,6 +60,8 @@ cd cli
 | `APPFS_APP_ID` | `aiim` |
 | `APPFS_ADAPTER_POLL_MS` | `100` |
 | `APPFS_ADAPTER_RECONCILE_POLL_MS` | `1000` |
+| `APPFS_ADAPTER_HTTP_ENDPOINT` | _empty_ (uses in-process demo adapter) |
+| `APPFS_ADAPTER_HTTP_TIMEOUT_MS` | `5000` |
 | `APPFS_TIMEOUT_SEC` | `20` |
 | `APPFS_MOUNT_WAIT_SEC` | `20` |
 | `APPFS_MOUNT_LOG` | `cli/appfs-mount-live.log` |

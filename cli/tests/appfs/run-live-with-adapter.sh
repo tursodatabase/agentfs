@@ -11,6 +11,8 @@ APPFS_LIVE_MOUNTPOINT="${APPFS_LIVE_MOUNTPOINT:-/tmp/agentfs-appfs-live-$$}"
 APPFS_APP_ID="${APPFS_APP_ID:-aiim}"
 APPFS_ADAPTER_POLL_MS="${APPFS_ADAPTER_POLL_MS:-100}"
 APPFS_ADAPTER_RECONCILE_POLL_MS="${APPFS_ADAPTER_RECONCILE_POLL_MS:-1000}"
+APPFS_ADAPTER_HTTP_ENDPOINT="${APPFS_ADAPTER_HTTP_ENDPOINT:-}"
+APPFS_ADAPTER_HTTP_TIMEOUT_MS="${APPFS_ADAPTER_HTTP_TIMEOUT_MS:-5000}"
 APPFS_TIMEOUT_SEC="${APPFS_TIMEOUT_SEC:-20}"
 APPFS_MOUNT_WAIT_SEC="${APPFS_MOUNT_WAIT_SEC:-20}"
 APPFS_MOUNT_LOG="${APPFS_MOUNT_LOG:-$CLI_DIR/appfs-mount-live.log}"
@@ -31,7 +33,11 @@ fail() {
 start_adapter() {
     poll_ms="${1:-$APPFS_ADAPTER_POLL_MS}"
     say "Starting AppFS adapter runtime..."
-    "$AGENTFS_BIN" serve appfs --root "$APPFS_LIVE_MOUNTPOINT" --app-id "$APPFS_APP_ID" --poll-ms "$poll_ms" >"$APPFS_ADAPTER_LOG" 2>&1 &
+    set -- "$AGENTFS_BIN" serve appfs --root "$APPFS_LIVE_MOUNTPOINT" --app-id "$APPFS_APP_ID" --poll-ms "$poll_ms"
+    if [ -n "$APPFS_ADAPTER_HTTP_ENDPOINT" ]; then
+        set -- "$@" --adapter-http-endpoint "$APPFS_ADAPTER_HTTP_ENDPOINT" --adapter-http-timeout-ms "$APPFS_ADAPTER_HTTP_TIMEOUT_MS"
+    fi
+    "$@" >"$APPFS_ADAPTER_LOG" 2>&1 &
     ADAPTER_PID=$!
     sleep 1
     if ! kill -0 "$ADAPTER_PID" 2>/dev/null; then

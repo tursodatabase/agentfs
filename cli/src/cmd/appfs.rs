@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod http_bridge_adapter;
+
+use http_bridge_adapter::HttpBridgeAdapterV1;
+
 const DEFAULT_RETENTION_HINT_SEC: i64 = 86400;
 const MIN_POLL_MS: u64 = 50;
 #[cfg(unix)]
@@ -39,13 +43,21 @@ pub async fn handle_appfs_adapter_command(
     app_id: String,
     session_id: Option<String>,
     poll_ms: u64,
+    adapter_http_endpoint: Option<String>,
+    adapter_http_timeout_ms: u64,
 ) -> Result<()> {
     let session_id = session_id.unwrap_or_else(|| {
         let uuid = Uuid::new_v4().simple().to_string();
         format!("sess-{}", &uuid[..8])
     });
 
-    let mut adapter = AppfsAdapter::new(root, app_id, session_id)?;
+    let mut adapter = AppfsAdapter::new(
+        root,
+        app_id,
+        session_id,
+        adapter_http_endpoint,
+        adapter_http_timeout_ms,
+    )?;
     adapter.prepare_action_sinks()?;
 
     eprintln!(
@@ -183,7 +195,13 @@ struct AppfsAdapter {
 }
 
 impl AppfsAdapter {
-    fn new(root: PathBuf, app_id: String, session_id: String) -> Result<Self> {
+    fn new(
+        root: PathBuf,
+        app_id: String,
+        session_id: String,
+        adapter_http_endpoint: Option<String>,
+        adapter_http_timeout_ms: u64,
+    ) -> Result<Self> {
         let app_dir = root.join(&app_id);
         let manifest_path = app_dir.join("_meta").join("manifest.res.json");
         let events_path = app_dir.join("_stream").join("events.evt.jsonl");
@@ -210,8 +228,20 @@ impl AppfsAdapter {
         let cursor = Self::load_cursor(&cursor_path)?;
         let next_seq = cursor.max_seq + 1;
         let action_specs = Self::load_action_specs(&manifest_path)?;
-        let business_adapter: Box<dyn AppAdapterV1> =
-            Box::new(DemoAppAdapterV1::new(app_id.clone()));
+        let business_adapter: Box<dyn AppAdapterV1> = if let Some(endpoint) = adapter_http_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            eprintln!("AppFS adapter using HTTP bridge endpoint: {endpoint}");
+            Box::new(HttpBridgeAdapterV1::new(
+                app_id.clone(),
+                endpoint.to_string(),
+                Duration::from_millis(adapter_http_timeout_ms.max(1)),
+            ))
+        } else {
+            Box::new(DemoAppAdapterV1::new(app_id.clone()))
+        };
         if business_adapter.app_id() != app_id {
             anyhow::bail!(
                 "Adapter app_id mismatch: adapter={} runtime={}",
