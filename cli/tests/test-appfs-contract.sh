@@ -26,6 +26,7 @@ else
     $DIR/appfs/test-manifest-policy.sh
     $DIR/appfs/test-streaming-lifecycle.sh
     $DIR/appfs/test-submit-reject.sh
+    $DIR/appfs/test-submit-order.sh
     "
 fi
 

@@ -49,6 +49,10 @@ echo "$types" | grep -q "action.progress" || fail "missing action.progress"
 echo "$types" | grep -q "action.completed" || fail "missing action.completed"
 pass "streaming lifecycle includes accepted/progress/completed"
 
+terminal_count="$(jq -r 'select(.type=="action.completed" or .type=="action.failed" or .type=="action.canceled") | .type' "$tmp_file" | wc -l | tr -d ' ')"
+[ "$terminal_count" = "1" ] || fail "expected exactly one terminal event, got $terminal_count"
+pass "streaming request has single terminal event"
+
 rm -f "$tmp_file"
 
 say "CT-006 done"
