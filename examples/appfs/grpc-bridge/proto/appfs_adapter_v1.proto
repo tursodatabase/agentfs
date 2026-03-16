@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package appfs.adapter.v1;
+
+message RequestContext {
+  string app_id = 1;
+  string session_id = 2;
+  string request_id = 3;
+  string client_token = 4;
+}
+
+enum InputMode {
+  INPUT_MODE_UNSPECIFIED = 0;
+  INPUT_MODE_TEXT = 1;
+  INPUT_MODE_JSON = 2;
+  INPUT_MODE_TEXT_OR_JSON = 3;
+}
+
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  EXECUTION_MODE_INLINE = 1;
+  EXECUTION_MODE_STREAMING = 2;
+}
+
+message SubmitActionRequest {
+  string app_id = 1;
+  string path = 2;
+  string payload = 3;
+  InputMode input_mode = 4;
+  ExecutionMode execution_mode = 5;
+  RequestContext context = 6;
+}
+
+message PagingFetchNextAction {
+  string handle_id = 1;
+  uint64 page_no = 2;
+  bool has_more = 3;
+}
+
+message PagingCloseAction {
+  string handle_id = 1;
+}
+
+message SubmitControlActionRequest {
+  string app_id = 1;
+  string path = 2;
+  oneof action {
+    PagingFetchNextAction paging_fetch_next = 3;
+    PagingCloseAction paging_close = 4;
+  }
+  RequestContext context = 10;
+}
+
+message BridgeError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message CompletedOutcome {
+  string content_json = 1;
+}
+
+message StreamingOutcome {
+  string accepted_content_json = 1;
+  string progress_content_json = 2;
+  string terminal_content_json = 3;
+  bool has_accepted_content = 4;
+  bool has_progress_content = 5;
+}
+
+message SubmitActionResponse {
+  oneof result {
+    CompletedOutcome completed = 1;
+    StreamingOutcome streaming = 2;
+    BridgeError error = 3;
+  }
+}
+
+message ControlCompletedOutcome {
+  string content_json = 1;
+}
+
+message SubmitControlActionResponse {
+  oneof result {
+    ControlCompletedOutcome completed = 1;
+    BridgeError error = 2;
+  }
+}
+
+service AppfsAdapterBridge {
+  rpc SubmitAction(SubmitActionRequest) returns (SubmitActionResponse);
+  rpc SubmitControlAction(SubmitControlActionRequest) returns (SubmitControlActionResponse);
+}

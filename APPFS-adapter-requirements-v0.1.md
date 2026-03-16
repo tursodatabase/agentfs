@@ -275,6 +275,7 @@ Where:
 3. Current Rust SDK reference includes matrix-style trait tests in `sdk/rust/src/appfs_adapter.rs`.
 4. Current Rust SDK reference demo implementation is published at `sdk/rust/src/appfs_demo_adapter.rs`.
 5. Current CLI runtime includes optional HTTP bridge transport for out-of-process adapters; mapping is documented in `APPFS-adapter-http-bridge-v0.1.md`.
+6. gRPC transport reference (proto + examples) is documented in `APPFS-adapter-grpc-bridge-v0.1.md` and `examples/appfs/grpc-bridge/`.
 
 ## 7. Security Requirements
 

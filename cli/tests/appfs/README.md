@@ -36,6 +36,11 @@ For bridge-mode runs (runtime -> external HTTP adapter), start bridge service fi
 export APPFS_ADAPTER_HTTP_ENDPOINT=http://127.0.0.1:8080
 ```
 
+For gRPC bridge example, use:
+
+1. `examples/appfs/grpc-bridge/python/grpc_server.py`
+2. `examples/appfs/grpc-bridge/python/http_gateway.py`
+
 ## Environment
 
 | Variable | Default |
