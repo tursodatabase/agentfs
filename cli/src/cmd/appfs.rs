@@ -124,6 +124,14 @@ struct CursorState {
 struct PagingHandle {
     page_no: u64,
     closed: bool,
+    owner_session: String,
+    expires_at_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct PagingRequest {
+    handle_id: String,
+    session_id: Option<String>,
 }
 
 struct AppfsAdapter {
@@ -282,16 +290,22 @@ impl AppfsAdapter {
         let client_token = extract_client_token(payload);
 
         if normalized_path == "/_paging/fetch_next.act" {
-            match parse_handle_id(payload) {
-                Ok(handle_id) => {
-                    if !is_handle_format_valid(&handle_id) {
+            match parse_paging_request(payload) {
+                Ok(request) => {
+                    if !is_handle_format_valid(&request.handle_id) {
                         eprintln!(
                             "AppFS adapter rejected invalid handle format at close-time: {}",
                             normalized_path
                         );
                         return Ok(ProcessOutcome::Rejected);
                     }
-                    self.handle_fetch_next(&normalized_path, &request_id, &handle_id)?;
+                    self.handle_fetch_next(
+                        &normalized_path,
+                        &request_id,
+                        &request.handle_id,
+                        request.session_id.as_deref(),
+                        client_token,
+                    )?;
                     return Ok(ProcessOutcome::Submitted);
                 }
                 Err(_) => {
@@ -307,16 +321,22 @@ impl AppfsAdapter {
         }
 
         if normalized_path == "/_paging/close.act" {
-            match parse_handle_id(payload) {
-                Ok(handle_id) => {
-                    if !is_handle_format_valid(&handle_id) {
+            match parse_paging_request(payload) {
+                Ok(request) => {
+                    if !is_handle_format_valid(&request.handle_id) {
                         eprintln!(
                             "AppFS adapter rejected invalid close handle format at close-time: {}",
                             normalized_path
                         );
                         return Ok(ProcessOutcome::Rejected);
                     }
-                    self.handle_close_handle(&normalized_path, &request_id, &handle_id)?;
+                    self.handle_close_handle(
+                        &normalized_path,
+                        &request_id,
+                        &request.handle_id,
+                        request.session_id.as_deref(),
+                        client_token,
+                    )?;
                     return Ok(ProcessOutcome::Submitted);
                 }
                 Err(_) => {
@@ -357,6 +377,8 @@ impl AppfsAdapter {
         action_path: &str,
         request_id: &str,
         handle_id: &str,
+        requester_session_id: Option<&str>,
+        client_token: Option<String>,
     ) -> Result<()> {
         if !is_handle_format_valid(handle_id) {
             return self.emit_failed(
@@ -364,33 +386,58 @@ impl AppfsAdapter {
                 request_id,
                 ERR_INVALID_ARGUMENT,
                 "invalid handle_id format",
-                None,
+                client_token,
             );
         }
 
-        let handle = match self.handles.get_mut(handle_id) {
-            Some(h) => h,
+        let (owner_session, expires_at_ts, closed) = match self.handles.get(handle_id) {
+            Some(h) => (h.owner_session.clone(), h.expires_at_ts, h.closed),
             None => {
                 return self.emit_failed(
                     action_path,
                     request_id,
                     ERR_PAGER_HANDLE_NOT_FOUND,
                     "handle not found",
-                    None,
+                    client_token,
                 );
             }
         };
 
-        if handle.closed {
+        let effective_session = requester_session_id.unwrap_or(self.session_id.as_str());
+        if effective_session != owner_session {
+            return self.emit_failed(
+                action_path,
+                request_id,
+                ERR_PERMISSION_DENIED,
+                "cross-session handle access denied",
+                client_token,
+            );
+        }
+
+        if expires_at_ts.is_some_and(|expiry| Utc::now().timestamp() >= expiry) {
+            return self.emit_failed(
+                action_path,
+                request_id,
+                ERR_PAGER_HANDLE_EXPIRED,
+                "handle expired",
+                client_token,
+            );
+        }
+
+        if closed {
             return self.emit_failed(
                 action_path,
                 request_id,
                 ERR_PAGER_HANDLE_CLOSED,
                 "handle already closed",
-                None,
+                client_token,
             );
         }
 
+        let handle = self
+            .handles
+            .get_mut(handle_id)
+            .expect("paging handle should exist after precheck");
         handle.page_no += 1;
         let page_no = handle.page_no;
         let content = json!({
@@ -414,7 +461,7 @@ impl AppfsAdapter {
             "action.completed",
             Some(content),
             None,
-            None,
+            client_token,
         )
     }
 
@@ -423,6 +470,8 @@ impl AppfsAdapter {
         action_path: &str,
         request_id: &str,
         handle_id: &str,
+        requester_session_id: Option<&str>,
+        client_token: Option<String>,
     ) -> Result<()> {
         if !is_handle_format_valid(handle_id) {
             return self.emit_failed(
@@ -430,33 +479,58 @@ impl AppfsAdapter {
                 request_id,
                 ERR_INVALID_ARGUMENT,
                 "invalid handle_id format",
-                None,
+                client_token,
             );
         }
 
-        let handle = match self.handles.get_mut(handle_id) {
-            Some(h) => h,
+        let (owner_session, expires_at_ts, closed) = match self.handles.get(handle_id) {
+            Some(h) => (h.owner_session.clone(), h.expires_at_ts, h.closed),
             None => {
                 return self.emit_failed(
                     action_path,
                     request_id,
                     ERR_PAGER_HANDLE_NOT_FOUND,
                     "handle not found",
-                    None,
+                    client_token,
                 );
             }
         };
 
-        if handle.closed {
+        let effective_session = requester_session_id.unwrap_or(self.session_id.as_str());
+        if effective_session != owner_session {
+            return self.emit_failed(
+                action_path,
+                request_id,
+                ERR_PERMISSION_DENIED,
+                "cross-session handle access denied",
+                client_token,
+            );
+        }
+
+        if expires_at_ts.is_some_and(|expiry| Utc::now().timestamp() >= expiry) {
+            return self.emit_failed(
+                action_path,
+                request_id,
+                ERR_PAGER_HANDLE_EXPIRED,
+                "handle expired",
+                client_token,
+            );
+        }
+
+        if closed {
             return self.emit_failed(
                 action_path,
                 request_id,
                 ERR_PAGER_HANDLE_CLOSED,
                 "handle already closed",
-                None,
+                client_token,
             );
         }
 
+        let handle = self
+            .handles
+            .get_mut(handle_id)
+            .expect("paging handle should exist after precheck");
         handle.closed = true;
         self.emit_event(
             action_path,
@@ -464,7 +538,7 @@ impl AppfsAdapter {
             "action.completed",
             Some(json!({ "closed": true, "handle_id": handle_id })),
             None,
-            None,
+            client_token,
         )
     }
 
@@ -794,6 +868,19 @@ impl AppfsAdapter {
                     PagingHandle {
                         page_no: 0,
                         closed: false,
+                        owner_session: json
+                            .get("page")
+                            .and_then(|p| p.get("session_id"))
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(self.session_id.as_str())
+                            .to_string(),
+                        expires_at_ts: json
+                            .get("page")
+                            .and_then(|p| p.get("expires_at"))
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_rfc3339_timestamp),
                     },
                 );
             }
@@ -979,7 +1066,7 @@ fn extract_client_token(payload: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn parse_handle_id(payload: &str) -> std::result::Result<String, &'static str> {
+fn parse_paging_request(payload: &str) -> std::result::Result<PagingRequest, &'static str> {
     let text = payload.trim();
     if text.is_empty() {
         return Err(ERR_INVALID_ARGUMENT);
@@ -991,10 +1078,28 @@ fn parse_handle_id(payload: &str) -> std::result::Result<String, &'static str> {
             .get("handle_id")
             .and_then(|v| v.as_str())
             .ok_or(ERR_INVALID_ARGUMENT)?;
-        return Ok(handle_id.trim().to_string());
+        let session_id = json
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        return Ok(PagingRequest {
+            handle_id: handle_id.trim().to_string(),
+            session_id,
+        });
     }
 
-    Ok(text.lines().next().unwrap_or("").trim().to_string())
+    Ok(PagingRequest {
+        handle_id: text.lines().next().unwrap_or("").trim().to_string(),
+        session_id: None,
+    })
+}
+
+fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp())
 }
 
 fn is_handle_format_valid(handle_id: &str) -> bool {
@@ -1008,18 +1113,28 @@ fn is_handle_format_valid(handle_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_client_token, is_handle_format_valid, parse_handle_id};
+    use super::{extract_client_token, is_handle_format_valid, parse_paging_request};
 
     #[test]
     fn parse_handle_text_mode() {
-        let handle = parse_handle_id("ph_7f2c\n").expect("expected handle");
-        assert_eq!(handle, "ph_7f2c");
+        let req = parse_paging_request("ph_7f2c\n").expect("expected handle");
+        assert_eq!(req.handle_id, "ph_7f2c");
+        assert_eq!(req.session_id, None);
     }
 
     #[test]
     fn parse_handle_json_mode() {
-        let handle = parse_handle_id(r#"{"handle_id":"ph_abc"}"#).expect("expected handle");
-        assert_eq!(handle, "ph_abc");
+        let req = parse_paging_request(r#"{"handle_id":"ph_abc"}"#).expect("expected handle");
+        assert_eq!(req.handle_id, "ph_abc");
+        assert_eq!(req.session_id, None);
+    }
+
+    #[test]
+    fn parse_handle_json_with_session_mode() {
+        let req = parse_paging_request(r#"{"handle_id":"ph_abc","session_id":"sess-other"}"#)
+            .expect("expected handle");
+        assert_eq!(req.handle_id, "ph_abc");
+        assert_eq!(req.session_id.as_deref(), Some("sess-other"));
     }
 
     #[test]

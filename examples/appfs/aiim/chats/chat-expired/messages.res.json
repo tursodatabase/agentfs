@@ -1,0 +1,10 @@
+{
+  "items": [],
+  "page": {
+    "handle_id": "ph_expired",
+    "page_no": 0,
+    "has_more": false,
+    "mode": "snapshot",
+    "expires_at": "2020-01-01T00:00:00Z"
+  }
+}
