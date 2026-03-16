@@ -30,10 +30,11 @@
 1. Completed:
 1. Task 1-8 are implemented and validated with live contract coverage (`CT-001` to `CT-016`).
 2. Runtime covers long-handle normalization and restart reconciliation for in-flight streaming requests.
-3. Requirements checklist item 1-16 are marked `PASS` in `APPFS-adapter-requirements-v0.1.md`.
+3. Task 9 core refactor is implemented: runtime demo action handling now dispatches through a frozen SDK trait (`AppAdapterV1`) in `sdk/rust/src/appfs_adapter.rs`.
+4. Requirements checklist item 1-17 are marked `PASS` in `APPFS-adapter-requirements-v0.1.md`.
 2. Remaining:
-1. Extract adapter business logic from runtime demo path into a formal SDK abstraction layer.
-2. Freeze the v0.1 adapter interface contract and publish compatibility policy for third-party implementers.
+1. Extract paging/control-path logic into SDK-facing adapter hooks (currently action business path is abstracted first).
+2. Add SDK-level conformance fixture tests that validate trait implementations independently from the file-watching runtime.
 
 ## Task 1: Add `serve appfs` Command Skeleton
 

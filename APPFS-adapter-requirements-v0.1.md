@@ -314,7 +314,7 @@ Evidence sources used:
 | 14 | PASS | `CT-003` + publish sequence in code | `events/cursor/from-seq` consistency validated for normal publish path |
 | 15 | PASS | `CT-002/CT-003` + seq-based `event_id` | `event_id` present and replay-stable |
 | 16 | PASS | `CT-016` in `run-live-with-adapter.sh` validation log + `cli/src/cmd/appfs.rs` (`inflight.jobs.res.json`) | graceful stop/restart and accepted-but-not-terminal streaming reconciliation are validated end-to-end |
-| 17 | TODO | `APPFS-adapter-implementation-plan-v0.1.md` Task 9 | Adapter SDK abstraction and v0.1 frozen interface are planned but not yet implemented in runtime code |
+| 17 | PASS | `sdk/rust/src/appfs_adapter.rs` + `cli/src/cmd/appfs.rs` + `run-live-with-adapter.sh` (`CT-001` to `CT-016`) | Runtime dispatches business action handling through the frozen `AppAdapterV1` contract and preserves live conformance behavior |
 
 ## 9. Delivery Plan
 
