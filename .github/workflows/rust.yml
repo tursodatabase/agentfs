@@ -10,6 +10,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  appfs-contract-gate:
+    name: AppFS Contract Gate (linux)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: nightly
+
+    - name: Install system dependencies
+      run: |
+        ../scripts/install-deps.sh
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Build CLI
+      run: cargo build --verbose
+
+    - name: Run AppFS static contract suite
+      env:
+        APPFS_CONTRACT_TESTS: "1"
+        APPFS_STATIC_FIXTURE: "1"
+        APPFS_ROOT: ${{ github.workspace }}/examples/appfs
+      run: sh ./tests/test-appfs-contract.sh
+
+    - name: Run AppFS live contract suite
+      env:
+        APPFS_CONTRACT_TESTS: "1"
+        APPFS_TIMEOUT_SEC: "30"
+      run: sh ./tests/appfs/run-live-with-adapter.sh
+
   test:
     name: Test (${{ matrix.os }}, ${{ matrix.project }})
     runs-on: ${{ matrix.os }}

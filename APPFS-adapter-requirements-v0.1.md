@@ -1,6 +1,6 @@
 # AppFS Adapter Layer Requirements v0.1
 
-- Version: `0.1-draft-r3`
+- Version: `0.1-draft-r4`
 - Date: `2026-03-16`
 - Status: `Draft`
 - Depends on: `APPFS-v0.1 (r8)`
@@ -200,6 +200,13 @@ Crash/restart MUST not expose partially published state where `cursor` points pa
 3. Third-party implementations in any language are allowed, but they MUST preserve AppFS protocol semantics and pass conformance tests.
 4. Conformance docs MUST publish the frozen method-level contract and compatibility claim criteria.
 
+### AR-019 CI Conformance Gate
+
+1. Repository CI MUST run AppFS static contract checks (`APPFS_STATIC_FIXTURE=1`).
+2. Repository CI MUST run AppFS live contract checks (`run-live-with-adapter.sh`) on Linux.
+3. Any change that breaks Core contract tests MUST fail CI.
+4. CI gate definition MUST be version-controlled (workflow file), not ad-hoc in local scripts.
+
 ## 5. Non-Functional Requirements
 
 ### ANR-001 Latency
@@ -265,6 +272,7 @@ Where:
 2. Removing/renaming/changing behavior of existing required methods is a breaking change and MUST wait for `v0.2`.
 3. Any implementation-specific extension MUST be documented as optional and MUST NOT alter Core semantics.
 4. Manifest SHOULD expose adapter compatibility metadata (e.g., `adapter_sdk_version`).
+5. SDK exposes `APPFS_ADAPTER_SDK_VERSION` and `is_appfs_adapter_sdk_v01_compatible(...)` as the canonical version check helpers.
 
 ### 6.2 Conformance Fixture Guidance
 
@@ -277,6 +285,7 @@ Where:
 5. Current CLI runtime includes optional HTTP bridge transport for out-of-process adapters; mapping is documented in `APPFS-adapter-http-bridge-v0.1.md`.
 6. gRPC transport reference (proto + examples) is documented in `APPFS-adapter-grpc-bridge-v0.1.md` and `examples/appfs/grpc-bridge/`.
 7. Current CLI runtime includes optional native gRPC bridge transport (`--adapter-grpc-endpoint`) mapped to the same frozen `AppAdapterV1` semantics.
+8. Rust SDK publishes reusable matrix runners for adapter implementers in `sdk/rust/src/appfs_adapter_testkit.rs`.
 
 ## 7. Security Requirements
 
@@ -305,6 +314,7 @@ Adapter implementation is accepted when all checks pass:
 15. `event_id` is present on all events and remains stable across replay.
 16. Lifecycle checks: readiness/liveness/shutdown/recovery behaviors are verified in integration tests.
 17. Adapter SDK freeze: runtime delegates through frozen adapter interface and compatibility policy is documented.
+18. CI gate: Linux CI executes both static and live AppFS contract suites.
 
 ### 8.1 Phase 1 Validation Snapshot (`2026-03-16`)
 
@@ -316,6 +326,7 @@ Evidence sources used:
 4. Live contract additions: `cli/tests/appfs/test-streaming-lifecycle.sh`, `cli/tests/appfs/test-submit-reject.sh`, `cli/tests/appfs/test-submit-order.sh`, `cli/tests/appfs/test-paging-errors.sh`, `cli/tests/appfs/test-submit-atomicity.sh`, `cli/tests/appfs/test-submit-interrupt.sh`, `cli/tests/appfs/test-path-safety.sh`, `cli/tests/appfs/test-duplicate-consumption.sh`, `cli/tests/appfs/test-concurrent-submit-stress.sh`
 5. Harness lifecycle probe: `cli/tests/appfs/run-live-with-adapter.sh` (stop/restart adapter + post-restart submit)
 6. SDK matrix fixture tests: `sdk/rust/src/appfs_adapter.rs` (`sdk_trait_required_case_matrix_is_adapter_pluggable`, `sdk_trait_error_case_matrix`)
+7. CI workflow gate: `.github/workflows/rust.yml` (`appfs-contract-gate`)
 
 | Item | Status | Evidence | Note |
 |---|---|---|---|
@@ -336,6 +347,7 @@ Evidence sources used:
 | 15 | PASS | `CT-002/CT-003` + seq-based `event_id` | `event_id` present and replay-stable |
 | 16 | PASS | `CT-016` in `run-live-with-adapter.sh` validation log + `cli/src/cmd/appfs.rs` (`inflight.jobs.res.json`) | graceful stop/restart and accepted-but-not-terminal streaming reconciliation are validated end-to-end |
 | 17 | PASS | `sdk/rust/src/appfs_adapter.rs` + `cli/src/cmd/appfs.rs` + `run-live-with-adapter.sh` (`CT-001` to `CT-016`) | Runtime dispatches business action handling through the frozen `AppAdapterV1` contract and preserves live conformance behavior |
+| 18 | PASS | `.github/workflows/rust.yml` (`appfs-contract-gate`) + `cli/tests/appfs/run-live-with-adapter.sh` | CI enforces AppFS static + live contract suites as merge gate on Linux |
 
 ## 9. Delivery Plan
 

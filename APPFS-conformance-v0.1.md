@@ -85,8 +85,9 @@ Each adapter/runtime SHOULD publish a conformance block in manifest metadata:
 To claim Core compatibility, implementation MUST pass:
 
 1. AppFS static contract tests (`CT-001`, `CT-003`, `CT-005`).
-2. AppFS live action/stream tests (`CT-002`, `CT-004`).
+2. AppFS live contract suite (`CT-002`, `CT-004`, `CT-006` to `CT-016`).
 3. Adapter acceptance checklist items in `APPFS-adapter-requirements-v0.1`.
+4. CI gate MUST include both static and live contract execution (reference: `.github/workflows/rust.yml`, job `appfs-contract-gate`).
 
 ### 5.2 Failure Policy
 
@@ -122,6 +123,7 @@ Recommended sequence for adapter authors:
    - `APPFS_CONTRACT_TESTS=1 APPFS_STATIC_FIXTURE=1 ./tests/test-appfs-contract.sh`
 3. Run live gates against mounted AppFS + running adapter:
    - `APPFS_CONTRACT_TESTS=1 APPFS_ROOT=<mounted_app_root> ./tests/test-appfs-contract.sh`
+   - `APPFS_CONTRACT_TESTS=1 ./tests/appfs/run-live-with-adapter.sh`
 4. Fill adapter acceptance checklist (all items with pass/fail + evidence).
 5. Publish compatibility claim:
    - claim `core` only when no Core MUST violation remains

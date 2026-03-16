@@ -24,6 +24,7 @@
 3. M3: Cursor/replay consistency and paging error mapping.
 4. M4: Live contract test harness + docs.
 5. M5: Adapter SDK abstraction + v0.1 interface freeze.
+6. M6: CI contract gate (static + live) on Linux.
 
 ## Progress Snapshot (`2026-03-16`)
 
@@ -37,6 +38,8 @@
 7. Optional language bridge reference is now available via HTTP adapter mode in runtime (`--adapter-http-endpoint`), with mapping documented in `APPFS-adapter-http-bridge-v0.1.md` and Python sample at `examples/appfs/http-bridge/python/`.
 8. Second transport example (gRPC bridge) is now documented and sampled with proto + Python gRPC service + HTTP gateway at `examples/appfs/grpc-bridge/`.
 9. Runtime native gRPC bridge mode is implemented (`--adapter-grpc-endpoint`, `--adapter-grpc-timeout-ms`) for direct out-of-process adapter dispatch.
+10. SDK now exposes reusable adapter matrix runners (`sdk/rust/src/appfs_adapter_testkit.rs`) so adapter authors can validate implementations against the frozen trait contract without runtime internals.
+11. CI now enforces AppFS contract gates via `.github/workflows/rust.yml` (`appfs-contract-gate`), including static fixture checks and Linux live harness checks.
 2. Remaining:
 1. Optional: add bridge resilience policies (retry/backoff/circuit-breaker) and explicit transport-level observability metrics.
 

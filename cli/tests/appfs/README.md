@@ -82,7 +82,7 @@ export APPFS_ADAPTER_GRPC_ENDPOINT=http://127.0.0.1:50051
 
 ## Notes
 
-1. Tests are currently gated by `APPFS_CONTRACT_TESTS=1` so they do not affect existing CI by default.
+1. Linux CI now runs AppFS contract gates in `.github/workflows/rust.yml` (`appfs-contract-gate`) with both static fixture and live mount+adapter suites.
 2. Some checks require `jq`; if missing, JSON field-level assertions are skipped.
 3. `APPFS_STATIC_FIXTURE=1` runs only static contract checks (layout/replay/manifest policy).
 4. `run-live-with-adapter.sh` is Linux/FUSE oriented and expects `fusermount` + `mountpoint`.

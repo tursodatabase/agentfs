@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
+/// Frozen AppFS adapter SDK surface version for v0.1.
+pub const APPFS_ADAPTER_SDK_VERSION: &str = "0.1.0";
+
 /// v0.1 frozen input payload mode model for adapter dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +86,18 @@ pub enum AdapterErrorV1 {
     Internal { message: String },
 }
 
+/// Returns true when `version` is compatible with the frozen v0.1 adapter SDK surface.
+///
+/// Compatibility rule:
+/// - any `0.1.x` is considered compatible.
+pub fn is_appfs_adapter_sdk_v01_compatible(version: &str) -> bool {
+    let core = version.trim().split('-').next().unwrap_or("").trim();
+    let mut parts = core.split('.');
+    let major = parts.next().and_then(|v| v.parse::<u64>().ok());
+    let minor = parts.next().and_then(|v| v.parse::<u64>().ok());
+    matches!((major, minor), (Some(0), Some(1)))
+}
+
 /// AppFS adapter SDK v0.1 frozen trait surface.
 ///
 /// Compatibility:
@@ -119,9 +134,13 @@ pub trait AppAdapterV1: Send {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterControlActionV1, AdapterControlOutcomeV1, AdapterErrorV1, AdapterExecutionModeV1,
-        AdapterInputModeV1, AdapterStreamingPlanV1, AdapterSubmitOutcomeV1, AppAdapterV1,
-        RequestContextV1,
+        is_appfs_adapter_sdk_v01_compatible, AdapterControlActionV1, AdapterControlOutcomeV1,
+        AdapterErrorV1, AdapterExecutionModeV1, AdapterInputModeV1, AdapterStreamingPlanV1,
+        AdapterSubmitOutcomeV1, AppAdapterV1, RequestContextV1, APPFS_ADAPTER_SDK_VERSION,
+    };
+    use crate::appfs_adapter_testkit::{
+        default_request_context_v1, run_error_case_matrix_v1, run_required_case_matrix_v1,
+        ErrorCaseMatrixV1, RequiredCaseMatrixV1,
     };
     use serde_json::json;
 
@@ -262,169 +281,40 @@ mod tests {
         }
     }
 
-    type AdapterFactory = fn() -> Box<dyn AppAdapterV1>;
-
-    fn fixture_ctx() -> RequestContextV1 {
-        RequestContextV1 {
-            app_id: "aiim".to_string(),
-            session_id: "sess-test".to_string(),
-            request_id: "req-test".to_string(),
-            client_token: Some("tok-1".to_string()),
-        }
-    }
-
-    fn assert_inline_completed(outcome: AdapterSubmitOutcomeV1) {
-        match outcome {
-            AdapterSubmitOutcomeV1::Completed { content } => {
-                assert_eq!(content["path"], "/contacts/zhangsan/send_message.act");
-                assert_eq!(content["status"], "ok");
-            }
-            _ => panic!("expected completed"),
-        }
-    }
-
-    fn assert_streaming_completed(outcome: AdapterSubmitOutcomeV1) {
-        match outcome {
-            AdapterSubmitOutcomeV1::Streaming { plan } => {
-                assert!(plan.accepted_content.is_some());
-                assert!(plan.progress_content.is_some());
-                assert_eq!(plan.terminal_content["ok"], true);
-            }
-            _ => panic!("expected streaming"),
-        }
-    }
-
-    fn run_required_case_matrix(factory: AdapterFactory) {
-        let mut adapter = factory();
-        let ctx = fixture_ctx();
-
-        let inline = adapter
-            .submit_action(
-                "/contacts/zhangsan/send_message.act",
-                "hello\n",
-                AdapterInputModeV1::Text,
-                AdapterExecutionModeV1::Inline,
-                &ctx,
-            )
-            .expect("required matrix inline case should succeed");
-        assert_inline_completed(inline);
-
-        let streaming = adapter
-            .submit_action(
-                "/files/file-001/download.act",
-                "{\"target\":\"/tmp/a.bin\"}",
-                AdapterInputModeV1::Json,
-                AdapterExecutionModeV1::Streaming,
-                &ctx,
-            )
-            .expect("required matrix streaming case should succeed");
-        assert_streaming_completed(streaming);
-
-        let fetch = adapter
-            .submit_control_action(
-                "/_paging/fetch_next.act",
-                AdapterControlActionV1::PagingFetchNext {
-                    handle_id: "ph_abc".to_string(),
-                    page_no: 1,
-                    has_more: true,
-                },
-                &ctx,
-            )
-            .expect("required matrix paging fetch should succeed");
-        match fetch {
-            AdapterControlOutcomeV1::Completed { content } => {
-                assert_eq!(content["page"]["handle_id"], "ph_abc");
-                assert_eq!(content["page"]["page_no"], 1);
-                assert_eq!(content["page"]["has_more"], true);
-            }
-        }
-
-        let close = adapter
-            .submit_control_action(
-                "/_paging/close.act",
-                AdapterControlActionV1::PagingClose {
-                    handle_id: "ph_abc".to_string(),
-                },
-                &ctx,
-            )
-            .expect("required matrix paging close should succeed");
-        match close {
-            AdapterControlOutcomeV1::Completed { content } => {
-                assert_eq!(content["closed"], true);
-                assert_eq!(content["handle_id"], "ph_abc");
-            }
-        }
-    }
-
-    fn run_error_case_matrix(factory: AdapterFactory) {
-        let mut adapter = factory();
-        let ctx = fixture_ctx();
-
-        let rejected = adapter
-            .submit_action(
-                "/actions/reject.act",
-                "{}",
-                AdapterInputModeV1::Json,
-                AdapterExecutionModeV1::Inline,
-                &ctx,
-            )
-            .expect_err("error matrix reject case should fail");
-        match rejected {
-            AdapterErrorV1::Rejected {
-                code,
-                message,
-                retryable,
-            } => {
-                assert_eq!(code, "INVALID_ARGUMENT");
-                assert_eq!(message, "bad payload");
-                assert!(!retryable);
-            }
-            _ => panic!("expected rejected error"),
-        }
-
-        let internal = adapter
-            .submit_action(
-                "/actions/internal.act",
-                "{}",
-                AdapterInputModeV1::Json,
-                AdapterExecutionModeV1::Inline,
-                &ctx,
-            )
-            .expect_err("error matrix internal case should fail");
-        match internal {
-            AdapterErrorV1::Internal { message } => {
-                assert_eq!(message, "backend unavailable");
-            }
-            _ => panic!("expected internal error"),
-        }
-    }
-
-    fn make_required_adapter_a() -> Box<dyn AppAdapterV1> {
-        Box::new(RequiredMatrixAdapterA)
-    }
-
-    fn make_required_adapter_b() -> Box<dyn AppAdapterV1> {
-        Box::new(RequiredMatrixAdapterB)
-    }
-
-    fn make_error_adapter() -> Box<dyn AppAdapterV1> {
-        Box::new(ErrorMatrixAdapter)
-    }
-
     #[test]
     fn sdk_trait_smoke_submit_and_control() {
-        run_required_case_matrix(make_required_adapter_a);
+        let mut adapter = RequiredMatrixAdapterA;
+        run_required_case_matrix_v1(
+            &mut adapter,
+            &default_request_context_v1("aiim"),
+            &RequiredCaseMatrixV1::default(),
+        )
+        .expect("required matrix should pass");
     }
 
     #[test]
     fn sdk_trait_required_case_matrix_is_adapter_pluggable() {
-        run_required_case_matrix(make_required_adapter_a);
-        run_required_case_matrix(make_required_adapter_b);
+        let cases = RequiredCaseMatrixV1::default();
+        let ctx = default_request_context_v1("aiim");
+
+        let mut adapter_a = RequiredMatrixAdapterA;
+        run_required_case_matrix_v1(&mut adapter_a, &ctx, &cases)
+            .expect("adapter A should pass required matrix");
+
+        let mut adapter_b = RequiredMatrixAdapterB;
+        run_required_case_matrix_v1(&mut adapter_b, &ctx, &cases)
+            .expect("adapter B should pass required matrix");
     }
 
     #[test]
     fn sdk_trait_error_case_matrix() {
-        run_error_case_matrix(make_error_adapter);
+        let mut adapter = ErrorMatrixAdapter;
+        run_error_case_matrix_v1(
+            &mut adapter,
+            &default_request_context_v1("aiim"),
+            &ErrorCaseMatrixV1::default(),
+        )
+        .expect("error matrix should pass");
     }
 
     #[test]
@@ -438,7 +328,7 @@ mod tests {
                     page_no: 1,
                     has_more: true,
                 },
-                &fixture_ctx(),
+                &default_request_context_v1("aiim"),
             )
             .expect_err("default control path should be unsupported");
         match err {
@@ -457,5 +347,16 @@ mod tests {
             }
             _ => panic!("expected rejected not-supported error"),
         }
+    }
+
+    #[test]
+    fn sdk_version_reports_v01_compatibility() {
+        assert!(is_appfs_adapter_sdk_v01_compatible(
+            APPFS_ADAPTER_SDK_VERSION
+        ));
+        assert!(is_appfs_adapter_sdk_v01_compatible("0.1.9"));
+        assert!(!is_appfs_adapter_sdk_v01_compatible("0.2.0"));
+        assert!(!is_appfs_adapter_sdk_v01_compatible("1.0.0"));
+        assert!(!is_appfs_adapter_sdk_v01_compatible("invalid"));
     }
 }

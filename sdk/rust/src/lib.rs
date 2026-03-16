@@ -1,4 +1,5 @@
 pub mod appfs_adapter;
+pub mod appfs_adapter_testkit;
 pub mod appfs_demo_adapter;
 pub mod connection_pool;
 pub mod error;
@@ -19,9 +20,13 @@ pub use turso::sync::{DatabaseSyncStats, PartialBootstrapStrategy, PartialSyncOp
 
 // Re-export filesystem types
 pub use appfs_adapter::{
-    AdapterControlActionV1, AdapterControlOutcomeV1, AdapterErrorV1, AdapterExecutionModeV1,
-    AdapterInputModeV1, AdapterStreamingPlanV1, AdapterSubmitOutcomeV1, AppAdapterV1,
-    RequestContextV1,
+    is_appfs_adapter_sdk_v01_compatible, AdapterControlActionV1, AdapterControlOutcomeV1,
+    AdapterErrorV1, AdapterExecutionModeV1, AdapterInputModeV1, AdapterStreamingPlanV1,
+    AdapterSubmitOutcomeV1, AppAdapterV1, RequestContextV1, APPFS_ADAPTER_SDK_VERSION,
+};
+pub use appfs_adapter_testkit::{
+    default_request_context_v1, run_error_case_matrix_v1, run_required_case_matrix_v1,
+    AdapterCaseErrorV1, ErrorCaseMatrixV1, RequiredCaseMatrixV1,
 };
 pub use appfs_demo_adapter::DemoAppAdapterV1;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
