@@ -40,6 +40,7 @@
 9. Runtime native gRPC bridge mode is implemented (`--adapter-grpc-endpoint`, `--adapter-grpc-timeout-ms`) for direct out-of-process adapter dispatch.
 10. SDK now exposes reusable adapter matrix runners (`sdk/rust/src/appfs_adapter_testkit.rs`) so adapter authors can validate implementations against the frozen trait contract without runtime internals.
 11. CI now enforces AppFS contract gates via `.github/workflows/rust.yml` (`appfs-contract-gate`), including static fixture checks and Linux live harness checks.
+12. CI now validates out-of-process parity with bridge-mode jobs (`appfs-contract-gate-http-bridge`, `appfs-contract-gate-grpc-bridge`) using the same live suite.
 2. Remaining:
 1. Optional: add bridge resilience policies (retry/backoff/circuit-breaker) and explicit transport-level observability metrics.
 

@@ -1,6 +1,6 @@
 # AppFS Adapter Layer Requirements v0.1
 
-- Version: `0.1-draft-r4`
+- Version: `0.1-draft-r5`
 - Date: `2026-03-16`
 - Status: `Draft`
 - Depends on: `APPFS-v0.1 (r8)`
@@ -206,6 +206,7 @@ Crash/restart MUST not expose partially published state where `cursor` points pa
 2. Repository CI MUST run AppFS live contract checks (`run-live-with-adapter.sh`) on Linux.
 3. Any change that breaks Core contract tests MUST fail CI.
 4. CI gate definition MUST be version-controlled (workflow file), not ad-hoc in local scripts.
+5. Reference CI SHOULD validate both in-process and out-of-process bridge modes (HTTP and gRPC) against the same live contract suite.
 
 ## 5. Non-Functional Requirements
 
@@ -348,6 +349,7 @@ Evidence sources used:
 | 16 | PASS | `CT-016` in `run-live-with-adapter.sh` validation log + `cli/src/cmd/appfs.rs` (`inflight.jobs.res.json`) | graceful stop/restart and accepted-but-not-terminal streaming reconciliation are validated end-to-end |
 | 17 | PASS | `sdk/rust/src/appfs_adapter.rs` + `cli/src/cmd/appfs.rs` + `run-live-with-adapter.sh` (`CT-001` to `CT-016`) | Runtime dispatches business action handling through the frozen `AppAdapterV1` contract and preserves live conformance behavior |
 | 18 | PASS | `.github/workflows/rust.yml` (`appfs-contract-gate`) + `cli/tests/appfs/run-live-with-adapter.sh` | CI enforces AppFS static + live contract suites as merge gate on Linux |
+| 19 | PASS | `.github/workflows/rust.yml` (`appfs-contract-gate-http-bridge`, `appfs-contract-gate-grpc-bridge`) | CI enforces transport parity by running the same live suite against HTTP and native gRPC bridge modes |
 
 ## 9. Delivery Plan
 

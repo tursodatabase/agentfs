@@ -46,6 +46,151 @@ jobs:
         APPFS_TIMEOUT_SEC: "30"
       run: sh ./tests/appfs/run-live-with-adapter.sh
 
+  appfs-contract-gate-http-bridge:
+    name: AppFS Contract Gate (linux, http bridge)
+    runs-on: ubuntu-latest
+    needs: appfs-contract-gate
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: nightly
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install system dependencies
+      run: |
+        ../scripts/install-deps.sh
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Start HTTP bridge
+      run: |
+        cd ../examples/appfs/http-bridge/python
+        nohup python3 bridge_server.py >"$RUNNER_TEMP/appfs-http-bridge.log" 2>&1 &
+        echo $! >"$RUNNER_TEMP/appfs-http-bridge.pid"
+        python3 - <<'PY'
+        import socket
+        import sys
+        import time
+
+        for _ in range(30):
+            sock = socket.socket()
+            sock.settimeout(1.0)
+            try:
+                sock.connect(("127.0.0.1", 8080))
+                sock.close()
+                sys.exit(0)
+            except OSError:
+                time.sleep(1)
+        print("HTTP bridge did not become ready on 127.0.0.1:8080", file=sys.stderr)
+        sys.exit(1)
+        PY
+
+    - name: Run AppFS live contract suite (HTTP bridge mode)
+      env:
+        APPFS_CONTRACT_TESTS: "1"
+        APPFS_TIMEOUT_SEC: "30"
+        APPFS_ADAPTER_HTTP_ENDPOINT: "http://127.0.0.1:8080"
+      run: sh ./tests/appfs/run-live-with-adapter.sh
+
+    - name: Dump HTTP bridge log on failure
+      if: failure()
+      run: tail -n 200 "$RUNNER_TEMP/appfs-http-bridge.log" || true
+
+    - name: Stop HTTP bridge
+      if: always()
+      run: |
+        if [ -f "$RUNNER_TEMP/appfs-http-bridge.pid" ]; then
+          kill "$(cat "$RUNNER_TEMP/appfs-http-bridge.pid")" 2>/dev/null || true
+        fi
+
+  appfs-contract-gate-grpc-bridge:
+    name: AppFS Contract Gate (linux, grpc bridge)
+    runs-on: ubuntu-latest
+    needs: appfs-contract-gate
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: nightly
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install system dependencies
+      run: |
+        ../scripts/install-deps.sh
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Install gRPC bridge dependencies
+      run: |
+        cd ../examples/appfs/grpc-bridge/python
+        python3 -m pip install --upgrade pip
+        python3 -m pip install -r requirements.txt
+        python3 -m grpc_tools.protoc \
+          -I ../proto \
+          --python_out=. \
+          --grpc_python_out=. \
+          ../proto/appfs_adapter_v1.proto
+
+    - name: Start gRPC bridge
+      run: |
+        cd ../examples/appfs/grpc-bridge/python
+        nohup python3 grpc_server.py >"$RUNNER_TEMP/appfs-grpc-bridge.log" 2>&1 &
+        echo $! >"$RUNNER_TEMP/appfs-grpc-bridge.pid"
+        python3 - <<'PY'
+        import socket
+        import sys
+        import time
+
+        for _ in range(30):
+            sock = socket.socket()
+            sock.settimeout(1.0)
+            try:
+                sock.connect(("127.0.0.1", 50051))
+                sock.close()
+                sys.exit(0)
+            except OSError:
+                time.sleep(1)
+        print("gRPC bridge did not become ready on 127.0.0.1:50051", file=sys.stderr)
+        sys.exit(1)
+        PY
+
+    - name: Run AppFS live contract suite (gRPC bridge mode)
+      env:
+        APPFS_CONTRACT_TESTS: "1"
+        APPFS_TIMEOUT_SEC: "30"
+        APPFS_ADAPTER_GRPC_ENDPOINT: "http://127.0.0.1:50051"
+      run: sh ./tests/appfs/run-live-with-adapter.sh
+
+    - name: Dump gRPC bridge log on failure
+      if: failure()
+      run: tail -n 200 "$RUNNER_TEMP/appfs-grpc-bridge.log" || true
+
+    - name: Stop gRPC bridge
+      if: always()
+      run: |
+        if [ -f "$RUNNER_TEMP/appfs-grpc-bridge.pid" ]; then
+          kill "$(cat "$RUNNER_TEMP/appfs-grpc-bridge.pid")" 2>/dev/null || true
+        fi
+
   test:
     name: Test (${{ matrix.os }}, ${{ matrix.project }})
     runs-on: ${{ matrix.os }}

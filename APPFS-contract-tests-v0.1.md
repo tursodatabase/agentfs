@@ -1,6 +1,6 @@
 # AppFS v0.1 Contract Test Plan
 
-- Version: `0.1-draft-r8`
+- Version: `0.1-draft-r9`
 - Date: `2026-03-16`
 - Status: `Draft`
 - Depends on: `APPFS-v0.1 (r7)`, `APPFS-adapter-requirements-v0.1`
@@ -50,6 +50,18 @@ APPFS_CONTRACT_TESTS=1 APPFS_STATIC_FIXTURE=1 APPFS_ROOT=$GITHUB_WORKSPACE/examp
 
 ```bash
 APPFS_CONTRACT_TESTS=1 sh ./tests/appfs/run-live-with-adapter.sh
+```
+
+3. Live HTTP bridge gate:
+
+```bash
+APPFS_CONTRACT_TESTS=1 APPFS_ADAPTER_HTTP_ENDPOINT=http://127.0.0.1:8080 sh ./tests/appfs/run-live-with-adapter.sh
+```
+
+4. Live gRPC bridge gate:
+
+```bash
+APPFS_CONTRACT_TESTS=1 APPFS_ADAPTER_GRPC_ENDPOINT=http://127.0.0.1:50051 sh ./tests/appfs/run-live-with-adapter.sh
 ```
 
 ## 3. Environment Inputs

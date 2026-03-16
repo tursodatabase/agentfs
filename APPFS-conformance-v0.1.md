@@ -88,6 +88,7 @@ To claim Core compatibility, implementation MUST pass:
 2. AppFS live contract suite (`CT-002`, `CT-004`, `CT-006` to `CT-016`).
 3. Adapter acceptance checklist items in `APPFS-adapter-requirements-v0.1`.
 4. CI gate MUST include both static and live contract execution (reference: `.github/workflows/rust.yml`, job `appfs-contract-gate`).
+5. Repository reference CI additionally validates out-of-process transport parity with `appfs-contract-gate-http-bridge` and `appfs-contract-gate-grpc-bridge`.
 
 ### 5.2 Failure Policy
 
