@@ -278,22 +278,23 @@ Evidence sources used:
 1. Build + static + live run log: `/home/yxy/rep/agentfs/cli/appfs-phase1-validation.log`
 2. Live harness script: `cli/tests/appfs/run-live-with-adapter.sh`
 3. Runtime implementation: `cli/src/cmd/appfs.rs`
+4. Live contract additions: `cli/tests/appfs/test-streaming-lifecycle.sh`, `cli/tests/appfs/test-submit-reject.sh`, `cli/tests/appfs/test-submit-order.sh`
 
 | Item | Status | Evidence | Note |
 |---|---|---|---|
 | 1 | PASS | `CT-001/CT-005` in validation log | Manifest nodes and schemas present |
-| 2 | FAIL | `cli/src/cmd/appfs.rs` | Generic malformed `.act` close-time validation is incomplete |
+| 2 | PASS | `CT-007` in validation log | Malformed JSON and malformed handle are rejected without `action.accepted` |
 | 3 | PASS | `CT-002` in validation log | Inline action emits terminal event |
-| 4 | FAIL | `cli/src/cmd/appfs.rs` | Streaming action lifecycle (`accepted/progress/terminal`) not fully implemented |
+| 4 | PASS | `CT-006` in validation log | Streaming action emits `accepted/progress/completed` with single terminal |
 | 5 | PASS | `CT-004` + `emit_failed` code path | `action.failed.error` structure emitted |
 | 6 | PASS | `CT-002` + token extraction logic | `request_id` always present; `client_token` echo supported |
 | 7 | PASS | `CT-003` in validation log | Replay via `from-seq` works |
-| 8 | FAIL | `cli/src/cmd/appfs.rs` | Unsafe path precheck guard not fully enforced at runtime boundary |
+| 8 | PARTIAL | `cli/src/cmd/appfs.rs` (`is_safe_action_rel_path`) | Guard exists in runtime dispatch, but no dedicated integration attack-case test yet |
 | 9 | FAIL | `cli/src/cmd/appfs.rs` | Deterministic overlong-segment shortening not implemented |
 | 10 | FAIL | No dedicated integration case yet | Duplicate-consumption behavior not validated by test suite |
-| 11 | FAIL | `cli/src/cmd/appfs.rs` | Malformed-handle mapping differs from required close-time `EINVAL` behavior |
+| 11 | PARTIAL | `CT-004/CT-007` + `cli/src/cmd/appfs.rs` | Malformed/unknown/closed covered; expired/cross-session mapping not yet implemented |
 | 12 | FAIL | No interrupted-write integration case yet | Submit atomicity under interrupted writes not verified |
-| 13 | FAIL | No concurrent submit integration case yet | Ordering/single-terminal guarantees unverified |
+| 13 | PARTIAL | `CT-008` in validation log | Same-path ordered multi-submit + single terminal validated; high-concurrency stress still missing |
 | 14 | PASS | `CT-003` + publish sequence in code | `events/cursor/from-seq` consistency validated for normal publish path |
 | 15 | PASS | `CT-002/CT-003` + seq-based `event_id` | `event_id` present and replay-stable |
 | 16 | FAIL | No lifecycle integration case yet | Readiness/liveness/recovery checks pending |
