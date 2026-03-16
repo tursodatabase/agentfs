@@ -105,3 +105,83 @@ impl AppAdapterV1 for DemoAppAdapterV1 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DemoAppAdapterV1;
+    use crate::{
+        AdapterControlActionV1, AdapterControlOutcomeV1, AdapterExecutionModeV1,
+        AdapterInputModeV1, AdapterSubmitOutcomeV1, AppAdapterV1, RequestContextV1,
+    };
+
+    fn ctx() -> RequestContextV1 {
+        RequestContextV1 {
+            app_id: "aiim".to_string(),
+            session_id: "sess-test".to_string(),
+            request_id: "req-1".to_string(),
+            client_token: Some("tok-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn demo_adapter_inline_action() {
+        let mut adapter = DemoAppAdapterV1::new("aiim".to_string());
+        let result = adapter
+            .submit_action(
+                "/contacts/zhangsan/send_message.act",
+                "hello\n",
+                AdapterInputModeV1::Text,
+                AdapterExecutionModeV1::Inline,
+                &ctx(),
+            )
+            .expect("inline action should succeed");
+        match result {
+            AdapterSubmitOutcomeV1::Completed { content } => {
+                assert_eq!(content, "send success");
+            }
+            _ => panic!("expected inline completed"),
+        }
+    }
+
+    #[test]
+    fn demo_adapter_streaming_action() {
+        let mut adapter = DemoAppAdapterV1::new("aiim".to_string());
+        let result = adapter
+            .submit_action(
+                "/files/file-001/download.act",
+                r#"{"target":"/tmp/a.bin"}"#,
+                AdapterInputModeV1::Json,
+                AdapterExecutionModeV1::Streaming,
+                &ctx(),
+            )
+            .expect("streaming action should succeed");
+        match result {
+            AdapterSubmitOutcomeV1::Streaming { plan } => {
+                assert!(plan.accepted_content.is_some());
+                assert!(plan.progress_content.is_some());
+                assert_eq!(plan.terminal_content["saved_to"], "/tmp/a.bin");
+            }
+            _ => panic!("expected streaming outcome"),
+        }
+    }
+
+    #[test]
+    fn demo_adapter_control_action() {
+        let mut adapter = DemoAppAdapterV1::new("aiim".to_string());
+        let result = adapter
+            .submit_control_action(
+                "/_paging/close.act",
+                AdapterControlActionV1::PagingClose {
+                    handle_id: "ph_abc".to_string(),
+                },
+                &ctx(),
+            )
+            .expect("control action should succeed");
+        match result {
+            AdapterControlOutcomeV1::Completed { content } => {
+                assert_eq!(content["closed"], true);
+                assert_eq!(content["handle_id"], "ph_abc");
+            }
+        }
+    }
+}
