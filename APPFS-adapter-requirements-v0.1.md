@@ -193,6 +193,13 @@ Crash/restart MUST not expose partially published state where `cursor` points pa
 3. On graceful shutdown, adapter runtime MUST stop new accepts first, then drain or mark in-flight requests deterministically.
 4. On restart recovery, runtime MUST reconcile accepted-but-not-terminal requests and emit deterministic terminal outcomes.
 
+### AR-018 Adapter SDK Abstraction and Interface Freeze
+
+1. Runtime MUST invoke business adapter logic through a stable adapter SDK contract rather than hard-coded demo branches.
+2. AppFS Adapter SDK v0.1 interface MUST be explicitly frozen (`v0.1.x` additive-only; breaking changes require `v0.2`).
+3. Third-party implementations in any language are allowed, but they MUST preserve AppFS protocol semantics and pass conformance tests.
+4. Conformance docs MUST publish the frozen method-level contract and compatibility claim criteria.
+
 ## 5. Non-Functional Requirements
 
 ### ANR-001 Latency
@@ -217,9 +224,9 @@ Adapter MUST expose structured logs including:
 5. result status
 6. normalized error code (when failed)
 
-## 6. Suggested Adapter Interface (Rust-Oriented)
+## 6. Adapter SDK Interface (Rust-Oriented, v0.1 Frozen Surface)
 
-This is a requirements-oriented shape, not strict API freeze.
+The following trait shape is the v0.1 frozen logical contract (language-neutral at protocol semantics, Rust shown as reference).
 
 ```rust
 pub trait AppAdapter {
@@ -243,6 +250,13 @@ Where:
 
 1. `SubmitResult` indicates sync completion vs async accepted.
 2. `EventEmitter` abstracts writing JSONL events to runtime stream.
+
+### 6.1 v0.1 Freeze Policy
+
+1. `v0.1.x` only allows backward-compatible additive changes.
+2. Removing/renaming/changing behavior of existing required methods is a breaking change and MUST wait for `v0.2`.
+3. Any implementation-specific extension MUST be documented as optional and MUST NOT alter Core semantics.
+4. Manifest SHOULD expose adapter compatibility metadata (e.g., `adapter_sdk_version`).
 
 ## 7. Security Requirements
 
@@ -270,6 +284,7 @@ Adapter implementation is accepted when all checks pass:
 14. Stream atomicity: `events`, `cursor`, and `from-seq` stay consistent for every committed `seq`.
 15. `event_id` is present on all events and remains stable across replay.
 16. Lifecycle checks: readiness/liveness/shutdown/recovery behaviors are verified in integration tests.
+17. Adapter SDK freeze: runtime delegates through frozen adapter interface and compatibility policy is documented.
 
 ### 8.1 Phase 1 Validation Snapshot (`2026-03-16`)
 
@@ -299,6 +314,7 @@ Evidence sources used:
 | 14 | PASS | `CT-003` + publish sequence in code | `events/cursor/from-seq` consistency validated for normal publish path |
 | 15 | PASS | `CT-002/CT-003` + seq-based `event_id` | `event_id` present and replay-stable |
 | 16 | PASS | `CT-016` in `run-live-with-adapter.sh` validation log + `cli/src/cmd/appfs.rs` (`inflight.jobs.res.json`) | graceful stop/restart and accepted-but-not-terminal streaming reconciliation are validated end-to-end |
+| 17 | TODO | `APPFS-adapter-implementation-plan-v0.1.md` Task 9 | Adapter SDK abstraction and v0.1 frozen interface are planned but not yet implemented in runtime code |
 
 ## 9. Delivery Plan
 

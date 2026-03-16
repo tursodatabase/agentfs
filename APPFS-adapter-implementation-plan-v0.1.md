@@ -1,8 +1,8 @@
-# AppFS Adapter v0.1 Implementation Plan
+﻿# AppFS Adapter v0.1 Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Implement a minimal but Core-compatible AppFS adapter runtime that can pass live AppFS contract tests (`CT-002`, `CT-004`) on Linux while preserving the existing static contract behavior.
+**Goal:** Implement a minimal but Core-compatible AppFS adapter runtime that can pass live AppFS contract tests on Linux while preserving static contract behavior, then extract a reusable Adapter SDK abstraction for multi-language implementations.
 
 **Architecture:** Use a runtime-side adapter loop (`agentfs serve appfs`) that watches `.act` submissions under a mounted AppFS tree, validates payload boundaries (`write+close` semantics at runtime), dispatches to app handlers, and publishes events to `_stream/events.evt.jsonl` with replay/cursor consistency updates. Keep implementation language-neutral at protocol level and Rust-native in AgentFS CLI for Phase 1.
 
@@ -23,6 +23,17 @@
 2. M2: Action ingestion and event publication.
 3. M3: Cursor/replay consistency and paging error mapping.
 4. M4: Live contract test harness + docs.
+5. M5: Adapter SDK abstraction + v0.1 interface freeze.
+
+## Progress Snapshot (`2026-03-16`)
+
+1. Completed:
+1. Task 1-8 are implemented and validated with live contract coverage (`CT-001` to `CT-016`).
+2. Runtime covers long-handle normalization and restart reconciliation for in-flight streaming requests.
+3. Requirements checklist item 1-16 are marked `PASS` in `APPFS-adapter-requirements-v0.1.md`.
+2. Remaining:
+1. Extract adapter business logic from runtime demo path into a formal SDK abstraction layer.
+2. Freeze the v0.1 adapter interface contract and publish compatibility policy for third-party implementers.
 
 ## Task 1: Add `serve appfs` Command Skeleton
 
@@ -276,7 +287,7 @@ Include:
 2. `implementation.name/version/language`
 3. extension declaration pattern
 
-**Step 2: Add “how to claim compatibility�?section to README/docs**
+**Step 2: Add "how to claim compatibility" section to README/docs**
 
 Expected: third-party implementers can self-check Core compatibility.
 
@@ -312,6 +323,47 @@ git add -A
 git commit -m "feat(appfs): phase1 adapter runtime and conformance-ready contract pass"
 ```
 
+## Task 9: Extract Adapter SDK Abstraction and Freeze v0.1 Interface
+
+**Files:**
+- Modify: `cli/src/cmd/appfs.rs`
+- Create: `sdk/rust/src/appfs_adapter.rs` (or equivalent module)
+- Modify: `sdk/rust/src/lib.rs`
+- Modify: `APPFS-adapter-requirements-v0.1.md`
+- Modify: `APPFS-conformance-v0.1.md`
+
+**Step 1: Define frozen v0.1 adapter contract**
+
+1. Introduce a versioned trait surface (example: `AppAdapterV1`, `EventEmitterV1`, `RequestContextV1`).
+2. Move current "suggested interface" into explicit v0.1 frozen contract text.
+3. Define allowed change policy:
+1. `v0.1.x`: additive-only (non-breaking).
+2. breaking changes deferred to `v0.2`.
+
+**Step 2: Split runtime from demo adapter behavior**
+
+1. Keep runtime responsible for file watching, request-id assignment, stream persistence, and replay/cursor consistency.
+2. Move app-specific action/resource behavior behind adapter trait calls.
+3. Keep existing aiim demo logic as one implementation of the trait.
+
+**Step 3: Add SDK-level conformance harness entry points**
+
+1. Add adapter-focused tests so different implementations can be plugged in without changing runtime code.
+2. Verify existing live suite still passes after refactor.
+
+**Step 4: Publish compatibility guidance for third-party developers**
+
+1. Clarify that any language can implement the adapter, as long as AppFS contract semantics are preserved.
+2. Add mapping notes (Rust trait vs gRPC/HTTP bridge equivalents).
+3. Add "how to claim adapter compatibility" checklist with required test evidence.
+
+**Step 5: Commit**
+
+```bash
+git add cli/src/cmd/appfs.rs sdk/rust/src/appfs_adapter.rs sdk/rust/src/lib.rs APPFS-adapter-requirements-v0.1.md APPFS-conformance-v0.1.md
+git commit -m "refactor(appfs): extract adapter sdk abstraction and freeze v0.1 interface"
+```
+
 ## Risks and Mitigations
 
 1. File polling latency can cause flaky live tests.
@@ -326,8 +378,16 @@ Mitigation: atomic cursor update and publish ordering tests.
 ## Definition of Done (Phase 1)
 
 1. `agentfs serve appfs` available and documented.
-2. Live contract path (`CT-002`, `CT-004`) is passing on Linux with adapter runtime enabled.
+2. Live contract path (`CT-001` to `CT-016`) is passing on Linux with adapter runtime enabled.
 3. Event envelope includes stable `event_id`.
 4. Paging error mapping follows documented contract.
 5. Conformance declaration path is documented for third-party implementations.
+
+## Definition of Done (Phase 1.5: SDK Freeze)
+
+1. Runtime and adapter business logic are decoupled through a versioned adapter interface.
+2. v0.1 adapter contract is explicitly frozen and documented.
+3. Third-party adapter authors can implement against the contract without reading runtime internals.
+4. Existing contract tests still pass after abstraction extraction.
+
 
