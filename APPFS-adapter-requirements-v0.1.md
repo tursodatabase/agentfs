@@ -278,7 +278,7 @@ Evidence sources used:
 1. Build + static + live run log: `/home/yxy/rep/agentfs/cli/appfs-phase1-validation.log`
 2. Live harness script: `cli/tests/appfs/run-live-with-adapter.sh`
 3. Runtime implementation: `cli/src/cmd/appfs.rs`
-4. Live contract additions: `cli/tests/appfs/test-streaming-lifecycle.sh`, `cli/tests/appfs/test-submit-reject.sh`, `cli/tests/appfs/test-submit-order.sh`, `cli/tests/appfs/test-paging-errors.sh`, `cli/tests/appfs/test-submit-atomicity.sh`, `cli/tests/appfs/test-submit-interrupt.sh`
+4. Live contract additions: `cli/tests/appfs/test-streaming-lifecycle.sh`, `cli/tests/appfs/test-submit-reject.sh`, `cli/tests/appfs/test-submit-order.sh`, `cli/tests/appfs/test-paging-errors.sh`, `cli/tests/appfs/test-submit-atomicity.sh`, `cli/tests/appfs/test-submit-interrupt.sh`, `cli/tests/appfs/test-path-safety.sh`
 
 | Item | Status | Evidence | Note |
 |---|---|---|---|
@@ -289,7 +289,7 @@ Evidence sources used:
 | 5 | PASS | `CT-004` + `emit_failed` code path | `action.failed.error` structure emitted |
 | 6 | PASS | `CT-002` + token extraction logic | `request_id` always present; `client_token` echo supported |
 | 7 | PASS | `CT-003` in validation log | Replay via `from-seq` works |
-| 8 | PARTIAL | `cli/src/cmd/appfs.rs` (`is_safe_action_rel_path`) | Guard exists in runtime dispatch, but no dedicated integration attack-case test yet |
+| 8 | PASS | `CT-012` in validation log + `cli/src/cmd/appfs.rs` (`is_safe_action_rel_path`) | drive-letter/reserved/backslash unsafe paths are rejected without stream side effects |
 | 9 | FAIL | `cli/src/cmd/appfs.rs` | Deterministic overlong-segment shortening not implemented |
 | 10 | FAIL | No dedicated integration case yet | Duplicate-consumption behavior not validated by test suite |
 | 11 | PASS | `CT-009` in validation log + `cli/src/cmd/appfs.rs` | malformed/unknown/expired/closed/cross-session paging errors are mapped and asserted |
