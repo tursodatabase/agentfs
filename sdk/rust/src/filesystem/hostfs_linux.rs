@@ -1,3 +1,4 @@
+use super::fsignore::FsIgnore;
 use super::{BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, TimeChange};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -24,6 +25,8 @@ struct SrcId {
 struct Inode {
     /// O_PATH file descriptor - a handle to the file for metadata operations
     fd: OwnedFd,
+    /// Full path to the file (used for `.fsignore` matching)
+    path: PathBuf,
     /// Source inode number from the host filesystem
     src_ino: u64,
     /// Source device id from the host filesystem
@@ -52,6 +55,8 @@ pub struct HostFS {
     /// FUSE mountpoint inode to avoid deadlock when overlaying
     #[cfg(target_family = "unix")]
     fuse_mountpoint_inode: Option<u64>,
+    /// Compiled `.fsignore` patterns for filtering files
+    ignore: FsIgnore,
 }
 
 /// An open file handle for HostFS (real fd for I/O)
@@ -204,6 +209,7 @@ impl HostFS {
             fd: root_fd
                 .try_clone()
                 .map_err(|e| Error::Internal(e.to_string()))?,
+            path: root.clone(),
             src_ino: stat.st_ino,
             src_dev: stat.st_dev,
             nlookup: AtomicU64::new(1),
@@ -222,12 +228,13 @@ impl HostFS {
         );
 
         Ok(Self {
-            root,
+            root: root.clone(),
             root_fd,
             inodes: RwLock::new(inodes),
             src_to_ino: RwLock::new(src_to_ino),
             next_ino: AtomicU64::new(2), // 1 is root
             fuse_mountpoint_inode: None,
+            ignore: FsIgnore::load(&root),
         })
     }
 
@@ -248,6 +255,13 @@ impl HostFS {
         let inodes = self.inodes.read().unwrap();
         let inode = inodes.get(&ino).ok_or(FsError::NotFound)?;
         Ok(inode.fd.as_raw_fd())
+    }
+
+    /// Get the cached path for an inode
+    fn get_inode_path(&self, ino: i64) -> Result<PathBuf> {
+        let inodes = self.inodes.read().unwrap();
+        let inode = inodes.get(&ino).ok_or(FsError::NotFound)?;
+        Ok(inode.path.clone())
     }
 
     /// Allocate a new inode number
@@ -283,7 +297,7 @@ impl HostFS {
     }
 
     /// Create or reuse an inode for the given source identity
-    fn get_or_create_inode(&self, fd: OwnedFd, stat: &libc::stat) -> (i64, bool) {
+    fn get_or_create_inode(&self, fd: OwnedFd, path: PathBuf, stat: &libc::stat) -> (i64, bool) {
         let src_id = SrcId {
             ino: stat.st_ino,
             dev: stat.st_dev,
@@ -306,6 +320,7 @@ impl HostFS {
         let ino = self.alloc_ino();
         let inode = Inode {
             fd,
+            path,
             src_ino: stat.st_ino,
             src_dev: stat.st_dev,
             nlookup: AtomicU64::new(1),
@@ -341,6 +356,7 @@ impl HostFS {
 impl FileSystem for HostFS {
     async fn lookup(&self, parent_ino: i64, name: &str) -> Result<Option<Stats>> {
         let parent_fd = self.get_inode_fd(parent_ino)?;
+        let parent_path = self.get_inode_path(parent_ino)?;
 
         // Check for FUSE mountpoint to avoid deadlock
         #[cfg(target_family = "unix")]
@@ -381,8 +397,17 @@ impl FileSystem for HostFS {
             }
         }
 
+        // Build child path and skip files matching .fsignore patterns
+        let child_path = parent_path.join(name);
+        if !self.ignore.is_empty() {
+            let is_dir = (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+            if self.ignore.is_ignored(&child_path, is_dir) {
+                return Ok(None);
+            }
+        }
+
         // Get or create inode
-        let (ino, _is_new) = self.get_or_create_inode(child_fd, &stat);
+        let (ino, _is_new) = self.get_or_create_inode(child_fd, child_path, &stat);
 
         // Return stats with our inode number
         let mut stats = stat_to_stats(&stat);
@@ -444,10 +469,12 @@ impl FileSystem for HostFS {
             Err(_) => return Ok(None),
         };
 
+        let dir_path = self.get_inode_path(ino).ok();
+
         // Open a real fd for reading directory
         let dir_fd = Self::open_real_fd(fd, libc::O_RDONLY | libc::O_DIRECTORY)?;
 
-        tokio::task::spawn_blocking(move || {
+        let entries = tokio::task::spawn_blocking(move || {
             let dir = unsafe { libc::fdopendir(dir_fd.as_raw_fd()) };
             if dir.is_null() {
                 return Err::<_, Error>(std::io::Error::last_os_error().into());
@@ -488,7 +515,23 @@ impl FileSystem for HostFS {
             Ok(Some(entries))
         })
         .await
-        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(|e| Error::Internal(e.to_string()))??;
+
+        // Filter out ignored entries
+        if let Some(mut entries) = entries {
+            if !self.ignore.is_empty() {
+                if let Some(ref dir_path) = dir_path {
+                    entries.retain(|name| {
+                        let child_path = dir_path.join(name);
+                        !self.ignore.is_ignored(&child_path, false)
+                            && !self.ignore.is_ignored(&child_path, true)
+                    });
+                }
+            }
+            Ok(Some(entries))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn readdir_plus(&self, ino: i64) -> Result<Option<Vec<DirEntry>>> {
@@ -497,6 +540,8 @@ impl FileSystem for HostFS {
             Err(_) => return Ok(None),
         };
 
+        let dir_path = self.get_inode_path(ino)?;
+
         // Open a real fd for reading directory
         let dir_fd = Self::open_real_fd(fd, libc::O_RDONLY | libc::O_DIRECTORY)?;
         let dir_fd_raw = dir_fd.as_raw_fd();
@@ -504,67 +549,78 @@ impl FileSystem for HostFS {
         #[cfg(target_family = "unix")]
         let fuse_mountpoint_inode = self.fuse_mountpoint_inode;
 
-        let entries_raw: Vec<(String, libc::stat)> = tokio::task::spawn_blocking(move || {
-            let dir = unsafe { libc::fdopendir(dir_fd.as_raw_fd()) };
-            if dir.is_null() {
-                return Err::<_, Error>(std::io::Error::last_os_error().into());
-            }
-            std::mem::forget(dir_fd);
+        let dir_path_clone = dir_path.clone();
+        let entries_raw: Vec<(String, PathBuf, libc::stat)> =
+            tokio::task::spawn_blocking(move || {
+                let dir = unsafe { libc::fdopendir(dir_fd.as_raw_fd()) };
+                if dir.is_null() {
+                    return Err::<_, Error>(std::io::Error::last_os_error().into());
+                }
+                std::mem::forget(dir_fd);
 
-            let mut entries = Vec::new();
+                let mut entries = Vec::new();
 
-            loop {
-                unsafe { *libc::__errno_location() = 0 };
-                let entry = unsafe { libc::readdir(dir) };
+                loop {
+                    unsafe { *libc::__errno_location() = 0 };
+                    let entry = unsafe { libc::readdir(dir) };
 
-                if entry.is_null() {
-                    let errno = unsafe { *libc::__errno_location() };
-                    if errno != 0 {
-                        unsafe { libc::closedir(dir) };
-                        return Err(std::io::Error::from_raw_os_error(errno).into());
+                    if entry.is_null() {
+                        let errno = unsafe { *libc::__errno_location() };
+                        if errno != 0 {
+                            unsafe { libc::closedir(dir) };
+                            return Err(std::io::Error::from_raw_os_error(errno).into());
+                        }
+                        break;
                     }
-                    break;
+
+                    let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+                    let name_str = name.to_string_lossy();
+
+                    if name_str == "." || name_str == ".." {
+                        continue;
+                    }
+
+                    // Get stats for this entry
+                    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                    let result = unsafe {
+                        libc::fstatat(
+                            dir_fd_raw,
+                            (*entry).d_name.as_ptr(),
+                            &mut stat,
+                            libc::AT_SYMLINK_NOFOLLOW,
+                        )
+                    };
+
+                    if result == 0 {
+                        #[cfg(target_family = "unix")]
+                        if let Some(fuse_ino) = fuse_mountpoint_inode {
+                            if stat.st_ino == fuse_ino {
+                                continue;
+                            }
+                        }
+
+                        let child_path = dir_path_clone.join(name_str.as_ref());
+                        entries.push((name_str.to_string(), child_path, stat));
+                    }
                 }
 
-                let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-                let name_str = name.to_string_lossy();
+                unsafe { libc::closedir(dir) };
+                Ok(entries)
+            })
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))??;
 
-                if name_str == "." || name_str == ".." {
+        // Now create/lookup inodes for each entry, filtering ignored paths
+        let mut result = Vec::new();
+        for (name, child_path, stat) in entries_raw {
+            // Skip files matching .fsignore patterns
+            if !self.ignore.is_empty() {
+                let is_dir = (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+                if self.ignore.is_ignored(&child_path, is_dir) {
                     continue;
                 }
-
-                // Get stats for this entry
-                let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-                let result = unsafe {
-                    libc::fstatat(
-                        dir_fd_raw,
-                        (*entry).d_name.as_ptr(),
-                        &mut stat,
-                        libc::AT_SYMLINK_NOFOLLOW,
-                    )
-                };
-
-                if result == 0 {
-                    #[cfg(target_family = "unix")]
-                    if let Some(fuse_ino) = fuse_mountpoint_inode {
-                        if stat.st_ino == fuse_ino {
-                            continue;
-                        }
-                    }
-
-                    entries.push((name_str.to_string(), stat));
-                }
             }
 
-            unsafe { libc::closedir(dir) };
-            Ok(entries)
-        })
-        .await
-        .map_err(|e| Error::Internal(e.to_string()))??;
-
-        // Now create/lookup inodes for each entry
-        let mut result = Vec::new();
-        for (name, stat) in entries_raw {
             // Open O_PATH fd for this entry
             let c_name = CString::new(name.as_str()).map_err(|_| FsError::InvalidPath)?;
             let child_fd =
@@ -575,7 +631,7 @@ impl FileSystem for HostFS {
             }
 
             let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
-            let (child_ino, _) = self.get_or_create_inode(child_fd, &stat);
+            let (child_ino, _) = self.get_or_create_inode(child_fd, child_path, &stat);
 
             let mut stats = stat_to_stats(&stat);
             stats.ino = child_ino;
@@ -704,6 +760,7 @@ impl FileSystem for HostFS {
         _gid: u32,
     ) -> Result<(Stats, BoxedFile)> {
         let parent_fd = self.get_inode_fd(parent_ino)?;
+        let parent_path = self.get_inode_path(parent_ino)?;
         let c_name = CString::new(name).map_err(|_| FsError::InvalidPath)?;
 
         // Create and open the file
@@ -733,8 +790,9 @@ impl FileSystem for HostFS {
         let o_path_fd = unsafe { OwnedFd::from_raw_fd(o_path_fd) };
 
         // Get stats
+        let child_path = parent_path.join(name);
         let stat = Self::fstatat_empty_path(o_path_fd.as_raw_fd())?;
-        let (ino, _) = self.get_or_create_inode(o_path_fd, &stat);
+        let (ino, _) = self.get_or_create_inode(o_path_fd, child_path, &stat);
 
         let mut stats = stat_to_stats(&stat);
         stats.ino = ino;
@@ -1028,6 +1086,99 @@ mod tests {
         // Read the symlink
         let target = fs.readlink(link_stats.ino).await?.unwrap();
         assert_eq!(target, "target.txt");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_hides_files_from_lookup() -> Result<()> {
+        let dir = tempdir()?;
+        // Create files before HostFS (so they exist on the host)
+        std::fs::write(dir.path().join("visible.txt"), b"visible")?;
+        std::fs::write(dir.path().join("secret.log"), b"secret")?;
+        std::fs::write(dir.path().join(".fsignore"), "*.log\n")?;
+
+        let fs = HostFS::new(dir.path())?;
+
+        // visible.txt should be found
+        assert!(fs.lookup(ROOT_INO, "visible.txt").await?.is_some());
+
+        // secret.log should be hidden
+        assert!(fs.lookup(ROOT_INO, "secret.log").await?.is_none());
+
+        // .fsignore itself should be visible
+        assert!(fs.lookup(ROOT_INO, ".fsignore").await?.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_hides_files_from_readdir() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("keep.txt"), b"keep")?;
+        std::fs::write(dir.path().join("remove.log"), b"remove")?;
+        std::fs::write(dir.path().join("also_remove.log"), b"also")?;
+        std::fs::write(dir.path().join(".fsignore"), "*.log\n")?;
+
+        let fs = HostFS::new(dir.path())?;
+        let entries = fs.readdir(ROOT_INO).await?.unwrap();
+
+        assert!(entries.contains(&"keep.txt".to_string()));
+        assert!(entries.contains(&".fsignore".to_string()));
+        assert!(!entries.contains(&"remove.log".to_string()));
+        assert!(!entries.contains(&"also_remove.log".to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_hides_files_from_readdir_plus() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("keep.txt"), b"keep")?;
+        std::fs::write(dir.path().join("remove.log"), b"remove")?;
+        std::fs::create_dir(dir.path().join("node_modules"))?;
+        std::fs::write(dir.path().join(".fsignore"), "*.log\nnode_modules/\n")?;
+
+        let fs = HostFS::new(dir.path())?;
+        let entries = fs.readdir_plus(ROOT_INO).await?.unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+
+        assert!(names.contains(&"keep.txt"));
+        assert!(names.contains(&".fsignore"));
+        assert!(!names.contains(&"remove.log"));
+        assert!(!names.contains(&"node_modules"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_directory_pattern() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::create_dir(dir.path().join("target"))?;
+        std::fs::write(dir.path().join("target").join("debug.o"), b"obj")?;
+        std::fs::write(dir.path().join("src.rs"), b"fn main() {}")?;
+        std::fs::write(dir.path().join(".fsignore"), "target/\n")?;
+
+        let fs = HostFS::new(dir.path())?;
+
+        // Directory should be hidden from lookup
+        assert!(fs.lookup(ROOT_INO, "target").await?.is_none());
+
+        // Non-ignored file should be visible
+        assert!(fs.lookup(ROOT_INO, "src.rs").await?.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_no_fsignore_file() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("file.txt"), b"content")?;
+
+        let fs = HostFS::new(dir.path())?;
+
+        // Without .fsignore, everything should be visible
+        assert!(fs.lookup(ROOT_INO, "file.txt").await?.is_some());
 
         Ok(())
     }

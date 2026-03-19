@@ -1,4 +1,5 @@
 pub mod agentfs;
+pub mod fsignore;
 #[cfg(target_os = "macos")]
 pub mod hostfs_darwin;
 #[cfg(target_os = "linux")]
@@ -12,6 +13,7 @@ use thiserror::Error;
 
 // Re-export implementations
 pub use agentfs::AgentFS;
+pub use fsignore::FsIgnore;
 #[cfg(target_os = "macos")]
 pub use hostfs_darwin::HostFS;
 #[cfg(target_os = "linux")]
