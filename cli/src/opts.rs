@@ -318,6 +318,25 @@ pub enum Command {
     },
     /// List active agentfs run sessions
     Ps,
+    /// Create a snapshot of an agent filesystem
+    Snapshot {
+        /// Agent ID or database path to snapshot
+        #[arg(value_name = "ID_OR_PATH", add = ArgValueCompleter::new(id_or_path_completer))]
+        id_or_path: String,
+
+        /// Destination path for the snapshot
+        #[arg(value_name = "DEST_PATH", add = ArgValueCompleter::new(PathCompleter::any()))]
+        dest_path: PathBuf,
+
+        /// Hex-encoded encryption key for encrypted databases.
+        #[arg(long, env = "AGENTFS_KEY")]
+        key: Option<String>,
+
+        /// Cipher algorithm for encryption (required with --key).
+        /// Options: aegis128l, aegis128x2, aegis128x4, aegis256, aegis256x2, aegis256x4, aes128gcm, aes256gcm
+        #[arg(long, env = "AGENTFS_CIPHER")]
+        cipher: Option<String>,
+    },
     /// Prune unused resources
     Prune {
         #[command(subcommand)]
