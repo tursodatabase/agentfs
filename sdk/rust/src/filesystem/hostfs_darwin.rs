@@ -4,6 +4,7 @@
 //! O_PATH file descriptors. macOS doesn't support O_PATH or AT_EMPTY_PATH,
 //! so we use a path-based approach similar to libfuse's passthrough.c example.
 
+use super::fsignore::FsIgnore;
 use super::{BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, TimeChange};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -55,6 +56,8 @@ pub struct HostFS {
     next_ino: AtomicU64,
     /// FUSE mountpoint inode to avoid deadlock when overlaying
     fuse_mountpoint_inode: Option<u64>,
+    /// Compiled `.fsignore` patterns for filtering files
+    ignore: FsIgnore,
 }
 
 /// An open file handle for HostFS (real fd for I/O)
@@ -220,11 +223,12 @@ impl HostFS {
         );
 
         Ok(Self {
-            root,
+            root: root.clone(),
             inodes: RwLock::new(inodes),
             src_to_ino: RwLock::new(src_to_ino),
             next_ino: AtomicU64::new(2), // 1 is root
             fuse_mountpoint_inode: None,
+            ignore: FsIgnore::load(&root),
         })
     }
 
@@ -367,6 +371,14 @@ impl FileSystem for HostFS {
             }
         }
 
+        // Skip files matching .fsignore patterns
+        if !self.ignore.is_empty() {
+            let is_dir = (stat.st_mode as u32 & super::S_IFMT) == super::S_IFDIR;
+            if self.ignore.is_ignored(&child_path, is_dir) {
+                return Ok(None);
+            }
+        }
+
         // Get or create inode
         let (ino, _is_new) = self.get_or_create_inode(child_path, &stat);
 
@@ -433,7 +445,8 @@ impl FileSystem for HostFS {
         let c_path = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| Error::Internal("invalid path".to_string()))?;
 
-        tokio::task::spawn_blocking(move || {
+        let dir_path = path.clone();
+        let entries = tokio::task::spawn_blocking(move || {
             let dir = unsafe { libc::opendir(c_path.as_ptr()) };
             if dir.is_null() {
                 return Err::<_, Error>(std::io::Error::last_os_error().into());
@@ -470,7 +483,26 @@ impl FileSystem for HostFS {
             Ok(Some(entries))
         })
         .await
-        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(|e| Error::Internal(e.to_string()))??;
+
+        // Filter out ignored entries
+        if let Some(mut entries) = entries {
+            if !self.ignore.is_empty() {
+                entries.retain(|name| {
+                    let child_path = dir_path.join(name);
+                    // We don't have stat info here, so check both file and dir.
+                    // A conservative approach: if ignored as a file, hide it.
+                    // Directory-only patterns (trailing /) won't match here unless
+                    // we stat. For correctness, check as non-dir — directory-only
+                    // patterns will still be handled by readdir_plus and lookup.
+                    !self.ignore.is_ignored(&child_path, false)
+                        && !self.ignore.is_ignored(&child_path, true)
+                });
+            }
+            Ok(Some(entries))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn readdir_plus(&self, ino: i64) -> Result<Option<Vec<DirEntry>>> {
@@ -537,9 +569,17 @@ impl FileSystem for HostFS {
             .await
             .map_err(|e| Error::Internal(e.to_string()))??;
 
-        // Now create/lookup inodes for each entry
+        // Now create/lookup inodes for each entry, filtering ignored paths
         let mut result = Vec::new();
         for (name, child_path, stat) in entries_raw {
+            // Skip files matching .fsignore patterns
+            if !self.ignore.is_empty() {
+                let is_dir = (stat.st_mode as u32 & super::S_IFMT) == super::S_IFDIR;
+                if self.ignore.is_ignored(&child_path, is_dir) {
+                    continue;
+                }
+            }
+
             let (child_ino, _) = self.get_or_create_inode(child_path, &stat);
 
             let mut stats = stat_to_stats(&stat);
@@ -980,6 +1020,105 @@ mod tests {
         // Read the symlink
         let target = fs.readlink(link_stats.ino).await?.unwrap();
         assert_eq!(target, "target.txt");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_hides_files_from_lookup() -> Result<()> {
+        let dir = tempdir()?;
+        // Create files before HostFS (so they exist on the host)
+        std::fs::write(dir.path().join("visible.txt"), b"visible")?;
+        std::fs::write(dir.path().join("secret.log"), b"secret")?;
+        std::fs::write(
+            dir.path().join(".fsignore"),
+            "*.log\n",
+        )?;
+
+        let fs = HostFS::new(dir.path())?;
+
+        // visible.txt should be found
+        assert!(fs.lookup(ROOT_INO, "visible.txt").await?.is_some());
+
+        // secret.log should be hidden
+        assert!(fs.lookup(ROOT_INO, "secret.log").await?.is_none());
+
+        // .fsignore itself should be visible
+        assert!(fs.lookup(ROOT_INO, ".fsignore").await?.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_hides_files_from_readdir() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("keep.txt"), b"keep")?;
+        std::fs::write(dir.path().join("remove.log"), b"remove")?;
+        std::fs::write(dir.path().join("also_remove.log"), b"also")?;
+        std::fs::write(dir.path().join(".fsignore"), "*.log\n")?;
+
+        let fs = HostFS::new(dir.path())?;
+        let entries = fs.readdir(ROOT_INO).await?.unwrap();
+
+        assert!(entries.contains(&"keep.txt".to_string()));
+        assert!(entries.contains(&".fsignore".to_string()));
+        assert!(!entries.contains(&"remove.log".to_string()));
+        assert!(!entries.contains(&"also_remove.log".to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_hides_files_from_readdir_plus() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("keep.txt"), b"keep")?;
+        std::fs::write(dir.path().join("remove.log"), b"remove")?;
+        std::fs::create_dir(dir.path().join("node_modules"))?;
+        std::fs::write(
+            dir.path().join(".fsignore"),
+            "*.log\nnode_modules/\n",
+        )?;
+
+        let fs = HostFS::new(dir.path())?;
+        let entries = fs.readdir_plus(ROOT_INO).await?.unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+
+        assert!(names.contains(&"keep.txt"));
+        assert!(names.contains(&".fsignore"));
+        assert!(!names.contains(&"remove.log"));
+        assert!(!names.contains(&"node_modules"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fsignore_directory_pattern() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::create_dir(dir.path().join("target"))?;
+        std::fs::write(dir.path().join("target").join("debug.o"), b"obj")?;
+        std::fs::write(dir.path().join("src.rs"), b"fn main() {}")?;
+        std::fs::write(dir.path().join(".fsignore"), "target/\n")?;
+
+        let fs = HostFS::new(dir.path())?;
+
+        // Directory should be hidden from lookup
+        assert!(fs.lookup(ROOT_INO, "target").await?.is_none());
+
+        // Non-ignored file should be visible
+        assert!(fs.lookup(ROOT_INO, "src.rs").await?.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_no_fsignore_file() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("file.txt"), b"content")?;
+
+        let fs = HostFS::new(dir.path())?;
+
+        // Without .fsignore, everything should be visible
+        assert!(fs.lookup(ROOT_INO, "file.txt").await?.is_some());
 
         Ok(())
     }
