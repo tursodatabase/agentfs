@@ -236,6 +236,20 @@ impl AgentFSOptions {
                     Error::InvalidUtf8Path(db_path.display().to_string())
                 })?));
             }
+
+            // Check ~/.agentfs/run/<id>/delta.db (created by `agentfs run`)
+            if let Ok(home) = std::env::var("HOME") {
+                let run_db_path = Path::new(&home)
+                    .join(".agentfs")
+                    .join("run")
+                    .join(&id_or_path)
+                    .join("delta.db");
+                if run_db_path.exists() {
+                    return Ok(Self::with_path(run_db_path.to_str().ok_or_else(|| {
+                        Error::InvalidUtf8Path(run_db_path.display().to_string())
+                    })?));
+                }
+            }
         }
 
         // Fall back to treating as a direct file path
@@ -815,6 +829,57 @@ mod tests {
         let result = AgentFSOptions::resolve("nonexistent-agent-12345");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_run_session_db() {
+        // Setup: create ~/.agentfs/run/<id>/delta.db to simulate a session created by `agentfs run`
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let session_id = "test-resolve-run-session-00000";
+        let run_dir = std::path::Path::new(&home)
+            .join(".agentfs")
+            .join("run")
+            .join(session_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let db_path = run_dir.join("delta.db");
+        std::fs::write(&db_path, b"test").unwrap();
+
+        let opts = AgentFSOptions::resolve(session_id).unwrap();
+        assert!(opts.id.is_none());
+        assert_eq!(opts.path, Some(db_path.to_string_lossy().to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&run_dir);
+    }
+
+    #[test]
+    fn test_resolve_local_db_takes_precedence_over_run_session() {
+        // Setup: create both .agentfs/<id>.db (local) and ~/.agentfs/run/<id>/delta.db (run session)
+        let session_id = "test-resolve-precedence-00000";
+
+        // Create local .agentfs/<id>.db
+        let agentfs_dir = agentfs_dir();
+        let _ = std::fs::create_dir_all(agentfs_dir);
+        let local_db_path = agentfs_dir.join(format!("{}.db", session_id));
+        std::fs::write(&local_db_path, b"local").unwrap();
+
+        // Create ~/.agentfs/run/<id>/delta.db
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let run_dir = std::path::Path::new(&home)
+            .join(".agentfs")
+            .join("run")
+            .join(session_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let run_db_path = run_dir.join("delta.db");
+        std::fs::write(&run_db_path, b"run").unwrap();
+
+        // Local should win
+        let opts = AgentFSOptions::resolve(session_id).unwrap();
+        assert_eq!(opts.path, Some(local_db_path.to_string_lossy().to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&local_db_path);
+        let _ = std::fs::remove_dir_all(&run_dir);
     }
 
     #[test]
