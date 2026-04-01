@@ -9,6 +9,7 @@ export type FsErrorCode =
   | 'ENOTEMPTY' // Directory not empty
   | 'EPERM'     // Operation not permitted
   | 'EINVAL'    // Invalid argument
+  | 'ELOOP'     // Too many levels of symbolic links
   | 'ENOSYS';   // Function not implemented (use for symlinks)
 
 /**
@@ -18,6 +19,7 @@ export type FsErrorCode =
 export type FsSyscall =
   | 'open'
   | 'stat'
+  | 'lstat'
   | 'mkdir'
   | 'rmdir'
   | 'rm'
