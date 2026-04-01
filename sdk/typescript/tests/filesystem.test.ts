@@ -1023,4 +1023,49 @@ describe("Filesystem Integration Tests", () => {
       }
     });
   });
+
+  describe("File Append Operations", () => {
+    it("should append to an existing text file", async () => {
+      await fs.writeFile("/test.txt", "Hello, ");
+      await fs.appendFile("/test.txt", "World!");
+      const content = await fs.readFile("/test.txt", "utf8");
+      expect(content).toBe("Hello, World!");
+    });
+
+    it("should create file if it does not exist", async () => {
+      await fs.appendFile("/new.txt", "brand new content");
+      const content = await fs.readFile("/new.txt", "utf8");
+      expect(content).toBe("brand new content");
+    });
+
+    it("should append binary data", async () => {
+      await fs.writeFile("/test.bin", Buffer.from([1, 2, 3]));
+      await fs.appendFile("/test.bin", Buffer.from([4, 5]));
+      const data = await fs.readFile("/test.bin") as Buffer;
+      expect(data.equals(Buffer.from([1, 2, 3, 4, 5]))).toBe(true);
+    });
+
+    it("should respect encoding option", async () => {
+      await fs.writeFile("/test.txt", "Hello");
+      await fs.appendFile("/test.txt", "V29ybGQ=", "base64"); // "World"
+      const content = await fs.readFile("/test.txt", "utf8");
+      expect(content).toBe("HelloWorld");
+    });
+
+    it("should handle multiple sequential appends", async () => {
+      await fs.appendFile("/test.txt", "A");
+      await fs.appendFile("/test.txt", "B");
+      await fs.appendFile("/test.txt", "C");
+      const content = await fs.readFile("/test.txt", "utf8");
+      expect(content).toBe("ABC");
+    });
+
+    it("should throw EISDIR when appending to a directory", async () => {
+      await fs.mkdir("/dir");
+      await expect(fs.appendFile("/dir", "data")).rejects.toMatchObject({
+        code: "EISDIR",
+      });
+    });
+
+  });
 });

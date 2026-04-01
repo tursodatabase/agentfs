@@ -607,6 +607,45 @@ export class AgentFS implements FileSystem {
     });
   }
 
+  private writeDataAtOffset(ino: number, offset: number, data: Buffer): void {
+    const startChunk = Math.floor(offset / this.chunkSize);
+    const endChunk = Math.floor((offset + data.length - 1) / this.chunkSize);
+
+    for (let chunkIdx = startChunk; chunkIdx <= endChunk; chunkIdx++) {
+      const chunkStart = chunkIdx * this.chunkSize;
+      const chunkEnd = chunkStart + this.chunkSize;
+
+      const dataStart = Math.max(0, chunkStart - offset);
+      const dataEnd = Math.min(data.length, chunkEnd - offset);
+      const writeOffset = Math.max(0, offset - chunkStart);
+
+      const existingRows = this.storage.sql.exec<{ data: ArrayBuffer }>(
+        'SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?',
+        ino, chunkIdx
+      ).toArray();
+
+      let chunkData: Buffer;
+      if (existingRows.length > 0) {
+        chunkData = Buffer.from(existingRows[0].data);
+        if (writeOffset + (dataEnd - dataStart) > chunkData.length) {
+          const newChunk = Buffer.alloc(writeOffset + (dataEnd - dataStart));
+          chunkData.copy(newChunk);
+          chunkData = newChunk;
+        }
+      } else {
+        chunkData = Buffer.alloc(writeOffset + (dataEnd - dataStart));
+      }
+
+      data.copy(chunkData, writeOffset, dataStart, dataEnd);
+
+      this.storage.sql.exec(
+        `INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)
+         ON CONFLICT(ino, chunk_index) DO UPDATE SET data = excluded.data`,
+        ino, chunkIdx, chunkData
+      );
+    }
+  }
+
   private updateFileContent(ino: number, buffer: Buffer): void {
     const now = Math.floor(Date.now() / 1000);
 
@@ -628,6 +667,73 @@ export class AgentFS implements FileSystem {
       'UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?',
       buffer.length, now, ino
     );
+  }
+
+  async appendFile(
+    path: string,
+    content: string | Buffer,
+    options?: BufferEncoding | { encoding?: BufferEncoding }
+  ): Promise<void> {
+    const encoding = typeof options === 'string'
+      ? options
+      : options?.encoding;
+
+    const buffer = typeof content === 'string'
+      ? Buffer.from(content, encoding ?? 'utf8')
+      : content;
+
+    if (buffer.length === 0) {
+      return;
+    }
+
+    this.storage.transactionSync(() => {
+      this.ensureParentDirs(path);
+
+      let ino = this.resolvePath(path);
+      const normalizedPath = this.normalizePath(path);
+
+      if (ino !== null) {
+        const mode = this.getInodeMode(ino);
+        if (mode !== null && (mode & S_IFMT) === S_IFDIR) {
+          throw createFsError({
+            code: 'EISDIR',
+            syscall: 'open',
+            path: normalizedPath,
+            message: 'illegal operation on a directory',
+          });
+        }
+      } else {
+        const parent = this.resolveParent(path);
+        if (!parent) {
+          throw createFsError({
+            code: 'ENOENT',
+            syscall: 'open',
+            path: normalizedPath,
+            message: 'no such file or directory',
+          });
+        }
+
+        ino = this.createInode(DEFAULT_FILE_MODE);
+        this.createDentry(parent.parentIno, parent.name, ino);
+      }
+
+      // Get current file size and write at the end
+      const sizeRow = this.storage.sql.exec<{ size: number }>(
+        'SELECT size FROM fs_inode WHERE ino = ?',
+        ino
+      ).toArray()[0];
+      const currentSize = sizeRow?.size ?? 0;
+
+      // Write data at offset=currentSize (true append, no read-modify-write)
+      this.writeDataAtOffset(ino, currentSize, buffer);
+
+      const newSize = currentSize + buffer.length;
+      const now = Math.floor(Date.now() / 1000);
+      this.storage.sql.exec(
+        'UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?',
+        newSize, now, ino
+      );
+    });
   }
 
   async readFile(path: string): Promise<Buffer>;
