@@ -32,6 +32,28 @@ pub fn agentfs_dir() -> &'static std::path::Path {
     std::path::Path::new(".agentfs")
 }
 
+/// Returns the user's home directory path.
+///
+/// Checks the `HOME` environment variable first (works on all platforms).
+/// On Windows, falls back to `USERPROFILE` if `HOME` is not set.
+/// Returns `None` if neither variable is set or if the value is empty.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty())
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
+        .map(PathBuf::from)
+}
+
 /// Information about a mounted agentfs filesystem
 #[derive(Debug, Clone)]
 pub struct Mount {
@@ -222,6 +244,11 @@ impl AgentFSOptions {
     ///
     /// Returns an error if neither an agent nor a file exists.
     pub fn resolve(id_or_path: impl Into<String>) -> Result<Self> {
+        Self::resolve_with_home(id_or_path, home_dir().as_deref())
+    }
+
+    /// Internal implementation that accepts an explicit home directory for testability.
+    fn resolve_with_home(id_or_path: impl Into<String>, home: Option<&Path>) -> Result<Self> {
         let id_or_path = id_or_path.into();
 
         if id_or_path == ":memory:" {
@@ -235,6 +262,20 @@ impl AgentFSOptions {
                 return Ok(Self::with_path(db_path.to_str().ok_or_else(|| {
                     Error::InvalidUtf8Path(db_path.display().to_string())
                 })?));
+            }
+
+            // Check ~/.agentfs/run/<id>/delta.db (created by `agentfs run`)
+            if let Some(home) = home {
+                let run_db_path = home
+                    .join(".agentfs")
+                    .join("run")
+                    .join(&id_or_path)
+                    .join("delta.db");
+                if run_db_path.exists() {
+                    return Ok(Self::with_path(run_db_path.to_str().ok_or_else(|| {
+                        Error::InvalidUtf8Path(run_db_path.display().to_string())
+                    })?));
+                }
             }
         }
 
@@ -815,6 +856,66 @@ mod tests {
         let result = AgentFSOptions::resolve("nonexistent-agent-12345");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_home_dir_returns_some() {
+        // On any CI or developer machine, at least HOME (Unix) or USERPROFILE (Windows) is set
+        let home = home_dir();
+        assert!(home.is_some(), "home_dir() should return Some on a normal system");
+        assert!(!home.unwrap().as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_resolve_run_session_db() {
+        // Use a temp directory as a fake home to avoid touching the real home
+        let fake_home = tempfile::tempdir().unwrap();
+        let session_id = "test-resolve-run-session-00000";
+        let run_dir = fake_home
+            .path()
+            .join(".agentfs")
+            .join("run")
+            .join(session_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let db_path = run_dir.join("delta.db");
+        std::fs::write(&db_path, b"test").unwrap();
+
+        let opts =
+            AgentFSOptions::resolve_with_home(session_id, Some(fake_home.path())).unwrap();
+        assert!(opts.id.is_none());
+        assert_eq!(opts.path, Some(db_path.to_string_lossy().to_string()));
+        // TempDir drops here, cleaning up automatically
+    }
+
+    #[test]
+    fn test_resolve_local_db_takes_precedence_over_run_session() {
+        // Setup: create both .agentfs/<id>.db (local) and ~/.agentfs/run/<id>/delta.db (run session)
+        let session_id = "test-resolve-precedence-00000";
+
+        // Create local .agentfs/<id>.db
+        let agentfs_dir = agentfs_dir();
+        let _ = std::fs::create_dir_all(agentfs_dir);
+        let local_db_path = agentfs_dir.join(format!("{}.db", session_id));
+        std::fs::write(&local_db_path, b"local").unwrap();
+
+        // Create ~/.agentfs/run/<id>/delta.db using a fake home
+        let fake_home = tempfile::tempdir().unwrap();
+        let run_dir = fake_home
+            .path()
+            .join(".agentfs")
+            .join("run")
+            .join(session_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let run_db_path = run_dir.join("delta.db");
+        std::fs::write(&run_db_path, b"run").unwrap();
+
+        // Local should win
+        let opts =
+            AgentFSOptions::resolve_with_home(session_id, Some(fake_home.path())).unwrap();
+        assert_eq!(opts.path, Some(local_db_path.to_string_lossy().to_string()));
+
+        // Manual cleanup for the local db (the run dir is cleaned by TempDir)
+        let _ = std::fs::remove_file(&local_db_path);
     }
 
     #[test]
