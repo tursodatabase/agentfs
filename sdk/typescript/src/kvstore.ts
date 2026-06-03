@@ -39,7 +39,7 @@ export class KvStore {
     const serializedValue = JSON.stringify(value);
 
     // Use prepared statement to insert or update
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       INSERT INTO kv_store (key, value, updated_at)
       VALUES (?, ?, unixepoch())
       ON CONFLICT(key) DO UPDATE SET
@@ -51,7 +51,7 @@ export class KvStore {
   }
 
   async get<T = any>(key: string): Promise<T | undefined> {
-    const stmt = this.db.prepare(`SELECT value FROM kv_store WHERE key = ?`);
+    const stmt = await this.db.prepare(`SELECT value FROM kv_store WHERE key = ?`);
     const row = await stmt.get(key) as { value: string } | undefined;
 
     if (!row) {
@@ -63,14 +63,14 @@ export class KvStore {
   }
 
   async list(prefix: string): Promise<{ key: string, value: any }[]> {
-    const stmt = this.db.prepare(`SELECT key, value FROM kv_store WHERE key LIKE ? ESCAPE '\\'`);
+    const stmt = await this.db.prepare(`SELECT key, value FROM kv_store WHERE key LIKE ? ESCAPE '\\'`);
     const escaped = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_');
     const rows = await stmt.all(escaped + '%') as { key: string, value: string }[];
     return rows.map(r => ({ key: r.key, value: JSON.parse(r.value) }));
   }
 
   async delete(key: string): Promise<void> {
-    const stmt = this.db.prepare(`DELETE FROM kv_store WHERE key = ?`);
+    const stmt = await this.db.prepare(`DELETE FROM kv_store WHERE key = ?`);
     await stmt.run(key);
   }
 }

@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "pyturso==0.4.4",
+    "pyturso==0.6.1",
 ]
 
 [dependency-groups]

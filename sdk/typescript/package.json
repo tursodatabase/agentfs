@@ -50,7 +50,7 @@
     "url": "https://github.com/tursodatabase/agentfs"
   },
   "devDependencies": {
-    "@tursodatabase/database-wasm": "^0.4.0-pre.18",
+    "@tursodatabase/database-wasm": "^0.6.1",
     "@tursodatabase/serverless": "^0.2.4",
     "@types/node": "^20.0.0",
     "@vitest/browser": "^4.0.16",
@@ -73,8 +73,8 @@
     }
   },
   "dependencies": {
-    "@tursodatabase/database": "^0.4.0-pre.18",
-    "@tursodatabase/database-common": "^0.4.0-pre.18",
+    "@tursodatabase/database": "^0.6.1",
+    "@tursodatabase/database-common": "^0.6.1",
     "buffer": "^6.0.3"
   },
   "files": [
