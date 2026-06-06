@@ -31,6 +31,9 @@ dependencies = [
     "pyturso==0.4.4",
 ]
 
+[project.optional-dependencies]
+re2 = ["google-re2>=1.1"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.0",
