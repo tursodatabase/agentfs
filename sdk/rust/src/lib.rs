@@ -19,9 +19,9 @@ pub use turso::sync::{DatabaseSyncStats, PartialBootstrapStrategy, PartialSyncOp
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use filesystem::HostFS;
 pub use filesystem::{
-    BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, OverlayFS, Stats, TimeChange,
-    DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT,
-    S_IFREG, S_IFSOCK,
+    BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, FsIgnore, OverlayFS, Stats,
+    TimeChange, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK,
+    S_IFMT, S_IFREG, S_IFSOCK,
 };
 pub use kvstore::KvStore;
 pub use schema::{SchemaVersion, AGENTFS_SCHEMA_VERSION};
