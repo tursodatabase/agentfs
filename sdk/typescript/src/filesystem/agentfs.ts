@@ -498,6 +498,58 @@ export class AgentFS implements FileSystem {
     }
   }
 
+  async appendFile(
+    path: string,
+    content: string | Buffer,
+    options?: BufferEncoding | { encoding?: BufferEncoding }
+  ): Promise<void> {
+    const encoding = typeof options === 'string'
+      ? options
+      : options?.encoding;
+
+    const buffer = typeof content === 'string'
+      ? this.bufferCtor.from(content, encoding ?? 'utf8')
+      : content;
+
+    if (buffer.length === 0) {
+      return;
+    }
+
+    await this.ensureParentDirs(path);
+
+    let ino = await this.resolvePath(path);
+    const normalizedPath = this.normalizePath(path);
+
+    if (ino !== null) {
+      await assertWritableExistingInode(this.db, ino, 'open', normalizedPath);
+    } else {
+      const parent = await this.resolveParent(path);
+      if (!parent) {
+        throw createFsError({
+          code: 'ENOENT',
+          syscall: 'open',
+          path: normalizedPath,
+          message: 'no such file or directory',
+        });
+      }
+
+      await assertInodeIsDirectory(this.db, parent.parentIno, 'open', normalizedPath);
+
+      ino = await this.createInode(DEFAULT_FILE_MODE);
+      await this.createDentry(parent.parentIno, parent.name, ino);
+    }
+
+    // Get current file size
+    const sizeStmt = this.db.prepare('SELECT size FROM fs_inode WHERE ino = ?');
+    const sizeRow = await sizeStmt.get(ino) as { size: number } | undefined;
+    const currentSize = sizeRow?.size ?? 0;
+
+    // Write data at offset=currentSize (true append, no read-modify-write)
+    // pwrite handles writing chunks and updating size/mtime atomically
+    const file = new AgentFSFile(this.db, this.bufferCtor, ino, this.chunkSize);
+    await file.pwrite(currentSize, buffer);
+  }
+
   private async updateFileContent(
     ino: number,
     content: string | Buffer,

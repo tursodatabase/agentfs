@@ -248,21 +248,10 @@ export class AgentFsWrapper implements IFileSystem {
   ): Promise<void> {
     const normalized = this.normalizePath(path);
     const encoding = getEncoding(options);
-    const newBuffer = toBuffer(content, encoding);
-
-    // Try to read existing content
-    let existingBuffer: Uint8Array;
-    try {
-      existingBuffer = await this.readFileBuffer(normalized);
-    } catch {
-      existingBuffer = new Uint8Array(0);
-    }
-
-    const combined = new Uint8Array(existingBuffer.length + newBuffer.length);
-    combined.set(existingBuffer);
-    combined.set(newBuffer, existingBuffer.length);
-
-    await this.writeFile(normalized, combined);
+    const buffer = toBuffer(content, encoding);
+    const agentPath = this.toAgentPath(normalized);
+    // Delegate to the underlying FileSystem's native appendFile
+    await this.agentFs.appendFile(agentPath, Buffer.from(buffer));
   }
 
   async exists(path: string): Promise<boolean> {
