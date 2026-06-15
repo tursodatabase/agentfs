@@ -26,6 +26,7 @@ import {
   type FileHandle,
   type FileSystem,
 } from './interface.js';
+import {parsePdfBuffer} from "./utils/PdfHelper.js";
 
 const DEFAULT_CHUNK_SIZE = 4096;
 
@@ -467,6 +468,8 @@ export class AgentFS implements FileSystem {
     content: string | Buffer,
     options?: BufferEncoding | { encoding?: BufferEncoding }
   ): Promise<void> {
+
+
     await this.ensureParentDirs(path);
 
     const ino = await this.resolvePath(path);
@@ -495,6 +498,35 @@ export class AgentFS implements FileSystem {
       const fileIno = await this.createInode(DEFAULT_FILE_MODE);
       await this.createDentry(parent.parentIno, parent.name, fileIno);
       await this.updateFileContent(fileIno, content, encoding);
+      await this.convertPdfToMarkdown(normalizedPath, content, encoding);
+
+    }
+  }
+
+  private async convertPdfToMarkdown(
+      normalizedPath: string,
+      content: string | Buffer,
+      encoding?: BufferEncoding
+  ) {
+    if (/\.pdf$/i.test(normalizedPath)) {
+      try {
+        const buffer = typeof content === "string"
+            ? this.bufferCtor.from(content, encoding ?? "utf8")
+            : content;
+
+        const text = await parsePdfBuffer(buffer);
+        const mdPath = normalizedPath.replace(/\.pdf$/i, ".md");
+
+        await this.writeFile(mdPath, this.bufferCtor.from(text, "utf8"));
+      } catch (err) {
+        console.error(`Failed to parse PDF: ${normalizedPath}`, err);
+        throw createFsError({
+          code: 'ECFILE',
+          syscall: 'write',
+          path: normalizedPath,
+          message: 'Failed to parse PDF',
+        });
+      }
     }
   }
 
