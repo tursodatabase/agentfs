@@ -1313,23 +1313,22 @@ pub async fn nfsproc3_write(
         }
     };
 
-    // Check write permission
-    if !permissions::can_write(&context.auth, &attr) {
-        debug!("write permission denied for uid={}", context.auth.uid);
-        let pre_obj_attr = nfs::pre_op_attr::attributes(nfs::wcc_attr {
-            size: attr.size,
-            mtime: attr.mtime,
-            ctime: attr.ctime,
-        });
-        make_success_reply(xid).serialize(output)?;
-        nfs::nfsstat3::NFS3ERR_ACCES.serialize(output)?;
-        nfs::wcc_data {
-            before: pre_obj_attr,
-            after: nfs::post_op_attr::attributes(attr),
-        }
-        .serialize(output)?;
-        return Ok(());
-    }
+    // Do NOT gate WRITE on the file's current mode bits. NFSv3 is stateless and
+    // has no OPEN procedure, so the server never sees the open(2) that authorized
+    // this descriptor. POSIX checks write permission once at open time; a later
+    // write(2)/fsync(2) on an already-open writable fd must succeed regardless of
+    // the file's mode (e.g. git creates loose objects mode 0444 via
+    // git_mkstemp_mode, writes, then fsyncs in close_loose_object()). Returning
+    // NFS3ERR_ACCES here surfaced as "Permission denied" on fsync/close.
+    //
+    // Permission enforcement here belongs to the NFS client kernel, not this
+    // WRITE handler: the client performs the POSIX open-time check before it
+    // hands back a writable fd. The server's ACCESS procedure
+    // (permissions::compute_access) exposes the file's permission bits so a
+    // client *may* pre-check, but per RFC 1813 ACCESS is advisory — clients are
+    // not required to call it and it does not gate later WRITEs — so it is not a
+    // server-side enforcement point. We therefore perform no mode-bit check on
+    // WRITE, matching upstream nfsserve.
 
     let pre_obj_attr = nfs::pre_op_attr::attributes(nfs::wcc_attr {
         size: attr.size,
@@ -1848,6 +1847,7 @@ pub async fn nfsproc3_setattr(
                 make_success_reply(xid).serialize(output)?;
                 nfs::nfsstat3::NFS3ERR_NOT_SYNC.serialize(output)?;
                 nfs::wcc_data::default().serialize(output)?;
+                return Ok(());
             }
         }
     }
@@ -2996,3 +2996,11 @@ pub async fn nfsproc3_mknod(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "nfs_handlers_write_perm_test.rs"]
+mod nfs_handlers_write_perm_test;
+
+#[cfg(test)]
+#[path = "nfs_handlers_setattr_guard_test.rs"]
+mod nfs_handlers_setattr_guard_test;
