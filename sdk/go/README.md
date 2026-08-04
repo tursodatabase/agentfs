@@ -27,7 +27,7 @@ func main() {
 
 	// Open or create an AgentFS database
 	afs, err := agentfs.Open(ctx, agentfs.AgentFSOptions{
-		ID: "my-agent", // Creates ~/.agentfs/my-agent.db
+		ID: "my-agent", // Creates .agentfs/my-agent.db
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -124,7 +124,7 @@ func main() {
 func Open(ctx context.Context, opts AgentFSOptions) (*AgentFS, error)
 
 type AgentFSOptions struct {
-    ID        string       // Agent ID (creates ~/.agentfs/{id}.db)
+    ID        string       // Agent ID (creates .agentfs/{id}.db)
     Path      string       // Explicit database path (takes precedence)
     ChunkSize int          // Chunk size for file data (default: 4096)
     Pool      PoolOptions  // Connection pool configuration

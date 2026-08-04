@@ -37,11 +37,15 @@ func TestOpen(t *testing.T) {
 	})
 
 	t.Run("with ID", func(t *testing.T) {
-		// Create a temp home directory
-		tmpHome := t.TempDir()
-		oldHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", oldHome)
+		tmpDir := t.TempDir()
+		oldWorkingDir, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd failed: %v", err)
+		}
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("Chdir failed: %v", err)
+		}
+		defer os.Chdir(oldWorkingDir)
 
 		afs, err := Open(ctx, AgentFSOptions{ID: "test-agent"})
 		if err != nil {
@@ -49,9 +53,12 @@ func TestOpen(t *testing.T) {
 		}
 		defer afs.Close()
 
-		expectedPath := filepath.Join(tmpHome, ".agentfs", "test-agent.db")
+		expectedPath := filepath.Join(".agentfs", "test-agent.db")
 		if afs.Path() != expectedPath {
 			t.Errorf("Path() = %q, want %q", afs.Path(), expectedPath)
+		}
+		if _, err := os.Stat(expectedPath); err != nil {
+			t.Errorf("database was not created in the working directory: %v", err)
 		}
 	})
 

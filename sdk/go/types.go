@@ -8,7 +8,7 @@ import (
 // AgentFSOptions configures how AgentFS opens or creates a database
 type AgentFSOptions struct {
 	// ID is the agent identifier. If provided without Path, the database
-	// will be stored at ~/.agentfs/{id}.db
+	// will be stored at .agentfs/{id}.db
 	// Must match pattern: ^[a-zA-Z0-9_-]+$
 	ID string
 
