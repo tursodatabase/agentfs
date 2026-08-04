@@ -48,7 +48,7 @@ var validIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // Open creates or opens an AgentFS database.
 //
 // If opts.Path is provided, it is used directly as the database path.
-// If opts.ID is provided (without Path), the database is stored at ~/.agentfs/{id}.db
+// If opts.ID is provided (without Path), the database is stored at .agentfs/{id}.db
 // At least one of Path or ID must be provided.
 func Open(ctx context.Context, opts AgentFSOptions) (*AgentFS, error) {
 	dbPath, err := resolveDBPath(opts)
@@ -246,13 +246,9 @@ func resolveDBPath(opts AgentFSOptions) (string, error) {
 		return "", fmt.Errorf("invalid agent ID: must match pattern %s", validIDPattern.String())
 	}
 
-	// Default to ~/.agentfs/{id}.db
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	return filepath.Join(home, ".agentfs", opts.ID+".db"), nil
+	// Default to .agentfs/{id}.db in the current working directory,
+	// matching the other SDKs and the CLI.
+	return filepath.Join(".agentfs", opts.ID+".db"), nil
 }
 
 // initSchema creates all tables and indexes if they don't exist
