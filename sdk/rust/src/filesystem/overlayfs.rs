@@ -969,8 +969,7 @@ impl FileSystem for OverlayFS {
                 // open (O_RDONLY) is served directly from the base layer, which
                 // avoids materialising the whole file into the delta on reads
                 // (e.g. grep/cat exploring the tree).
-                let is_write =
-                    (flags & libc::O_WRONLY != 0) || (flags & libc::O_RDWR != 0);
+                let is_write = (flags & libc::O_WRONLY != 0) || (flags & libc::O_RDWR != 0);
                 if is_write {
                     self.copy_up_and_update_mapping(ino, &info).await?
                 } else {
