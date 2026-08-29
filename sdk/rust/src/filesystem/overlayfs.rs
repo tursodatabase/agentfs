@@ -964,7 +964,22 @@ impl FileSystem for OverlayFS {
 
         let delta_ino = match info.layer {
             Layer::Delta => info.underlying_ino,
-            Layer::Base => self.copy_up_and_update_mapping(ino, &info).await?,
+            Layer::Base => {
+                // Only copy up when the caller intends to write. A read-only
+                // open (O_RDONLY) is served directly from the base layer, which
+                // avoids materialising the whole file into the delta on reads
+                // (e.g. grep/cat exploring the tree).
+                let is_write = (flags & libc::O_WRONLY != 0) || (flags & libc::O_RDWR != 0);
+                if is_write {
+                    self.copy_up_and_update_mapping(ino, &info).await?
+                } else {
+                    // Pass O_RDONLY (not the caller flags): the base reopens the
+                    // inode through a /proc/self/fd symlink, so flags like
+                    // O_NOFOLLOW (set by cp/rsync) would fail with ELOOP. We only
+                    // need read access here, matching copy_up's base open.
+                    return self.base.open(info.underlying_ino, libc::O_RDONLY).await;
+                }
+            }
         };
 
         FileSystem::open(&self.delta, delta_ino, flags).await
@@ -1355,6 +1370,57 @@ mod tests {
         // Lookup file from base
         let stats = overlay.lookup(ROOT_INO, "base.txt").await?.unwrap();
         assert!(stats.is_file());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overlay_read_only_open_does_not_copy_up() -> Result<()> {
+        let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
+
+        let stats = overlay.lookup(ROOT_INO, "base.txt").await?.unwrap();
+        let file = overlay.open(stats.ino, libc::O_RDONLY).await?;
+
+        assert_eq!(file.pread(0, 100).await?, b"base content");
+        assert!(
+            FileSystem::lookup(&overlay.delta, ROOT_INO, "base.txt")
+                .await?
+                .is_none(),
+            "a read-only open must not materialize the base file in the delta"
+        );
+        assert!(
+            overlay.origin_map.read().unwrap().is_empty(),
+            "a read-only open must not create an origin mapping"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overlay_read_write_open_copies_up() -> Result<()> {
+        let (overlay, base_dir, _delta_dir) = create_test_overlay().await?;
+
+        let stats = overlay.lookup(ROOT_INO, "base.txt").await?.unwrap();
+        let file = overlay.open(stats.ino, libc::O_RDWR).await?;
+        file.pwrite(0, b"modified content").await?;
+
+        assert_eq!(
+            std::fs::read(base_dir.path().join("base.txt"))?,
+            b"base content",
+            "copy-up must leave the base file unchanged"
+        );
+        assert_eq!(file.pread(0, 100).await?, b"modified content");
+        assert!(
+            FileSystem::lookup(&overlay.delta, ROOT_INO, "base.txt")
+                .await?
+                .is_some(),
+            "a read-write open must materialize the base file in the delta"
+        );
+        assert_eq!(
+            overlay.origin_map.read().unwrap().len(),
+            1,
+            "copy-up must record the base-to-delta origin mapping"
+        );
 
         Ok(())
     }
