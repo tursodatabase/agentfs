@@ -49,7 +49,7 @@ class AgentFSFile implements FileHandle {
     const startChunk = Math.floor(offset / this.chunkSize);
     const endChunk = Math.floor((offset + size - 1) / this.chunkSize);
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT chunk_index, data FROM fs_data
       WHERE ino = ? AND chunk_index >= ? AND chunk_index <= ?
       ORDER BY chunk_index ASC
@@ -83,7 +83,7 @@ class AgentFSFile implements FileHandle {
       return;
     }
 
-    const sizeStmt = this.db.prepare('SELECT size FROM fs_inode WHERE ino = ?');
+    const sizeStmt = await this.db.prepare('SELECT size FROM fs_inode WHERE ino = ?');
     const sizeRow = await sizeStmt.get(this.ino) as { size: number } | undefined;
     const currentSize = sizeRow?.size ?? 0;
 
@@ -96,7 +96,7 @@ class AgentFSFile implements FileHandle {
 
     const newSize = Math.max(currentSize, offset + data.length);
     const now = Math.floor(Date.now() / 1000);
-    const updateStmt = this.db.prepare('UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?');
+    const updateStmt = await this.db.prepare('UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?');
     await updateStmt.run(newSize, now, this.ino);
   }
 
@@ -112,7 +112,7 @@ class AgentFSFile implements FileHandle {
       const dataEnd = Math.min(data.length, chunkEnd - offset);
       const writeOffset = Math.max(0, offset - chunkStart);
 
-      const selectStmt = this.db.prepare('SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?');
+      const selectStmt = await this.db.prepare('SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?');
       const existingRow = await selectStmt.get(this.ino, chunkIdx) as { data: Buffer } | undefined;
 
       let chunkData: Buffer;
@@ -129,7 +129,7 @@ class AgentFSFile implements FileHandle {
 
       data.copy(chunkData, writeOffset, dataStart, dataEnd);
 
-      const upsertStmt = this.db.prepare(`
+      const upsertStmt = await this.db.prepare(`
         INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, ?, ?)
         ON CONFLICT(ino, chunk_index) DO UPDATE SET data = excluded.data
       `);
@@ -138,36 +138,36 @@ class AgentFSFile implements FileHandle {
   }
 
   async truncate(newSize: number): Promise<void> {
-    const sizeStmt = this.db.prepare('SELECT size FROM fs_inode WHERE ino = ?');
+    const sizeStmt = await this.db.prepare('SELECT size FROM fs_inode WHERE ino = ?');
     const sizeRow = await sizeStmt.get(this.ino) as { size: number } | undefined;
     const currentSize = sizeRow?.size ?? 0;
 
     await this.db.exec('BEGIN');
     try {
       if (newSize === 0) {
-        const deleteStmt = this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
+        const deleteStmt = await this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
         await deleteStmt.run(this.ino);
       } else if (newSize < currentSize) {
         const lastChunkIdx = Math.floor((newSize - 1) / this.chunkSize);
 
-        const deleteStmt = this.db.prepare('DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?');
+        const deleteStmt = await this.db.prepare('DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?');
         await deleteStmt.run(this.ino, lastChunkIdx);
 
         const offsetInChunk = newSize % this.chunkSize;
         if (offsetInChunk > 0) {
-          const selectStmt = this.db.prepare('SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?');
+          const selectStmt = await this.db.prepare('SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?');
           const row = await selectStmt.get(this.ino, lastChunkIdx) as { data: Buffer } | undefined;
 
           if (row && row.data.length > offsetInChunk) {
             const truncatedChunk = row.data.subarray(0, offsetInChunk);
-            const updateStmt = this.db.prepare('UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?');
+            const updateStmt = await this.db.prepare('UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?');
             await updateStmt.run(truncatedChunk, this.ino, lastChunkIdx);
           }
         }
       }
 
       const now = Math.floor(Date.now() / 1000);
-      const updateStmt = this.db.prepare('UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?');
+      const updateStmt = await this.db.prepare('UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?');
       await updateStmt.run(newSize, now, this.ino);
 
       await this.db.exec('COMMIT');
@@ -183,7 +183,7 @@ class AgentFSFile implements FileHandle {
   }
 
   async fstat(): Promise<Stats> {
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
       FROM fs_inode WHERE ino = ?
     `);
@@ -292,12 +292,12 @@ export class AgentFS implements FileSystem {
   }
 
   private async ensureRoot(): Promise<number> {
-    const configStmt = this.db.prepare("SELECT value FROM fs_config WHERE key = 'chunk_size'");
+    const configStmt = await this.db.prepare("SELECT value FROM fs_config WHERE key = 'chunk_size'");
     const config = await configStmt.get() as { value: string } | undefined;
 
     let chunkSize: number;
     if (!config) {
-      const insertConfigStmt = this.db.prepare(`
+      const insertConfigStmt = await this.db.prepare(`
         INSERT INTO fs_config (key, value) VALUES ('chunk_size', ?)
       `);
       await insertConfigStmt.run(DEFAULT_CHUNK_SIZE.toString());
@@ -307,17 +307,17 @@ export class AgentFS implements FileSystem {
     }
 
     // Set schema version (keep in sync with AGENTFS_SCHEMA_VERSION in sdk/rust/src/schema.rs)
-    const schemaVersionStmt = this.db.prepare(`
+    const schemaVersionStmt = await this.db.prepare(`
       INSERT OR REPLACE INTO fs_config (key, value) VALUES ('schema_version', '0.4')
     `);
     await schemaVersionStmt.run();
 
-    const stmt = this.db.prepare('SELECT ino FROM fs_inode WHERE ino = ?');
+    const stmt = await this.db.prepare('SELECT ino FROM fs_inode WHERE ino = ?');
     const root = await stmt.get(this.rootIno);
 
     if (!root) {
       const now = Math.floor(Date.now() / 1000);
-      const insertStmt = this.db.prepare(`
+      const insertStmt = await this.db.prepare(`
         INSERT INTO fs_inode (ino, mode, nlink, uid, gid, size, atime, mtime, ctime)
         VALUES (?, ?, 1, 0, 0, 0, ?, ?, ?)
       `);
@@ -366,7 +366,7 @@ export class AgentFS implements FileSystem {
     let currentIno = this.rootIno;
 
     for (const name of parts) {
-      const stmt = this.db.prepare(`
+      const stmt = await this.db.prepare(`
         SELECT ino FROM fs_dentry
         WHERE parent_ino = ? AND name = ?
       `);
@@ -404,7 +404,7 @@ export class AgentFS implements FileSystem {
 
   private async createInode(mode: number, uid: number = 0, gid: number = 0): Promise<number> {
     const now = Math.floor(Date.now() / 1000);
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       INSERT INTO fs_inode (mode, uid, gid, size, atime, mtime, ctime)
       VALUES (?, ?, ?, 0, ?, ?, ?)
       RETURNING ino
@@ -414,13 +414,13 @@ export class AgentFS implements FileSystem {
   }
 
   private async createDentry(parentIno: number, name: string, ino: number): Promise<void> {
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       INSERT INTO fs_dentry (name, parent_ino, ino)
       VALUES (?, ?, ?)
     `);
     await stmt.run(name, parentIno, ino);
 
-    const updateStmt = this.db.prepare('UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?');
+    const updateStmt = await this.db.prepare('UPDATE fs_inode SET nlink = nlink + 1 WHERE ino = ?');
     await updateStmt.run(ino);
   }
 
@@ -431,7 +431,7 @@ export class AgentFS implements FileSystem {
     let currentIno = this.rootIno;
 
     for (const name of parts) {
-      const stmt = this.db.prepare(`
+      const stmt = await this.db.prepare(`
         SELECT ino FROM fs_dentry
         WHERE parent_ino = ? AND name = ?
       `);
@@ -449,13 +449,13 @@ export class AgentFS implements FileSystem {
   }
 
   private async getLinkCount(ino: number): Promise<number> {
-    const stmt = this.db.prepare('SELECT nlink FROM fs_inode WHERE ino = ?');
+    const stmt = await this.db.prepare('SELECT nlink FROM fs_inode WHERE ino = ?');
     const result = await stmt.get(ino) as { nlink: number } | undefined;
     return result?.nlink ?? 0;
   }
 
   private async getInodeMode(ino: number): Promise<number | null> {
-    const stmt = this.db.prepare('SELECT mode FROM fs_inode WHERE ino = ?');
+    const stmt = await this.db.prepare('SELECT mode FROM fs_inode WHERE ino = ?');
     const row = await stmt.get(ino) as { mode: number } | undefined;
     return row?.mode ?? null;
   }
@@ -508,11 +508,11 @@ export class AgentFS implements FileSystem {
       : content;
     const now = Math.floor(Date.now() / 1000);
 
-    const deleteStmt = this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
+    const deleteStmt = await this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
     await deleteStmt.run(ino);
 
     if (buffer.length > 0) {
-      const stmt = this.db.prepare(`
+      const stmt = await this.db.prepare(`
         INSERT INTO fs_data (ino, chunk_index, data)
         VALUES (?, ?, ?)
       `);
@@ -525,7 +525,7 @@ export class AgentFS implements FileSystem {
       }
     }
 
-    const updateStmt = this.db.prepare(`
+    const updateStmt = await this.db.prepare(`
       UPDATE fs_inode
       SET size = ?, mtime = ?
       WHERE ino = ?
@@ -548,7 +548,7 @@ export class AgentFS implements FileSystem {
 
     await assertReadableExistingInode(this.db, ino, 'open', normalizedPath);
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT data FROM fs_data
       WHERE ino = ?
       ORDER BY chunk_index ASC
@@ -564,7 +564,7 @@ export class AgentFS implements FileSystem {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const updateStmt = this.db.prepare('UPDATE fs_inode SET atime = ? WHERE ino = ?');
+    const updateStmt = await this.db.prepare('UPDATE fs_inode SET atime = ? WHERE ino = ?');
     await updateStmt.run(now, ino);
 
     if (encoding) {
@@ -578,7 +578,7 @@ export class AgentFS implements FileSystem {
 
     await assertReaddirTargetInode(this.db, ino, normalizedPath);
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT name FROM fs_dentry
       WHERE parent_ino = ?
       ORDER BY name ASC
@@ -593,7 +593,7 @@ export class AgentFS implements FileSystem {
 
     await assertReaddirTargetInode(this.db, ino, normalizedPath);
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT d.name, i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime
       FROM fs_dentry d
       JOIN fs_inode i ON d.ino = i.ino
@@ -632,7 +632,7 @@ export class AgentFS implements FileSystem {
   async stat(path: string): Promise<Stats> {
     const { normalizedPath, ino } = await this.resolvePathOrThrow(path, 'stat');
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
       FROM fs_inode
       WHERE ino = ?
@@ -721,7 +721,7 @@ export class AgentFS implements FileSystem {
       });
     }
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT 1 as one FROM fs_dentry
       WHERE parent_ino = ?
       LIMIT 1
@@ -758,21 +758,21 @@ export class AgentFS implements FileSystem {
 
     const parent = (await this.resolveParent(normalizedPath))!;
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       DELETE FROM fs_dentry
       WHERE parent_ino = ? AND name = ?
     `);
     await stmt.run(parent.parentIno, parent.name);
 
-    const decrementStmt = this.db.prepare('UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?');
+    const decrementStmt = await this.db.prepare('UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?');
     await decrementStmt.run(ino);
 
     const linkCount = await this.getLinkCount(ino);
     if (linkCount === 0) {
-      const deleteInodeStmt = this.db.prepare('DELETE FROM fs_inode WHERE ino = ?');
+      const deleteInodeStmt = await this.db.prepare('DELETE FROM fs_inode WHERE ino = ?');
       await deleteInodeStmt.run(ino);
 
-      const deleteDataStmt = this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
+      const deleteDataStmt = await this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
       await deleteDataStmt.run(ino);
     }
   }
@@ -823,7 +823,7 @@ export class AgentFS implements FileSystem {
   }
 
   private async rmDirContentsRecursive(dirIno: number): Promise<void> {
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT name, ino FROM fs_dentry
       WHERE parent_ino = ?
       ORDER BY name ASC
@@ -847,24 +847,24 @@ export class AgentFS implements FileSystem {
   }
 
   private async removeDentryAndMaybeInode(parentIno: number, name: string, ino: number): Promise<void> {
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       DELETE FROM fs_dentry
       WHERE parent_ino = ? AND name = ?
     `);
     await stmt.run(parentIno, name);
 
-    const decrementStmt = this.db.prepare('UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?');
+    const decrementStmt = await this.db.prepare('UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?');
     await decrementStmt.run(ino);
 
     const linkCount = await this.getLinkCount(ino);
     if (linkCount === 0) {
-      const deleteInodeStmt = this.db.prepare('DELETE FROM fs_inode WHERE ino = ?');
+      const deleteInodeStmt = await this.db.prepare('DELETE FROM fs_inode WHERE ino = ?');
       await deleteInodeStmt.run(ino);
 
-      const deleteDataStmt = this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
+      const deleteDataStmt = await this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
       await deleteDataStmt.run(ino);
 
-      const deleteSymlinkStmt = this.db.prepare('DELETE FROM fs_symlink WHERE ino = ?');
+      const deleteSymlinkStmt = await this.db.prepare('DELETE FROM fs_symlink WHERE ino = ?');
       await deleteSymlinkStmt.run(ino);
     }
   }
@@ -941,7 +941,7 @@ export class AgentFS implements FileSystem {
         }
 
         if (newIsDir) {
-          const stmt = this.db.prepare(`
+          const stmt = await this.db.prepare(`
             SELECT 1 as one FROM fs_dentry
             WHERE parent_ino = ?
             LIMIT 1
@@ -960,7 +960,7 @@ export class AgentFS implements FileSystem {
         await this.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno);
       }
 
-      const stmt = this.db.prepare(`
+      const stmt = await this.db.prepare(`
         UPDATE fs_dentry
         SET parent_ino = ?, name = ?
         WHERE parent_ino = ? AND name = ?
@@ -968,14 +968,14 @@ export class AgentFS implements FileSystem {
       await stmt.run(newParent.parentIno, newParent.name, oldParent.parentIno, oldParent.name);
 
       const now = Math.floor(Date.now() / 1000);
-      const updateInodeCtimeStmt = this.db.prepare(`
+      const updateInodeCtimeStmt = await this.db.prepare(`
         UPDATE fs_inode
         SET ctime = ?
         WHERE ino = ?
       `);
       await updateInodeCtimeStmt.run(now, oldIno);
 
-      const updateDirTimesStmt = this.db.prepare(`
+      const updateDirTimesStmt = await this.db.prepare(`
         UPDATE fs_inode
         SET mtime = ?, ctime = ?
         WHERE ino = ?
@@ -1008,7 +1008,7 @@ export class AgentFS implements FileSystem {
     const { ino: srcIno } = await this.resolvePathOrThrow(srcNormalized, 'copyfile');
     await assertReadableExistingInode(this.db, srcIno, 'copyfile', srcNormalized);
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT mode, uid, gid, size FROM fs_inode WHERE ino = ?
     `);
     const srcRow = await stmt.get(srcIno) as
@@ -1051,10 +1051,10 @@ export class AgentFS implements FileSystem {
           });
         }
 
-        const deleteStmt = this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
+        const deleteStmt = await this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
         await deleteStmt.run(destIno);
 
-        const copyStmt = this.db.prepare(`
+        const copyStmt = await this.db.prepare(`
           INSERT INTO fs_data (ino, chunk_index, data)
           SELECT ?, chunk_index, data
           FROM fs_data
@@ -1063,7 +1063,7 @@ export class AgentFS implements FileSystem {
         `);
         await copyStmt.run(destIno, srcIno);
 
-        const updateStmt = this.db.prepare(`
+        const updateStmt = await this.db.prepare(`
           UPDATE fs_inode
           SET mode = ?, uid = ?, gid = ?, size = ?, mtime = ?, ctime = ?
           WHERE ino = ?
@@ -1073,7 +1073,7 @@ export class AgentFS implements FileSystem {
         const destInoCreated = await this.createInode(srcRow.mode, srcRow.uid, srcRow.gid);
         await this.createDentry(destParent.parentIno, destParent.name, destInoCreated);
 
-        const copyStmt = this.db.prepare(`
+        const copyStmt = await this.db.prepare(`
           INSERT INTO fs_data (ino, chunk_index, data)
           SELECT ?, chunk_index, data
           FROM fs_data
@@ -1082,7 +1082,7 @@ export class AgentFS implements FileSystem {
         `);
         await copyStmt.run(destInoCreated, srcIno);
 
-        const updateStmt = this.db.prepare(`
+        const updateStmt = await this.db.prepare(`
           UPDATE fs_inode
           SET size = ?, mtime = ?, ctime = ?
           WHERE ino = ?
@@ -1126,10 +1126,10 @@ export class AgentFS implements FileSystem {
     const symlinkIno = await this.createInode(mode);
     await this.createDentry(parent.parentIno, parent.name, symlinkIno);
 
-    const stmt = this.db.prepare('INSERT INTO fs_symlink (ino, target) VALUES (?, ?)');
+    const stmt = await this.db.prepare('INSERT INTO fs_symlink (ino, target) VALUES (?, ?)');
     await stmt.run(symlinkIno, target);
 
-    const updateStmt = this.db.prepare('UPDATE fs_inode SET size = ? WHERE ino = ?');
+    const updateStmt = await this.db.prepare('UPDATE fs_inode SET size = ? WHERE ino = ?');
     await updateStmt.run(target.length, symlinkIno);
   }
 
@@ -1146,7 +1146,7 @@ export class AgentFS implements FileSystem {
       });
     }
 
-    const stmt = this.db.prepare('SELECT target FROM fs_symlink WHERE ino = ?');
+    const stmt = await this.db.prepare('SELECT target FROM fs_symlink WHERE ino = ?');
     const row = await stmt.get(ino) as { target: string } | undefined;
 
     if (!row) {
@@ -1175,10 +1175,10 @@ export class AgentFS implements FileSystem {
   }
 
   async statfs(): Promise<FilesystemStats> {
-    const inodeStmt = this.db.prepare('SELECT COUNT(*) as count FROM fs_inode');
+    const inodeStmt = await this.db.prepare('SELECT COUNT(*) as count FROM fs_inode');
     const inodeRow = await inodeStmt.get() as { count: number };
 
-    const bytesStmt = this.db.prepare('SELECT COALESCE(SUM(LENGTH(data)), 0) as total FROM fs_data');
+    const bytesStmt = await this.db.prepare('SELECT COALESCE(SUM(LENGTH(data)), 0) as total FROM fs_data');
     const bytesRow = await bytesStmt.get() as { total: number };
 
     return {
