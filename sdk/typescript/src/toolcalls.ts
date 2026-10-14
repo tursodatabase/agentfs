@@ -72,7 +72,7 @@ export class ToolCalls {
     const serializedParams = parameters !== undefined ? JSON.stringify(parameters) : null;
     const started_at = Math.floor(Date.now() / 1000);
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       INSERT INTO tool_calls (name, parameters, status, started_at)
       VALUES (?, ?, 'pending', ?)
       RETURNING id
@@ -90,7 +90,7 @@ export class ToolCalls {
     const completed_at = Math.floor(Date.now() / 1000);
 
     // Get the started_at time to calculate duration
-    const getStmt = this.db.prepare('SELECT started_at FROM tool_calls WHERE id = ?');
+    const getStmt = await this.db.prepare('SELECT started_at FROM tool_calls WHERE id = ?');
     const row = await getStmt.get(id) as { started_at: number } | undefined;
 
     if (!row) {
@@ -99,7 +99,7 @@ export class ToolCalls {
 
     const duration_ms = (completed_at - row.started_at) * 1000;
 
-    const updateStmt = this.db.prepare(`
+    const updateStmt = await this.db.prepare(`
       UPDATE tool_calls
       SET status = 'success', result = ?, completed_at = ?, duration_ms = ?
       WHERE id = ?
@@ -115,7 +115,7 @@ export class ToolCalls {
     const completed_at = Math.floor(Date.now() / 1000);
 
     // Get the started_at time to calculate duration
-    const getStmt = this.db.prepare('SELECT started_at FROM tool_calls WHERE id = ?');
+    const getStmt = await this.db.prepare('SELECT started_at FROM tool_calls WHERE id = ?');
     const row = await getStmt.get(id) as { started_at: number } | undefined;
 
     if (!row) {
@@ -124,7 +124,7 @@ export class ToolCalls {
 
     const duration_ms = (completed_at - row.started_at) * 1000;
 
-    const updateStmt = this.db.prepare(`
+    const updateStmt = await this.db.prepare(`
       UPDATE tool_calls
       SET status = 'error', error = ?, completed_at = ?, duration_ms = ?
       WHERE id = ?
@@ -151,7 +151,7 @@ export class ToolCalls {
     const duration_ms = (completed_at - started_at) * 1000;
     const status = error ? 'error' : 'success';
 
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       INSERT INTO tool_calls (name, parameters, result, error, status, started_at, completed_at, duration_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       RETURNING id
@@ -165,7 +165,7 @@ export class ToolCalls {
    * Get a specific tool call by ID
    */
   async get(id: number): Promise<ToolCall | undefined> {
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT * FROM tool_calls WHERE id = ?
     `);
 
@@ -182,7 +182,7 @@ export class ToolCalls {
    */
   async getByName(name: string, limit?: number): Promise<ToolCall[]> {
     const limitClause = limit !== undefined ? `LIMIT ${limit}` : '';
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT * FROM tool_calls
       WHERE name = ?
       ORDER BY started_at DESC
@@ -198,7 +198,7 @@ export class ToolCalls {
    */
   async getRecent(since: number, limit?: number): Promise<ToolCall[]> {
     const limitClause = limit !== undefined ? `LIMIT ${limit}` : '';
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT * FROM tool_calls
       WHERE started_at > ?
       ORDER BY started_at DESC
@@ -214,7 +214,7 @@ export class ToolCalls {
    * Only includes completed calls (success or failed), not pending ones
    */
   async getStats(): Promise<ToolCallStats[]> {
-    const stmt = this.db.prepare(`
+    const stmt = await this.db.prepare(`
       SELECT
         name,
         COUNT(*) as total_calls,

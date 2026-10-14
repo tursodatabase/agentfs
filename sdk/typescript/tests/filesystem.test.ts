@@ -535,7 +535,7 @@ describe("Filesystem Integration Tests", () => {
   describe("Chunk Size Boundary Tests", () => {
     // Helper function to get chunk count for an inode
     async function getChunkCount(path: string): Promise<number> {
-      const stmt = db.prepare(`
+      const stmt = await db.prepare(`
         SELECT COUNT(*) as count FROM fs_data
         WHERE ino = (SELECT ino FROM fs_dentry WHERE parent_ino = 1 AND name = ?)
       `);
@@ -543,7 +543,7 @@ describe("Filesystem Integration Tests", () => {
       const name = pathParts[pathParts.length - 1];
 
       // For simple paths, get the inode from the path
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
 
@@ -556,7 +556,7 @@ describe("Filesystem Integration Tests", () => {
         currentIno = result.ino;
       }
 
-      const countStmt = db.prepare(
+      const countStmt = await db.prepare(
         "SELECT COUNT(*) as count FROM fs_data WHERE ino = ?"
       );
       const result = (await countStmt.get(currentIno)) as { count: number };
@@ -639,7 +639,7 @@ describe("Filesystem Integration Tests", () => {
   describe("Data Integrity Tests", () => {
     async function getChunkCount(path: string): Promise<number> {
       const pathParts = path.split("/").filter((p) => p);
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
 
@@ -652,7 +652,7 @@ describe("Filesystem Integration Tests", () => {
         currentIno = result.ino;
       }
 
-      const countStmt = db.prepare(
+      const countStmt = await db.prepare(
         "SELECT COUNT(*) as count FROM fs_data WHERE ino = ?"
       );
       const result = (await countStmt.get(currentIno)) as { count: number };
@@ -724,7 +724,7 @@ describe("Filesystem Integration Tests", () => {
   describe("Edge Case Tests", () => {
     async function getChunkCount(path: string): Promise<number> {
       const pathParts = path.split("/").filter((p) => p);
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
 
@@ -737,7 +737,7 @@ describe("Filesystem Integration Tests", () => {
         currentIno = result.ino;
       }
 
-      const countStmt = db.prepare(
+      const countStmt = await db.prepare(
         "SELECT COUNT(*) as count FROM fs_data WHERE ino = ?"
       );
       const result = (await countStmt.get(currentIno)) as { count: number };
@@ -746,7 +746,7 @@ describe("Filesystem Integration Tests", () => {
 
     async function getIno(path: string): Promise<number> {
       const pathParts = path.split("/").filter((p) => p);
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
 
@@ -866,7 +866,7 @@ describe("Filesystem Integration Tests", () => {
       await fs.writeFile("/test.bin", data);
 
       const pathParts = "/test.bin".split("/").filter((p) => p);
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
       let currentIno = 1;
@@ -876,7 +876,7 @@ describe("Filesystem Integration Tests", () => {
           | undefined;
         if (result) currentIno = result.ino;
       }
-      const countStmt = db.prepare(
+      const countStmt = await db.prepare(
         "SELECT COUNT(*) as count FROM fs_data WHERE ino = ?"
       );
       const result = (await countStmt.get(currentIno)) as { count: number };
@@ -885,7 +885,7 @@ describe("Filesystem Integration Tests", () => {
 
     it("should persist chunk_size in fs_config table", async () => {
       // Query fs_config table directly
-      const stmt = db.prepare(
+      const stmt = await db.prepare(
         "SELECT value FROM fs_config WHERE key = 'chunk_size'"
       );
       const result = (await stmt.get()) as { value: string } | undefined;
@@ -904,14 +904,14 @@ describe("Filesystem Integration Tests", () => {
       const data = Buffer.alloc(chunkSize * 2);
       await fs.writeFile("/unique.txt", data);
 
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
       const result = (await lookupStmt.get(1, "unique.txt")) as { ino: number };
       const ino = result.ino;
 
       // Try to insert a duplicate chunk - should fail due to PRIMARY KEY constraint
-      const insertStmt = db.prepare(
+      const insertStmt = await db.prepare(
         "INSERT INTO fs_data (ino, chunk_index, data) VALUES (?, 0, ?)"
       );
 
@@ -930,7 +930,7 @@ describe("Filesystem Integration Tests", () => {
       }
       await fs.writeFile("/ordered.bin", data);
 
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
       const result = (await lookupStmt.get(1, "ordered.bin")) as {
@@ -939,7 +939,7 @@ describe("Filesystem Integration Tests", () => {
       const ino = result.ino;
 
       // Query chunks in order
-      const queryStmt = db.prepare(
+      const queryStmt = await db.prepare(
         "SELECT chunk_index FROM fs_data WHERE ino = ? ORDER BY chunk_index"
       );
       const rows = (await queryStmt.all(ino)) as { chunk_index: number }[];
@@ -958,7 +958,7 @@ describe("Filesystem Integration Tests", () => {
       const data = Buffer.alloc(chunkSize * 4);
       await fs.writeFile("/deleteme.txt", data);
 
-      const lookupStmt = db.prepare(`
+      const lookupStmt = await db.prepare(`
         SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
       `);
       const result = (await lookupStmt.get(1, "deleteme.txt")) as {
@@ -966,7 +966,7 @@ describe("Filesystem Integration Tests", () => {
       };
       const ino = result.ino;
 
-      const countStmt = db.prepare(
+      const countStmt = await db.prepare(
         "SELECT COUNT(*) as count FROM fs_data WHERE ino = ?"
       );
       const beforeResult = (await countStmt.get(ino)) as { count: number };
@@ -1008,11 +1008,11 @@ describe("Filesystem Integration Tests", () => {
         const expectedChunks = size === 0 ? 0 : Math.ceil(size / chunkSize);
 
         const name = path.split("/").pop()!;
-        const lookupStmt = db.prepare(`
+        const lookupStmt = await db.prepare(`
           SELECT d.ino FROM fs_dentry d WHERE d.parent_ino = ? AND d.name = ?
         `);
         const result = (await lookupStmt.get(1, name)) as { ino: number };
-        const countStmt = db.prepare(
+        const countStmt = await db.prepare(
           "SELECT COUNT(*) as count FROM fs_data WHERE ino = ?"
         );
         const countResult = (await countStmt.get(result.ino)) as {
