@@ -8,6 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned because newer nightlies break turso_core 0.8.3 (allocator_api and
+  # `branches` 0.4 using the removed `core::intrinsics::abort`) and trip clippy
+  # false positives on `#[async_trait]` code. Keep in sync with
+  # cli/rust-toolchain.toml.
+  RUST_TOOLCHAIN: nightly-2026-08-01
 
 jobs:
   test:
@@ -26,7 +31,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: nightly
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
         components: rustfmt, clippy
 
     - name: Install system dependencies
@@ -85,7 +90,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: nightly
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
 
     - name: Install system dependencies
       if: matrix.project == 'cli' && (matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest')
@@ -106,7 +111,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: nightly
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
 
     - name: Check with no default features
       run: cargo check --no-default-features
@@ -126,7 +131,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: nightly
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
 
     - name: Cache cargo registry
       uses: actions/cache@v4
