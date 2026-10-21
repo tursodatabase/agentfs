@@ -457,6 +457,90 @@ describe("Filesystem Integration Tests", () => {
         expect(content).toBe("shared content");
       });
     });
+
+    it("should handle concurrent writes that create the same parent directory", async () => {
+      await Promise.all(
+        Array.from({ length: 10 }, (_, i) =>
+          fs.writeFile(`/new-dir/file-${i}.txt`, `content ${i}`)
+        )
+      );
+
+      expect((await fs.readdir("/new-dir")).sort()).toEqual(
+        Array.from({ length: 10 }, (_, i) => `file-${i}.txt`).sort()
+      );
+    });
+
+    it("should handle concurrent overwrites of the same file", async () => {
+      const size = 3 * 4096 + 100;
+      await Promise.all(
+        Array.from({ length: 10 }, (_, i) =>
+          fs.writeFile("/same.bin", Buffer.alloc(size, 65 + i))
+        )
+      );
+
+      const data = await fs.readFile("/same.bin");
+      expect(data.length).toBe(size);
+      expect(data.every((b) => b === data[0])).toBe(true);
+      expect((await fs.stat("/same.bin")).size).toBe(size);
+    });
+  });
+
+  describe("Write Atomicity", () => {
+    // Make the Nth chunk insert fail, as if the process died part-way through a write.
+    function failOnChunkInsert(n: number): () => void {
+      const prepare = db.prepare.bind(db);
+      let inserts = 0;
+      db.prepare = ((sql: string) => {
+        const stmt = prepare(sql);
+        if (!/INSERT INTO fs_data/.test(sql)) return stmt;
+        const run = stmt.run.bind(stmt);
+        stmt.run = (async (...args: any[]) => {
+          if (++inserts === n) throw new Error("simulated failure");
+          return run(...args);
+        }) as typeof stmt.run;
+        return stmt;
+      }) as typeof db.prepare;
+      return () => {
+        db.prepare = prepare;
+      };
+    }
+
+    it("should keep the previous content when an overwrite fails part-way", async () => {
+      const original = Buffer.alloc(4 * 4096, "a");
+      await fs.writeFile("/state.bin", original);
+
+      const restore = failOnChunkInsert(3);
+      await expect(
+        fs.writeFile("/state.bin", Buffer.alloc(4 * 4096, "b"))
+      ).rejects.toThrow("simulated failure");
+      restore();
+
+      expect((await fs.readFile("/state.bin")).equals(original)).toBe(true);
+      expect((await fs.stat("/state.bin")).size).toBe(original.length);
+    });
+
+    it("should not leave a partial new file when a create fails part-way", async () => {
+      const restore = failOnChunkInsert(2);
+      await expect(
+        fs.writeFile("/fresh/state.bin", Buffer.alloc(4 * 4096, "b"))
+      ).rejects.toThrow("simulated failure");
+      restore();
+
+      await expect(fs.stat("/fresh/state.bin")).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat("/fresh")).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("should run inside a transaction opened by the caller", async () => {
+      await db.exec("BEGIN");
+      await fs.writeFile("/rolled-back.txt", "discarded");
+      await db.exec("ROLLBACK");
+      await expect(fs.stat("/rolled-back.txt")).rejects.toMatchObject({ code: "ENOENT" });
+
+      await db.exec("BEGIN");
+      await fs.writeFile("/committed.txt", "kept");
+      await db.exec("COMMIT");
+      expect(await fs.readFile("/committed.txt", "utf8")).toBe("kept");
+    });
   });
 
   describe("File System Integrity", () => {

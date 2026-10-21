@@ -29,6 +29,64 @@ import {
 
 const DEFAULT_CHUNK_SIZE = 4096;
 
+interface Transaction {
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+}
+
+const transactionQueues = new WeakMap<DatabasePromise, Promise<void>>();
+
+function isNestedTransactionError(e: unknown): boolean {
+  return e instanceof Error && /within a transaction/i.test(e.message);
+}
+
+/**
+ * Start a transaction for a multi-statement filesystem operation.
+ *
+ * All operations share one connection, so only one of them can hold a
+ * transaction at a time: concurrent callers are queued per connection
+ * instead of failing on a nested BEGIN. If the caller has already opened
+ * a transaction on the connection, the operation runs inside it and
+ * leaves COMMIT/ROLLBACK to the caller.
+ */
+async function beginTransaction(db: DatabasePromise): Promise<Transaction> {
+  const previous = transactionQueues.get(db) ?? Promise.resolve();
+  let release!: () => void;
+  transactionQueues.set(db, new Promise<void>((resolve) => { release = resolve; }));
+  await previous;
+
+  let ownsTransaction = true;
+  try {
+    await db.exec('BEGIN');
+  } catch (e) {
+    if (!isNestedTransactionError(e)) {
+      release();
+      throw e;
+    }
+    ownsTransaction = false;
+  }
+
+  let finished = false;
+  const finish = () => {
+    finished = true;
+    release();
+  };
+  return {
+    async commit() {
+      if (ownsTransaction) await db.exec('COMMIT');
+      finish();
+    },
+    async rollback() {
+      if (finished) return;
+      try {
+        if (ownsTransaction) await db.exec('ROLLBACK');
+      } finally {
+        finish();
+      }
+    },
+  };
+}
+
 /**
  * An open file handle for AgentFS.
  */
@@ -142,7 +200,7 @@ class AgentFSFile implements FileHandle {
     const sizeRow = await sizeStmt.get(this.ino) as { size: number } | undefined;
     const currentSize = sizeRow?.size ?? 0;
 
-    await this.db.exec('BEGIN');
+    const tx = await beginTransaction(this.db);
     try {
       if (newSize === 0) {
         const deleteStmt = this.db.prepare('DELETE FROM fs_data WHERE ino = ?');
@@ -170,9 +228,9 @@ class AgentFSFile implements FileHandle {
       const updateStmt = this.db.prepare('UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?');
       await updateStmt.run(newSize, now, this.ino);
 
-      await this.db.exec('COMMIT');
+      await tx.commit();
     } catch (e) {
-      await this.db.exec('ROLLBACK');
+      await tx.rollback();
       throw e;
     }
   }
@@ -463,6 +521,23 @@ export class AgentFS implements FileSystem {
   // ==================== FileSystem Interface Implementation ====================
 
   async writeFile(
+    path: string,
+    content: string | Buffer,
+    options?: BufferEncoding | { encoding?: BufferEncoding }
+  ): Promise<void> {
+    // Creating the inode, replacing the chunks and updating the size must
+    // commit together, or a crash part-way through leaves a torn file.
+    const tx = await beginTransaction(this.db);
+    try {
+      await this.writeFileContents(path, content, options);
+      await tx.commit();
+    } catch (e) {
+      await tx.rollback();
+      throw e;
+    }
+  }
+
+  private async writeFileContents(
     path: string,
     content: string | Buffer,
     options?: BufferEncoding | { encoding?: BufferEncoding }
@@ -900,7 +975,7 @@ export class AgentFS implements FileSystem {
 
     await assertInodeIsDirectory(this.db, newParent.parentIno, 'rename', newNormalized);
 
-    await this.db.exec('BEGIN');
+    const tx = await beginTransaction(this.db);
     try {
       const oldResolved = await this.resolvePathOrThrow(oldNormalized, 'rename');
       const oldIno = oldResolved.ino;
@@ -985,9 +1060,9 @@ export class AgentFS implements FileSystem {
         await updateDirTimesStmt.run(now, now, newParent.parentIno);
       }
 
-      await this.db.exec('COMMIT');
+      await tx.commit();
     } catch (e) {
-      await this.db.exec('ROLLBACK');
+      await tx.rollback();
       throw e;
     }
   }
@@ -1034,7 +1109,7 @@ export class AgentFS implements FileSystem {
     }
     await assertInodeIsDirectory(this.db, destParent.parentIno, 'copyfile', destNormalized);
 
-    await this.db.exec('BEGIN');
+    const tx = await beginTransaction(this.db);
     try {
       const now = Math.floor(Date.now() / 1000);
 
@@ -1090,9 +1165,9 @@ export class AgentFS implements FileSystem {
         await updateStmt.run(srcRow.size, now, now, destInoCreated);
       }
 
-      await this.db.exec('COMMIT');
+      await tx.commit();
     } catch (e) {
-      await this.db.exec('ROLLBACK');
+      await tx.rollback();
       throw e;
     }
   }
