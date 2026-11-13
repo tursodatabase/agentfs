@@ -37,13 +37,13 @@ pub async fn handle_exec_command(
     // Open AgentFS
     let agentfs = open_agentfs(opts).await?;
 
-    // Check for overlay configuration
-    let fs: Arc<Mutex<dyn FileSystem + Send>> = {
+    // Query base_path in a separate scope so connection is released before load
+    let base_path: Option<String> = {
         let conn = agentfs.get_connection().await?;
 
         // Check if fs_overlay_config table exists and has base_path
         let query = "SELECT value FROM fs_overlay_config WHERE key = 'base_path'";
-        let base_path: Option<String> = match conn.query(query, ()).await {
+        match conn.query(query, ()).await {
             Ok(mut rows) => {
                 if let Ok(Some(row)) = rows.next().await {
                     row.get_value(0).ok().and_then(|v| {
@@ -58,17 +58,17 @@ pub async fn handle_exec_command(
                 }
             }
             Err(_) => None,
-        };
-
-        if let Some(base_path) = base_path {
-            eprintln!("Using overlay filesystem with base: {}", base_path);
-            let hostfs = HostFS::new(&base_path)?;
-            let overlay = OverlayFS::new(Arc::new(hostfs), agentfs.fs);
-            overlay.load().await?; // Load persisted whiteouts and origin mappings
-            Arc::new(Mutex::new(overlay)) as Arc<Mutex<dyn FileSystem + Send>>
-        } else {
-            Arc::new(Mutex::new(agentfs.fs)) as Arc<Mutex<dyn FileSystem + Send>>
         }
+    }; // conn is dropped here
+
+    let fs: Arc<Mutex<dyn FileSystem + Send>> = if let Some(base_path) = base_path {
+        eprintln!("Using overlay filesystem with base: {}", base_path);
+        let hostfs = HostFS::new(&base_path)?;
+        let overlay = OverlayFS::new(Arc::new(hostfs), agentfs.fs);
+        overlay.load().await?; // Load persisted whiteouts and origin mappings
+        Arc::new(Mutex::new(overlay)) as Arc<Mutex<dyn FileSystem + Send>>
+    } else {
+        Arc::new(Mutex::new(agentfs.fs)) as Arc<Mutex<dyn FileSystem + Send>>
     };
 
     // Create a temporary directory for the mount
