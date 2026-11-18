@@ -53,6 +53,37 @@ class TestFilesystemWriteOperations:
             assert content == "new content"
             await db.close()
 
+    @pytest.mark.parametrize(
+        ("existing_file", "destination"),
+        [
+            ("/reports", "/reports/status.md"),
+            ("/reports", "/reports/daily/status.md"),
+            ("/workspace/reports", "/workspace/reports/daily/status.md"),
+        ],
+    )
+    async def test_write_rejects_file_in_parent_path(self, tmp_path, existing_file, destination):
+        db = await connect(str(tmp_path / "test.db"))
+        try:
+            await db.execute("PRAGMA unstable_capture_data_changes_conn('full')")
+            fs = await Filesystem.from_database(db)
+            await fs.write_file(existing_file, "Original report")
+            before = {}
+            for table in ("fs_inode", "fs_dentry", "fs_data"):
+                cursor = await db.execute(f"SELECT * FROM {table}")
+                before[table] = await cursor.fetchall()
+
+            with pytest.raises(ErrnoException) as exc:
+                await fs.write_file(destination, "New report")
+
+            assert exc.value.code == "ENOTDIR"
+            assert exc.value.path == destination
+            for table, rows in before.items():
+                cursor = await db.execute(f"SELECT * FROM {table}")
+                assert await cursor.fetchall() == rows
+            assert await fs.read_file(existing_file) == "Original report"
+        finally:
+            await db.close()
+
     async def test_handle_empty_file_content(self):
         """Should handle empty file content"""
         with tempfile.TemporaryDirectory() as tmpdir:

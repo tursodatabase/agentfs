@@ -300,7 +300,8 @@ class Filesystem:
 
     async def _ensure_parent_dirs(self, path: str) -> None:
         """Ensure parent directories exist"""
-        parts = self._split_path(path)
+        normalized_path = self._normalize_path(path)
+        parts = self._split_path(normalized_path)
 
         # Remove the filename, keep only directory parts
         parts = parts[:-1]
@@ -328,6 +329,7 @@ class Filesystem:
                 current_ino = dir_ino
             else:
                 current_ino = result[0]
+                await assert_inode_is_directory(self._db, current_ino, "open", normalized_path)
 
     async def _get_link_count(self, ino: int) -> int:
         """Get link count for an inode"""
